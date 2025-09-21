@@ -183,7 +183,7 @@ We welcome contributions from developers, security researchers, and privacy advo
 
 ### How to Contribute
 
-1. **🐛 Report Issues** - Found a bug or have a feature request? [Open an issue](https://github.com/larsnygard/PeerSocial/issues)
+1. **🐛 Report Issues** - Found a bug or have a feature request? [Open an issue](https://github.com/larsnygard/SnartNet/issues)
 2. **📖 Improve Documentation** - Help make our docs clearer and more comprehensive
 3. **🔧 Code Contributions** - Submit pull requests for bug fixes and new features
 4. **🔍 Security Review** - Help audit our cryptographic implementations
@@ -238,7 +238,7 @@ Security is paramount in SnartNet. We employ multiple layers of protection:
 
 If you discover a security vulnerability, please:
 1. **DO NOT** create a public issue
-2. Email security@peersocial.org with details
+2. Email security@snartnet.org with details *(placeholder address until domain provisioning completed; use GPG if sensitive)*
 3. Include steps to reproduce if possible
 4. Allow 90 days for coordinated disclosure
 
