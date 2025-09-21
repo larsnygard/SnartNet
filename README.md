@@ -1,5 +1,7 @@
 # PeerSocial
 
+This is a proposed social media platform, currently in the conceptual stage.
+
 **Verified, signed, and decentralized social media and messaging.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
