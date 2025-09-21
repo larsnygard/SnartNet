@@ -1,120 +1,212 @@
-PeerSocial: A Decentralized Social Media Protocol over Torrent Swarms 
- 
+# PeerSocial: A Decentralized Social Media Protocol over Torrent Swarms
 
-Status of This Memo 
+## Status of This Memo
 
-This memo defines an experimental protocol for decentralized social media using BitTorrent-like swarms and modern cryptographic identity. It is published for public review and discussion. Distribution of this memo is unlimited. 
+This memo defines an experimental protocol for decentralized social media using BitTorrent-like swarms and modern cryptographic identity. It is published for public review and discussion. Distribution of this memo is unlimited.
 
-1. Abstract 
-PeerSocial is a peer-to-peer social media protocol that uses torrent swarms for profile and content distribution, cryptographic keys for identity and trust, and a Ring of Trust model for profile recovery. It supports scalable post propagation, encrypted messaging, and mobile optimization via decentralized push-like mechanisms. This specification incorporates elliptic curve cryptography, hybrid encryption, and forward secrecy to ensure secure and efficient communication. 
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119 and RFC 8174 when, and only when, they appear in all capitals.
 
-2. Terminology 
-Peer: A node participating in the PeerSocial network. 
-Profile Torrent: A torrent containing a user's public identity and content. 
-Post: A signed message or media item shared via torrent. 
-Ring of Trust: A set of trusted peers authorized to verify or recover a profile. 
-Notification Torrent: A lightweight torrent used to signal updates or messages. 
-Swarm: A group of peers sharing a specific torrent. 
-Magnet URI: A content-addressable link used for torrent discovery. 
+## 1. Abstract
 
-3. Protocol Overview 
-PeerSocial operates as a fully decentralized protocol with the following components: 
+PeerSocial is a peer-to-peer social media protocol that uses torrent swarms for profile and content distribution, cryptographic keys for identity and trust, and a Ring of Trust model for profile recovery. It supports scalable post propagation, encrypted messaging, and mobile optimization via decentralized push-like mechanisms. This specification incorporates elliptic curve cryptography, hybrid encryption, and forward secrecy to ensure secure and efficient communication.
 
-Identity: Ed25519 keypair per user. 
-Profile: Signed metadata and content distributed via torrent. 
-Trust: Ring of Trust for verification and recovery. 
-Messaging: Encrypted direct and group communication using hybrid encryption. 
-Discovery: DHT and magnet URIs for peer/content lookup. 
-Mobile Optimization: Push-like messaging via relay and notification torrents. 
+## 2. Terminology
 
-Identity and Profile Format 
+- **Peer**: A node participating in the PeerSocial network.
+- **Profile Torrent**: A torrent containing a user's public identity and content.
+- **Post**: A signed message or media item shared via torrent.
+- **Ring of Trust**: A set of trusted peers authorized to verify or recover a profile.
+- **Notification Torrent**: A lightweight torrent used to signal updates or messages.
+- **Swarm**: A group of peers sharing a specific torrent.
+- **Magnet URI**: A content-addressable link used for torrent discovery.
 
-5.1 Keypair 
-Each user generates an Ed25519 keypair: 
-public_key.asc: Shared publicly. 
-private_key.asc: Stored securely on device. 
+## 3. Protocol Overview
 
-5.2 Profile Torrent Structure 
-profile.torrent/ ├── profile.json ├── public_key.asc ├── contacts.json ├── posts/ │ ├── post1.md │ ├── post2.md ├── signature.asc 
-profile.json: Contains username, avatar hash, bio, etc. 
-contacts.json: List of trusted public keys and trust levels. 
-signature.asc: Signed hash of all profile contents using Ed25519. 
-Trust and Recovery 
+PeerSocial operates as a fully decentralized protocol with the following components:
 
-6.1 Ring of Trust 
-Defined in contacts.json.. 
-Peers can verify profile integrity. 
-Quorum-based recovery: If a private key is lost, a majority of trusted peers can re-sign a new profile. 
+- **Identity**: Ed25519 keypair per user.
+- **Profile**: Signed metadata and content distributed via torrent.
+- **Trust**: Ring of Trust for verification and recovery.
+- **Messaging**: Encrypted direct and group communication using hybrid encryption.
+- **Discovery**: DHT and magnet URIs for peer/content lookup.
+- **Mobile Optimization**: Push-like messaging via relay and notification torrents.
 
-6.2 Revocation 
-Revocation certificates can be issued and signed by the Ring of Trust. 
-Clients must check for revocation before accepting profile updates. 
+## 4. Identity and Profile Format
 
-Post Propagation 
+### 4.1 Keypair
 
-7.1 Post Format 
-Each post is a signed file: 
-{ "author": "<Ed25519 fingerprint>", "timestamp": "<ISO 8601>", "content": "<Markdown or JSON>", "signature": "<Ed25519 signature>" } 
+Each user generates an Ed25519 keypair:
+- `public_key.asc`: Shared publicly.
+- `private_key.asc`: Stored securely on device.
 
-7.2 Distribution 
-Posts are shared via torrent. 
-Followers automatically download and seed posts. 
-Magnet URIs used for reference and discovery. 
+### 4.2 Profile Torrent Structure
 
-Messaging 
+```
+profile.torrent/
+├── profile.json
+├── public_key.asc
+├── contacts.json
+├── posts/
+│   ├── post1.md
+│   ├── post2.md
+│   └── ...
+└── signature.asc
+```
 
-8.1 Direct Messaging 
-Uses hybrid encryption: 
+- `profile.json`: Contains username, avatar hash, bio, etc.
+- `contacts.json`: List of trusted public keys and trust levels.
+- `signature.asc`: Signed hash of all profile contents using Ed25519.
 
-Content encrypted with AES-256 or ChaCha20. 
-Symmetric key encrypted with recipient’s Curve25519 public key. 
-Delivered via ephemeral torrents or DHT-based routing. 
-Optional forward secrecy via ephemeral Curve25519 keys. 
+## 5. Trust and Recovery
 
-8.2 Group Messaging 
-Shared symmetric key encrypted with each member’s Curve25519 public key. 
-Messages signed with sender’s Ed25519 key. 
-Optional ratcheting for forward secrecy. 
-Discovery and Swarm Management 
-DHT used for peer and content lookup. 
-Trackers optional for bootstrap. 
-Magnet URIs used for profile and post references. 
+### 5.1 Ring of Trust
 
-Mobile Optimization 
+- Defined in `contacts.json`.
+- Peers can verify profile integrity.
+- **Quorum-based recovery**: If a private key is lost, a majority of trusted peers can re-sign a new profile.
 
-10.1 Goals 
-Minimize battery usage. 
-Reduce polling and background activity. 
-Maintain low-latency communication. 
+### 5.2 Revocation
 
-10.2 Push-like Messaging 
-Notification Torrents: Lightweight torrents seeded by trusted peers. 
-Relay Nodes: Trusted peers cache and forward messages. 
-Wake-on-Swarm: OS-level hooks trigger sync when new content appears. 
-Security Considerations 
-All content is signed with Ed25519 and verifiable. 
-Messages are encrypted with AES-256 or ChaCha20 and protected via Curve25519. 
-Metadata leakage minimized via encrypted headers. 
-Forward secrecy supported via ephemeral keys and ratcheting. 
+- Revocation certificates can be issued and signed by the Ring of Trust.
+- Clients must check for revocation before accepting profile updates.
 
-Scalability 
-Swarm amplification via follower seeding. 
-Selective sync and delta updates. 
-Content sharding and deduplication. 
+## 6. Post Propagation
 
-Future Work 
+### 6.1 Post Format
 
-Reputation scoring via trust rings. 
-Decentralized moderation. 
-Integration with IPFS/libp2p. 
-Offline-first mobile clients. 
+Each post is a signed file:
 
-References 
-BitTorrent Protocol Specification 
-OpenPGP RFC 4880 
-Ed25519, Curve25519, ChaCha20, AES-256 
-libtorrent, WebTorrent 
-WebRTC, libp2p 
-Signal Protocol (X3DH, Double Ratchet) 
+```json
+{
+  "author": "<Ed25519 fingerprint>",
+  "timestamp": "<ISO 8601>",
+  "content": "<Markdown or JSON>",
+  "signature": "<Ed25519 signature>"
+}
+```
 
- 
+### 6.2 Distribution
+
+- Posts are shared via torrent.
+- Followers automatically download and seed posts.
+- Magnet URIs used for reference and discovery.
+
+## 7. Messaging
+
+### 7.1 Message Envelope
+
+All application-layer messages (posts, direct messages, group messages, control signals) SHOULD be encapsulated in a canonical envelope to enable extensibility and future negotiation.
+
+```jsonc
+{
+  "v": 1,                      // Protocol message version (integer)
+  "type": "dm|group|post|ctrl", // Message category
+  "subtype": "optional-detail", // OPTIONAL subtype (e.g., ratchet-key, post-reply)
+  "from": "<Ed25519 fingerprint>",
+  "to": ["<recipient-id>"] ,    // Array; single recipient for DM, group members, or empty for public post
+  "ts": "<ISO 8601 UTC>",
+  "nonce": "<base64>",          // OPTIONAL per-message nonce
+  "body_enc": "chacha20-poly1305|aes256-gcm|plaintext", // Encoding method
+  "body": "<base64 ciphertext OR UTF-8 if plaintext>",
+  "sig": "<Ed25519 signature base64>",
+  "fwd_secret": true,           // OPTIONAL indicates forward secrecy ratchet applied
+  "prev": "<message-id>",       // OPTIONAL link to previous (threading / ratchet)
+  "meta": {                      // OPTIONAL auxiliary metadata (hashed or encrypted when possible)
+    "reply_to": "<post-id>",
+    "tags": ["hashtag1", "hashtag2"],
+    "expires": "<ISO 8601 UTC>"
+  }
+}
+```
+
+Implementations MUST verify `sig` over a canonical serialization (e.g., deterministic JSON with sorted keys excluding `sig`). Fields not understood MUST be ignored (forward compatibility) unless marked REQUIRED by future capability negotiation.
+
+### 7.2 Direct Messaging
+
+Direct messages use hybrid encryption:
+
+- Content encrypted with AES-256-GCM or ChaCha20-Poly1305 (implementations SHOULD support both; MUST support at least one).
+- A randomly generated symmetric key encrypted with recipient’s Curve25519 static or pre-negotiated ephemeral key.
+- Delivery via ephemeral torrents or DHT-based routing entries referencing short-lived magnet identifiers.
+- Forward secrecy MAY be provided using an X3DH-style prekey bundle plus a Double Ratchet state; when enabled `fwd_secret` MUST be set to true.
+
+### 7.3 Group Messaging
+
+- A shared symmetric group key (GK) is generated by the creator.
+- GK is individually encrypted to each member’s Curve25519 key.
+- Messages signed with sender’s Ed25519 key to provide authenticity and deniability resistance.
+- OPTIONAL per-sender or per-message ratcheting (group ratchet) for forward secrecy; implementations SHOULD support a lightweight tree-based update (e.g., MLS-inspired) in future versions.
+
+### 7.4 Message Ordering & Replay Protection
+
+- Each conversation (DM or group) SHOULD maintain a monotonically increasing counter or hash-chain.
+- Nonces MUST NOT repeat with the same key.
+- Implementations SHOULD retain a sliding replay window (e.g., last 50 message identifiers) to drop duplicates.
+
+### 7.5 Attachment Handling
+
+- Large media objects are stored as separate torrents; message body contains a content reference (infohash + optional fragment hashes / Merkle root).
+- Clients MAY lazy-fetch attachments based on user settings (bandwidth preservation).
+
+### 7.6 Delivery Semantics
+
+- Best-effort asynchronous delivery; no global ordering guarantees.
+- Read receipts and delivery acknowledgments are OPTIONAL; if used they MUST be separate signed control messages (`type=ctrl`, `subtype=ack`).
+
+## 8. Discovery and Swarm Management
+
+- DHT used for peer and content lookup (profile magnet URIs, post indexes, prekey bundles).
+- Trackers OPTIONAL for bootstrap; clients SHOULD maintain a rotating list of bootstrap nodes.
+- Magnet URIs used for profile, post, and attachment references.
+- Routing tables MAY cache recently resolved profile magnets to reduce DHT load.
+
+## 9. Mobile Optimization
+
+### 9.1 Goals
+
+- Minimize battery usage.
+- Reduce polling and background activity.
+- Maintain low-latency communication.
+
+### 9.2 Push-like Messaging
+
+- **Notification Torrents**: Lightweight torrents containing compact update descriptors (hashes, counts).
+- **Relay Nodes**: Trusted peers cache and forward queued encrypted envelopes for temporarily offline mobile clients.
+- **Wake-on-Swarm**: OS-level trigger when new metadata segments appear for subscribed notification torrents.
+
+## 10. Security Considerations
+
+- All profile and post content MUST be signed with Ed25519 and verifiable before acceptance.
+- Messages MUST be encrypted end-to-end except explicitly public posts.
+- Metadata leakage SHOULD be minimized; sensitive routing hints MAY be encrypted inside the envelope `meta` field.
+- Forward secrecy SHOULD be enabled by default for direct messages; group forward secrecy MAY be progressive.
+- Revocation lists and certificates MUST be consulted prior to processing profile updates.
+
+## 11. Scalability
+
+- Swarm amplification via follower seeding reduces origin bandwidth.
+- Selective sync and delta updates minimize redundant transfers.
+- Content sharding by hashtag or time window allows partial replication.
+- Deduplication MAY use Merkle trees or BLAKE3 chunking for large media sets.
+
+## 12. Future Work
+
+- Reputation scoring via trust rings and verifiable interaction metrics.
+- Decentralized moderation overlays (filter lists, signed moderation actions).
+- Integration with IPFS/libp2p transport abstraction.
+- Offline-first mobile clients with opportunistic LAN sync.
+- Formal DID method (`did:ps:`) and credential issuance workflow.
+- Message Layer Security (MLS) style group ratchet adoption.
+
+## 13. References
+
+- BitTorrent Protocol Specification
+- OpenPGP RFC 4880
+- RFC 2119 / RFC 8174 (Normative Language)
+- Ed25519, Curve25519, ChaCha20, AES-256
+- libsodium, libtorrent, WebTorrent
+- WebRTC, libp2p
+- Signal Protocol (X3DH, Double Ratchet)
+- MLS (Messaging Layer Security) Drafts
+
+
