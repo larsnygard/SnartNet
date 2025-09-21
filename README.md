@@ -1,6 +1,6 @@
-# PeerSocial
+# SnartNet
 
-This is a proposed social media platform, currently in the conceptual stage.
+This is a decentralized social + messaging protocol and application suite in the conceptual / early implementation stage.
 
 **Verified, signed, and decentralized social media and messaging.**
 
@@ -8,7 +8,7 @@ This is a proposed social media platform, currently in the conceptual stage.
 [![Status: Experimental](https://img.shields.io/badge/Status-Experimental-red.svg)](#)
 [![Protocol Version](https://img.shields.io/badge/Protocol-Draft_0.1-blue.svg)](#)
 
-PeerSocial is a revolutionary decentralized social media protocol that gives users complete control over their identity, data, and social connections. Built on BitTorrent-like swarm technology and modern cryptography, it enables truly peer-to-peer social networking without reliance on centralized servers or corporate platforms.
+SnartNet is a revolutionary decentralized social media protocol that gives users complete control over their identity, data, and social connections. Built on BitTorrent-like swarm technology and modern cryptography, it enables truly peer-to-peer social networking without reliance on centralized servers or corporate platforms.
 
 > Current Focus (2025–2026): Ship a cross‑platform GUI experience (Web PWA + Mobile) early. The CLI is a developer tool; end‑user adoption hinges on a polished graphical client backed by a reusable Rust/WASM core.
 
@@ -46,18 +46,18 @@ PeerSocial is a revolutionary decentralized social media protocol that gives use
 
 ## 🚀 Quick Start
 
-> **Note:** PeerSocial is currently in active development. The implementation is not yet ready for production use.
+> **Note:** SnartNet is currently in active development (early rename from PeerSocial). The implementation is not yet ready for production use.
 
 ### Installation
 
 ```bash
 # Install from source (once available)
-git clone https://github.com/larsnygard/PeerSocial.git
-cd PeerSocial
+git clone https://github.com/larsnygard/SnartNet.git
+cd SnartNet
 cargo build --release
 
 # Or download pre-built binaries (future)
-curl -sSL https://github.com/larsnygard/PeerSocial/releases/latest/download/peersocial-linux.tar.gz | tar xz
+curl -sSL https://github.com/larsnygard/SnartNet/releases/latest/download/snartnet-linux.tar.gz | tar xz
 ```
 
 ### Create Your Profile
@@ -92,7 +92,7 @@ ps search users "Alice"
 
 ```bash
 # Create a post
-ps post create "Hello, decentralized world! #PeerSocial #privacy"
+ps post create "Hello, decentralized world! #SnartNet #privacy"
 
 # Share media
 ps post create --attach photo.jpg "Beautiful sunset from my hike"
@@ -133,7 +133,7 @@ ps message group send DEV123 "Meeting in 10 minutes"
 
 ## 🏗️ Development Status
 
-PeerSocial is currently in **Phase 2 shift planning**: establishing a reusable core and delivering the first Web GUI while foundational cryptography & profile distribution stabilize.
+SnartNet is currently in **Phase 2 shift planning**: establishing a reusable core and delivering the first Web GUI while foundational cryptography & profile distribution stabilize.
 
 ### ✅ Completed
 - Protocol specification and RFC
@@ -179,7 +179,7 @@ See the **[complete roadmap](./docs/ROADMAP.md)** for detailed timelines and mil
 
 ## 🤝 Contributing
 
-We welcome contributions from developers, security researchers, and privacy advocates! PeerSocial is being built as a truly open-source, community-driven project.
+We welcome contributions from developers, security researchers, and privacy advocates! SnartNet is being built as a truly open-source, community-driven project.
 
 ### How to Contribute
 
@@ -193,8 +193,8 @@ We welcome contributions from developers, security researchers, and privacy advo
 
 ```bash
 # Clone the repository
-git clone https://github.com/larsnygard/PeerSocial.git
-cd PeerSocial
+git clone https://github.com/larsnygard/SnartNet.git
+cd SnartNet
 
 # Install Rust and dependencies
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -220,7 +220,7 @@ cargo run -- --help
 
 ## 🔒 Security
 
-Security is paramount in PeerSocial. We employ multiple layers of protection:
+Security is paramount in SnartNet. We employ multiple layers of protection:
 
 ### Cryptographic Security
 - **Ed25519** for digital signatures (state-of-the-art elliptic curve)
@@ -246,7 +246,7 @@ We'll acknowledge receipt within 48 hours and provide updates on our investigati
 
 ## 📜 License
 
-PeerSocial is released under the **MIT License**. See [LICENSE](./LICENSE) for details.
+SnartNet is released under the **MIT License**. See [LICENSE](./LICENSE) for details.
 
 The protocol specification is released under **Creative Commons Attribution 4.0** to encourage implementation by other projects and ensure broad compatibility.
 
@@ -291,10 +291,10 @@ The protocol specification is released under **Creative Commons Attribution 4.0*
 ## 🙋‍♀️ FAQ
 
 ### **Q: How is this different from Mastodon/ActivityPub?**
-A: While Mastodon federates servers, PeerSocial is truly peer-to-peer with no servers required. Users directly connect and share content via torrent swarms, providing stronger censorship resistance and user control.
+A: While Mastodon federates servers, SnartNet is truly peer-to-peer with no servers required. Users directly connect and share content via torrent swarms, providing stronger censorship resistance and user control.
 
 ### **Q: What about blockchain/cryptocurrency integration?**
-A: PeerSocial focuses on communication, not monetization. While future versions may support optional cryptocurrency features, the core protocol remains blockchain-free for simplicity and efficiency.
+A: SnartNet focuses on communication, not monetization. While future versions may support optional cryptocurrency features, the core protocol remains blockchain-free for simplicity and efficiency.
 
 ### **Q: How do you handle illegal content or spam?**
 A: Each user curates their own network through the Ring of Trust system. Communities can establish shared moderation standards, but there's no central authority to impose universal censorship.
@@ -303,15 +303,15 @@ A: Each user curates their own network through the Ring of Trust system. Communi
 A: Extensive optimizations including wake-on-swarm, notification torrents, and selective sync ensure battery usage comparable to traditional messaging apps.
 
 ### **Q: Is this ready for production use?**
-A: No, PeerSocial is currently experimental. We're in active development with alpha releases planned for early 2026.
+A: No, SnartNet is currently experimental. We're in active development with alpha releases planned for early 2026.
 
 ## 📞 Community & Support
 
 ### Get Involved
-- **💬 Discussions** - [GitHub Discussions](https://github.com/larsnygard/PeerSocial/discussions)
-- **📧 Mailing List** - dev@peersocial.org ([subscribe](mailto:dev+subscribe@peersocial.org))
-- **🐦 Updates** - [@PeerSocial](https://twitter.com/PeerSocial) (until we're self-hosting!)
-- **💼 Matrix Chat** - `#peersocial:matrix.org`
+- **💬 Discussions** - [GitHub Discussions](https://github.com/larsnygard/SnartNet/discussions)
+- **📧 Mailing List** - dev@snartnet.org *(placeholder; to be provisioned)*
+- **🐦 Updates** - [@SnartNet](https://twitter.com/SnartNet) *(placeholder handle)*
+- **💼 Matrix Chat** - `#snartnet:matrix.org`
 
 ### Core Team
 - **Lars Nygård** ([@larsnygard](https://github.com/larsnygard)) - Protocol Design & Implementation
@@ -321,4 +321,4 @@ A: No, PeerSocial is currently experimental. We're in active development with al
 
 **"Own your identity. Control your data. Connect directly."**
 
-*PeerSocial is an experimental protocol. Use at your own risk and always maintain backups of important data.*
+*SnartNet (formerly PeerSocial) is an experimental protocol. Use at your own risk and always maintain backups of important data.*

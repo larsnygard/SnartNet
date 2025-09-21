@@ -1,8 +1,8 @@
-# PeerSocial CLI Specification
+# SnartNet CLI Specification
 
 ## Overview
 
-The PeerSocial CLI (`ps`) provides a command-line interface for all protocol operations including profile management, messaging, content creation, and network administration. This specification defines the complete command structure, options, and expected behaviors.
+The SnartNet CLI (`ps`, with future alias `sn`) provides a command-line interface for all protocol operations including profile management, messaging, content creation, and network administration. This specification defines the complete command structure, options, and expected behaviors. (Project renamed from PeerSocial.)
 
 ## Command Structure
 
@@ -13,7 +13,7 @@ ps [GLOBAL_OPTIONS] <COMMAND> [COMMAND_OPTIONS] [ARGS...]
 ### Global Options
 
 ```
--c, --config <PATH>     Path to configuration file (default: ~/.peersocial/config.toml)
+-c, --config <PATH>     Path to configuration file (default: ~/.snartnet/config.toml)
 -v, --verbose           Enable verbose output
 -q, --quiet             Suppress non-error output
 -h, --help              Show help information
@@ -26,7 +26,7 @@ ps [GLOBAL_OPTIONS] <COMMAND> [COMMAND_OPTIONS] [ARGS...]
 ## Commands Overview
 
 ### Identity & Profile Management
-- `ps init` - Initialize a new PeerSocial profile
+- `ps init` - Initialize a new SnartNet profile
 - `ps profile` - Profile management operations
 - `ps keys` - Cryptographic key operations
 - `ps contacts` - Contact and Ring of Trust management
@@ -62,7 +62,7 @@ ps [GLOBAL_OPTIONS] <COMMAND> [COMMAND_OPTIONS] [ARGS...]
 ### Identity & Profile Management
 
 #### `ps init`
-Initialize a new PeerSocial profile and generate cryptographic keys.
+Initialize a new SnartNet profile and generate cryptographic keys.
 
 ```bash
 ps init [OPTIONS] <username>
@@ -80,7 +80,7 @@ ps init [OPTIONS] <username>
 -k, --keysize <BITS>        Key size in bits (default: 256)
 --no-upload                 Don't automatically upload profile to DHT
 --recovery-threshold <N>    Ring of Trust recovery threshold (default: 3)
---output-dir <PATH>         Output directory (default: ~/.peersocial/)
+--output-dir <PATH>         Output directory (default: ~/.snartnet/)
 ```
 
 **Examples:**
@@ -231,7 +231,7 @@ Create and manage posts.
 **`ps post create [OPTIONS] [content]`**
 Create a new post.
 ```bash
-ps post create "Hello, PeerSocial!"
+ps post create "Hello, SnartNet!"
 ps post create --file post.md
 ps post create --attach image.jpg "Check out this photo"
 ps post create --reply-to <post-hash> "Great post!"
@@ -628,7 +628,7 @@ ps import posts --validate-signatures untrusted-posts.json
 
 ## Configuration File
 
-The configuration file uses TOML format and is located at `~/.peersocial/config.toml` by default.
+The configuration file uses TOML format and is located at `~/.snartnet/config.toml` by default.
 
 ### Example Configuration
 
@@ -653,7 +653,7 @@ enable_forward_secrecy = true
 auto_decrypt = true
 
 [storage]
-data_dir = "~/.peersocial/data"
+data_dir = "~/.snartnet/data"
 cache_size = 536870912  # 512MB
 cleanup_interval = 86400  # 24 hours
 
@@ -690,11 +690,11 @@ relay_for_contacts = true
 ## Environment Variables
 
 ```
-PEERSOCIAL_CONFIG_DIR    - Override config directory (default: ~/.peersocial)
-PEERSOCIAL_LOG_LEVEL     - Set log level (error, warn, info, debug, trace)
-PEERSOCIAL_NO_COLOR      - Disable colored output (any value)
-PEERSOCIAL_DHT_PORT      - Override DHT port
-PEERSOCIAL_DAEMON_URL    - Daemon URL for client commands
+SNARTNET_CONFIG_DIR    - Override config directory (default: ~/.snartnet)
+SNARTNET_LOG_LEVEL     - Set log level (error, warn, info, debug, trace)
+SNARTNET_NO_COLOR      - Disable colored output (any value)
+SNARTNET_DHT_PORT      - Override DHT port
+SNARTNET_DAEMON_URL    - Daemon URL for client commands
 ```
 
 ## Output Formats
@@ -763,4 +763,4 @@ ps contacts add --batch contacts.json  # Add multiple contacts
 ps message send --batch messages.json  # Send multiple messages
 ```
 
-This CLI specification provides comprehensive coverage of all PeerSocial protocol operations while maintaining usability and consistency with established command-line interface conventions.
+This CLI specification provides comprehensive coverage of all SnartNet protocol operations while maintaining usability and consistency with established command-line interface conventions.

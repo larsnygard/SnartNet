@@ -1,4 +1,6 @@
-# PeerSocial: A Decentralized Social Media Protocol over Torrent Swarms
+# SnartNet: A Decentralized Social Media Protocol over Torrent Swarms
+
+Formerly known as PeerSocial (working name). All references to the previous name in historical documents should be interpreted as SnartNet.
 
 ## Status of This Memo
 
@@ -8,11 +10,11 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 ## 1. Abstract
 
-PeerSocial is a peer-to-peer social media protocol that uses torrent swarms for profile and content distribution, cryptographic keys for identity and trust, and a Ring of Trust model for profile recovery. It supports scalable post propagation, encrypted messaging, and mobile optimization via decentralized push-like mechanisms. This specification incorporates elliptic curve cryptography, hybrid encryption, and forward secrecy to ensure secure and efficient communication.
+SnartNet is a peer-to-peer social media protocol that uses torrent swarms for profile and content distribution, cryptographic keys for identity and trust, and a Ring of Trust model for profile recovery. It supports scalable post propagation, encrypted messaging, and mobile optimization via decentralized push-like mechanisms. This specification incorporates elliptic curve cryptography, hybrid encryption, and forward secrecy to ensure secure and efficient communication.
 
 ## 2. Terminology
 
-- **Peer**: A node participating in the PeerSocial network.
+- **Peer**: A node participating in the SnartNet network.
 - **Profile Torrent**: A torrent containing a user's public identity and content.
 - **Post**: A signed message or media item shared via torrent.
 - **Ring of Trust**: A set of trusted peers authorized to verify or recover a profile.
@@ -22,7 +24,7 @@ PeerSocial is a peer-to-peer social media protocol that uses torrent swarms for 
 
 ## 3. Protocol Overview
 
-PeerSocial operates as a fully decentralized protocol with the following components:
+SnartNet operates as a fully decentralized protocol with the following components:
 
 - **Identity**: Ed25519 keypair per user.
 - **Profile**: Signed metadata and content distributed via torrent.

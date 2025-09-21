@@ -1,8 +1,10 @@
-# PeerSocial Implementation Roadmap
+# SnartNet Implementation Roadmap
+
+Renamed from PeerSocial (original working title). Historical references to PeerSocial map to SnartNet.
 
 ## Overview
 
-This roadmap outlines the phased approach to implementing the PeerSocial decentralized social media protocol. The project is divided into five major phases, each building upon the previous to create a complete, production-ready system.
+This roadmap outlines the phased approach to implementing the SnartNet decentralized social media protocol. The project is divided into five major phases, each building upon the previous to create a complete, production-ready system.
 
 ## Phase 1: Core Infrastructure (Months 1-4)
 
@@ -377,7 +379,7 @@ Shift focus to delivering an end‑user visible experience early. A minimal but 
 
 ## Conclusion
 
-This roadmap provides a structured approach to implementing the PeerSocial protocol over 18 months. The phased approach ensures that each component is thoroughly tested before moving to the next phase, while allowing for parallel development in later stages.
+This roadmap provides a structured approach to implementing the SnartNet (formerly PeerSocial) protocol over 18 months. The phased approach ensures that each component is thoroughly tested before moving to the next phase, while allowing for parallel development in later stages.
 
 Success will depend on maintaining high code quality, conducting thorough security reviews, and building a vibrant developer and user community around the protocol. Regular milestone reviews and adaptation of the roadmap based on technical discoveries and user feedback will be essential.
 

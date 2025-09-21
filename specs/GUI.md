@@ -1,4 +1,6 @@
-# PeerSocial GUI Architecture Specification
+# SnartNet GUI Architecture Specification
+
+Note: Project renamed from PeerSocial to SnartNet; terminology updated accordingly.
 
 ## 1. Objectives
 
