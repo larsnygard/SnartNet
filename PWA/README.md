@@ -37,63 +37,62 @@ The PWA is structured into four main layers:
 
 ## 📂 File/Folder Structure
 
-
-
+```text
 SnartNet/
 ├── public/                     # Static assets (icons, manifest.json, etc.)
 │   ├── favicon.ico
-│   ├── manifest.json            # PWA manifest
-│   └── service-worker.js        # Service worker for caching & push
+│   ├── manifest.json           # PWA manifest
+│   └── service-worker.js       # Service worker for caching & push
 │
 ├── src/
-│   ├── app/                     # App entry (Next.js or React root)
+│   ├── app/                    # App entry (Next.js or React root)
 │   │   ├── layout.tsx
 │   │   └── page.tsx
 │   │
-│   ├── components/              # UI components
+│   ├── components/             # UI components
 │   │   ├── Timeline.tsx
 │   │   ├── ProfileCard.tsx
 │   │   ├── PostComposer.tsx
 │   │   ├── MessageThread.tsx
 │   │   └── VerificationBadge.tsx
 │   │
-│   ├── pages/                   # Routes (if not using Next.js app dir)
+│   ├── pages/                  # Routes (if not using Next.js app dir)
 │   │   ├── index.tsx
 │   │   ├── profile/[id].tsx
 │   │   └── messages/[id].tsx
 │   │
-│   ├── lib/                     # Core logic
-│   │   ├── crypto/              # Cryptography utilities
-│   │   │   ├── keys.ts          # Ed25519/Curve25519 key mgmt
-│   │   │   ├── sign.ts          # Signing & verification
-│   │   │   └── encrypt.ts       # AES/ChaCha20 hybrid encryption
+│   ├── lib/                    # Core logic
+│   │   ├── crypto/             # Cryptography utilities
+│   │   │   ├── keys.ts         # Ed25519/Curve25519 key mgmt
+│   │   │   ├── sign.ts         # Signing & verification
+│   │   │   └── encrypt.ts      # AES/ChaCha20 hybrid encryption
 │   │   │
-│   │   ├── protocol/            # PeerSocial protocol logic
-│   │   │   ├── profile.ts       # Profile torrent handling
-│   │   │   ├── posts.ts         # Post creation/verification
-│   │   │   ├── trust.ts         # Ring of Trust & recovery
-│   │   │   ├── discovery.ts     # DHT, hashtag torrents, search
-│   │   │   └── routing.ts       # Swarm BGP-style routing
+│   │   ├── protocol/           # PeerSocial protocol logic
+│   │   │   ├── profile.ts      # Profile torrent handling
+│   │   │   ├── posts.ts        # Post creation/verification
+│   │   │   ├── trust.ts        # Ring of Trust & recovery
+│   │   │   ├── discovery.ts    # DHT, hashtag torrents, search
+│   │   │   └── routing.ts      # Swarm BGP-style routing
 │   │   │
-│   │   ├── messaging/           # Messaging subsystem
-│   │   │   ├── direct.ts        # Direct messages
-│   │   │   ├── group.ts         # Group messaging
-│   │   │   └── notifications.ts # Push/notification torrents
+│   │   ├── messaging/          # Messaging subsystem
+│   │   │   ├── direct.ts       # Direct messages
+│   │   │   ├── group.ts        # Group messaging
+│   │   │   └── notifications.ts# Push/notification torrents
 │   │   │
-│   │   └── verification/        # Identity verification
-│   │       ├── vc.ts            # Verifiable credentials
-│   │       ├── domain.ts        # DNS/.well-known checks
-│   │       └── registry.ts      # Trusted verifiers
+│   │   └── verification/       # Identity verification
+│   │       ├── vc.ts           # Verifiable credentials
+│   │       ├── domain.ts       # DNS/.well-known checks
+│   │       └── registry.ts     # Trusted verifiers
 │   │
-│   ├── store/                   # State management
+│   ├── store/                  # State management
 │   │   ├── profileStore.ts
 │   │   ├── postStore.ts
 │   │   └── messageStore.ts
 │   │
-│   └── styles/                  # Global and component styles
+│   └── styles/                 # Global and component styles
 │       └── globals.css
 │
-├── tests/                       # Unit and integration tests
+├── tests/                      # Unit and integration tests
 │   ├── crypto.test.ts
 │   ├── profile.test.ts
 │   └── messaging.test.ts
@@ -101,8 +100,7 @@ SnartNet/
 ├── package.json
 ├── tsconfig.json
 └── README.md
-
-Kode
+```
 
 ---
 
@@ -113,48 +111,60 @@ Kode
 - npm or yarn
 
 ### Install
+
 ```bash
 cd PWA
 npm install
-Run Dev Server
-bash
+```
+
+### Run Dev Server
+
+```bash
 npm run dev
-Build for Production
-bash
+```
+
+### Build for Production
+
+```bash
 npm run build
 npm run start
-🔐 Cryptography
-Ed25519: Identity and signatures
+```
 
-Curve25519: Key exchange
+---
 
-AES-256 / ChaCha20: Symmetric encryption
+## 🔐 Cryptography
 
-SHA-256: Content integrity
+- **Ed25519**: Identity and signatures
+- **Curve25519**: Key exchange
+- **AES-256 / ChaCha20**: Symmetric encryption
+- **SHA-256**: Content integrity
+- **X3DH**: Forward secrecy in messaging
 
-X3DH: Forward secrecy in messaging
+---
 
-📡 Roadmap
-[ ] Implement profile torrent creation and seeding
+## 📡 Roadmap
 
-[ ] Add post composer and signed post propagation
+- [ ] Implement profile torrent creation and seeding
+- [ ] Add post composer and signed post propagation
+- [ ] Integrate hashtag torrents and distributed search
+- [ ] Implement direct/group messaging with hybrid crypto
+- [ ] Add verification services (VCs, domain checks)
+- [ ] Optimize mobile push/notification handling
 
-[ ] Integrate hashtag torrents and distributed search
+---
 
-[ ] Implement direct/group messaging with hybrid crypto
+## 🤝 Contributing
 
-[ ] Add verification services (VCs, domain checks)
-
-[ ] Optimize mobile push/notification handling
-
-🤝 Contributing
 Contributions are welcome!
 
-Fork the repo
+- Fork the repo
+- Create a feature branch
+- Submit a pull request
 
-Create a feature branch
+Or if you are a skilled programmer, ask to join the project. 
 
-Submit a pull request
+---
 
-📜 License
+## 📜 License
+
 Unless otherwise stated, all content in this repository is © Lars Nygard. For usage permissions, contact: lars@snart.com
