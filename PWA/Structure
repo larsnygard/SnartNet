@@ -1,0 +1,62 @@
+SnartNet/
+├── public/                     # Static assets (icons, manifest.json, etc.)
+│   ├── favicon.ico
+│   ├── manifest.json            # PWA manifest
+│   └── service-worker.js        # Service worker for caching & push
+│
+├── src/
+│   ├── app/                     # App entry (Next.js or React root)
+│   │   ├── layout.tsx
+│   │   └── page.tsx
+│   │
+│   ├── components/              # UI components
+│   │   ├── Timeline.tsx
+│   │   ├── ProfileCard.tsx
+│   │   ├── PostComposer.tsx
+│   │   ├── MessageThread.tsx
+│   │   └── VerificationBadge.tsx
+│   │
+│   ├── pages/                   # Routes (if not using Next.js app dir)
+│   │   ├── index.tsx
+│   │   ├── profile/[id].tsx
+│   │   └── messages/[id].tsx
+│   │
+│   ├── lib/                     # Core logic
+│   │   ├── crypto/              # Cryptography utilities
+│   │   │   ├── keys.ts          # Ed25519/Curve25519 key mgmt
+│   │   │   ├── sign.ts          # Signing & verification
+│   │   │   └── encrypt.ts       # AES/ChaCha20 hybrid encryption
+│   │   │
+│   │   ├── protocol/            # PeerSocial protocol logic
+│   │   │   ├── profile.ts       # Profile torrent handling
+│   │   │   ├── posts.ts         # Post creation/verification
+│   │   │   ├── trust.ts         # Ring of Trust & recovery
+│   │   │   ├── discovery.ts     # DHT, hashtag torrents, search
+│   │   │   └── routing.ts       # Swarm BGP-style routing
+│   │   │
+│   │   ├── messaging/           # Messaging subsystem
+│   │   │   ├── direct.ts        # Direct messages
+│   │   │   ├── group.ts         # Group messaging
+│   │   │   └── notifications.ts # Push/notification torrents
+│   │   │
+│   │   └── verification/        # Identity verification
+│   │       ├── vc.ts            # Verifiable credentials
+│   │       ├── domain.ts        # DNS/.well-known checks
+│   │       └── registry.ts      # Trusted verifiers
+│   │
+│   ├── store/                   # State management
+│   │   ├── profileStore.ts
+│   │   ├── postStore.ts
+│   │   └── messageStore.ts
+│   │
+│   └── styles/                  # Global and component styles
+│       └── globals.css
+│
+├── tests/                       # Unit and integration tests
+│   ├── crypto.test.ts
+│   ├── profile.test.ts
+│   └── messaging.test.ts
+│
+├── package.json
+├── tsconfig.json
+└── README.md
