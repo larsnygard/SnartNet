@@ -1,4 +1,5 @@
 import fs from 'fs';
+import path from 'path';
 
 const basePath = process.env.BASE_PATH || '/net/';
 const manifest = fs.readFileSync('public/manifest.template.json', 'utf8');
