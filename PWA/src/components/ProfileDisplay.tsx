@@ -1,12 +1,19 @@
 import { useEffect, useState } from 'react'
 import { getCore } from '@/lib/core'
 import { useProfileStore } from '@/stores/profileStore'
+import { EditProfile } from './EditProfile'
 
 export default function ProfileDisplay() {
   const { currentProfile } = useProfileStore()
   const [publicKey, setPublicKey] = useState<string | null>(null)
   const [fingerprint, setFingerprint] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [isEditing, setIsEditing] = useState(false)
+  const [extendedData, setExtendedData] = useState<{
+    avatar?: string;
+    location?: string;
+    website?: string;
+  }>({})
 
   useEffect(() => {
     const loadCryptoInfo = async () => {
@@ -31,6 +38,15 @@ export default function ProfileDisplay() {
     loadCryptoInfo()
   }, [currentProfile])
 
+  useEffect(() => {
+    if (currentProfile) {
+      // Load extended profile data from localStorage
+      const extendedDataStr = localStorage.getItem(`profile_extended_${currentProfile.username}`);
+      const extended = extendedDataStr ? JSON.parse(extendedDataStr) : {};
+      setExtendedData(extended);
+    }
+  }, [currentProfile])
+
   if (!currentProfile) {
     return null
   }
@@ -51,11 +67,19 @@ export default function ProfileDisplay() {
         <h2 className="text-2xl font-bold text-gray-900 dark:text-white">
           Your Profile
         </h2>
-        <div className="flex items-center text-green-600 dark:text-green-400">
-          <svg className="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 20 20">
-            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-          </svg>
-          Active
+        <div className="flex items-center space-x-3">
+          <button
+            onClick={() => setIsEditing(true)}
+            className="px-3 py-1.5 text-sm font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 border border-blue-300 hover:border-blue-400 rounded-md hover:bg-blue-50 dark:hover:bg-blue-900/20"
+          >
+            Edit Profile
+          </button>
+          <div className="flex items-center text-green-600 dark:text-green-400">
+            <svg className="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+            </svg>
+            Active
+          </div>
         </div>
       </div>
 
@@ -87,6 +111,48 @@ export default function ProfileDisplay() {
             </label>
             <div className="text-gray-900 dark:text-white">
               {currentProfile.bio}
+            </div>
+          </div>
+        )}
+
+        {extendedData.avatar && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Avatar
+            </label>
+            <img 
+              src={extendedData.avatar} 
+              alt="Profile avatar" 
+              className="w-16 h-16 rounded-full object-cover"
+            />
+          </div>
+        )}
+
+        {extendedData.location && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Location
+            </label>
+            <div className="text-gray-900 dark:text-white">
+              {extendedData.location}
+            </div>
+          </div>
+        )}
+
+        {extendedData.website && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Website
+            </label>
+            <div className="text-gray-900 dark:text-white">
+              <a 
+                href={extendedData.website} 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 underline"
+              >
+                {extendedData.website}
+              </a>
             </div>
           </div>
         )}
@@ -174,6 +240,23 @@ export default function ProfileDisplay() {
           </p>
         </div>
       </div>
+      
+      {isEditing && (
+        <div className="mt-6">
+          <EditProfile
+            onSave={() => {
+              setIsEditing(false);
+              // Reload extended data after save
+              if (currentProfile) {
+                const extendedDataStr = localStorage.getItem(`profile_extended_${currentProfile.username}`);
+                const extended = extendedDataStr ? JSON.parse(extendedDataStr) : {};
+                setExtendedData(extended);
+              }
+            }}
+            onCancel={() => setIsEditing(false)}
+          />
+        </div>
+      )}
     </div>
   )
 }
