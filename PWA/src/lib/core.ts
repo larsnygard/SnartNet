@@ -1,11 +1,8 @@
 import { useState, useEffect } from 'react'
+import initWasm, { SnartNetCore as WasmCore, init_core } from '../wasm/snartnet_core'
 
 /**
- * Core bindings interface for SnartNet Rust WASM module
- * 
- * This module will eventually import and interact with the compiled WASM
- * module from the Rust core library. For now, it provides mock implementations
- * to allow UI development to proceed.
+ * Core bindings for SnartNet Rust WASM module
  */
 
 // Event types that the core can emit
@@ -20,139 +17,141 @@ export type CoreEvent =
 export type EventCallback = (event: CoreEvent) => void
 
 /**
- * Core interface that will be implemented by the Rust WASM module
+ * TypeScript wrapper for the WASM core
  */
-export interface SnartNetCore {
-  // Initialization
-  init(): Promise<void>
-  
-  // Profile management
-  createProfile(username: string, displayName?: string, bio?: string): Promise<string>
-  loadProfile(magnetUri: string): Promise<any>
-  updateProfile(updates: any): Promise<void>
-  publishProfile(): Promise<string>
-  
-  // Key management
-  generateKeys(): Promise<{ publicKey: string; fingerprint: string }>
-  exportPublicKey(fingerprint: string): Promise<string>
-  signData(data: string): Promise<string>
-  verifySignature(data: string, signature: string, publicKey: string): Promise<boolean>
-  
-  // Posts
-  createPost(content: string, tags?: string[]): Promise<string>
-  getTimeline(): Promise<any[]>
-  
-  // Messaging (placeholder)
-  sendMessage(recipientId: string, content: string): Promise<void>
-  getMessages(contactId: string): Promise<any[]>
-  
-  // Event subscription
-  subscribeToEvents(callback: EventCallback): () => void
-  
-  // Storage
-  setItem(key: string, value: any): Promise<void>
-  getItem(key: string): Promise<any>
-}
-
-/**
- * Mock implementation for development
- * This will be replaced with actual WASM bindings when the Rust core is ready
- */
-class MockCore implements SnartNetCore {
+class SnartNetCore {
+  private wasmCore: WasmCore
   private eventCallbacks: Set<EventCallback> = new Set()
-  private storage: Map<string, any> = new Map()
 
+  constructor(wasmCore: WasmCore) {
+    this.wasmCore = wasmCore
+  }
+
+  // Initialize the core
   async init(): Promise<void> {
-    console.log('[MockCore] Initialized')
-    // Simulate some async initialization
-    await new Promise(resolve => setTimeout(resolve, 100))
+    try {
+      await this.wasmCore.init()
+      console.log('[SnartNetCore] WASM core initialized')
+    } catch (error) {
+      console.error('[SnartNetCore] Init error:', error)
+      throw error
+    }
   }
 
+  // Profile management
   async createProfile(username: string, displayName?: string, bio?: string): Promise<string> {
-    const profile = {
-      username,
-      displayName: displayName || username,
-      bio: bio || '',
-      publicKey: 'mock_public_key_' + Date.now(),
-      fingerprint: 'mock_fingerprint_' + Date.now(),
-      magnetUri: 'magnet:?xt=urn:mock:' + username + '_' + Date.now()
-    }
-    
-    this.storage.set('currentProfile', profile)
-    this.emitEvent({ type: 'ProfileLoaded', profile })
-    
-    return profile.magnetUri
-  }
-
-  async loadProfile(magnetUri: string): Promise<any> {
-    // Simulate loading from network
-    await new Promise(resolve => setTimeout(resolve, 500))
-    
-    const mockProfile = {
-      username: 'user_' + Date.now(),
-      displayName: 'Mock User',
-      bio: 'This is a mock profile for development',
-      publicKey: 'mock_public_key',
-      magnetUri
-    }
-    
-    this.emitEvent({ type: 'ProfileLoaded', profile: mockProfile })
-    return mockProfile
-  }
-
-  async updateProfile(updates: any): Promise<void> {
-    const current = this.storage.get('currentProfile')
-    if (current) {
-      const updated = { ...current, ...updates }
-      this.storage.set('currentProfile', updated)
-      this.emitEvent({ type: 'ProfileUpdated', profile: updated })
+    try {
+      const magnetUri = this.wasmCore.create_profile(username, displayName || null, bio || null)
+      console.log('[SnartNetCore] Profile created:', { username, magnetUri })
+      
+      // Emit event
+      const profile = this.wasmCore.get_current_profile()
+      if (profile) {
+        this.emitEvent({ type: 'ProfileLoaded', profile })
+      }
+      
+      return magnetUri
+    } catch (error) {
+      console.error('[SnartNetCore] Create profile error:', error)
+      throw error
     }
   }
 
-  async publishProfile(): Promise<string> {
-    const profile = this.storage.get('currentProfile')
-    if (profile) {
-      console.log('[MockCore] Publishing profile:', profile.username)
-      return profile.magnetUri
-    }
-    throw new Error('No current profile to publish')
-  }
-
-  async generateKeys(): Promise<{ publicKey: string; fingerprint: string }> {
-    return {
-      publicKey: 'ed25519_public_key_' + Date.now(),
-      fingerprint: 'fp_' + Date.now().toString(16)
+  async getCurrentProfile(): Promise<any> {
+    try {
+      return this.wasmCore.get_current_profile()
+    } catch (error) {
+      console.error('[SnartNetCore] Get profile error:', error)
+      return null
     }
   }
 
-  async exportPublicKey(fingerprint: string): Promise<string> {
-    return `-----BEGIN PUBLIC KEY-----\nmock_key_for_${fingerprint}\n-----END PUBLIC KEY-----`
-  }
-
-  async signData(data: string): Promise<string> {
-    return 'mock_signature_' + btoa(data).substring(0, 16)
-  }
-
-  async verifySignature(_data: string, signature: string, _publicKey: string): Promise<boolean> {
-    // Mock verification - in real implementation this would use Ed25519
-    return signature.startsWith('mock_signature_')
-  }
-
-  async createPost(content: string, tags?: string[]): Promise<string> {
-    const post = {
-      id: 'post_' + Date.now(),
-      content,
-      tags: tags || [],
-      timestamp: new Date().toISOString(),
-      author: this.storage.get('currentProfile')?.username || 'unknown'
+  async updateProfile(displayName?: string, bio?: string): Promise<void> {
+    try {
+      await this.wasmCore.update_current_profile(displayName || null, bio || null)
+      
+      // Emit event
+      const profile = this.wasmCore.get_current_profile()
+      if (profile) {
+        this.emitEvent({ type: 'ProfileUpdated', profile })
+      }
+    } catch (error) {
+      console.error('[SnartNetCore] Update profile error:', error)
+      throw error
     }
-    
-    this.emitEvent({ type: 'PostAdded', post })
-    return post.id
   }
 
+  // Key management
+  async getPublicKey(): Promise<string> {
+    try {
+      return this.wasmCore.get_public_key()
+    } catch (error) {
+      console.error('[SnartNetCore] Get public key error:', error)
+      throw error
+    }
+  }
+
+  async getFingerprint(): Promise<string> {
+    try {
+      return this.wasmCore.get_fingerprint()
+    } catch (error) {
+      console.error('[SnartNetCore] Get fingerprint error:', error)
+      throw error
+    }
+  }
+
+  // Posts
+  async createPost(content: string, tags?: string[], replyTo?: string): Promise<any> {
+    try {
+      const signedPost = this.wasmCore.create_post(content, tags || null, replyTo || null)
+      console.log('[SnartNetCore] Post created:', signedPost)
+      
+      this.emitEvent({ type: 'PostAdded', post: signedPost })
+      return signedPost
+    } catch (error) {
+      console.error('[SnartNetCore] Create post error:', error)
+      throw error
+    }
+  }
+
+  // Messages
+  async createMessage(recipientFingerprint: string, content: string): Promise<any> {
+    try {
+      const signedMessage = this.wasmCore.create_message(recipientFingerprint, content)
+      console.log('[SnartNetCore] Message created:', signedMessage)
+      
+      this.emitEvent({ type: 'MessageReceived', message: signedMessage })
+      return signedMessage
+    } catch (error) {
+      console.error('[SnartNetCore] Create message error:', error)
+      throw error
+    }
+  }
+
+  // Status
+  hasProfile(): boolean {
+    return this.wasmCore.has_profile()
+  }
+
+  // Events
+  subscribeToEvents(callback: EventCallback): () => void {
+    this.eventCallbacks.add(callback)
+    return () => this.eventCallbacks.delete(callback)
+  }
+
+  private emitEvent(event: CoreEvent): void {
+    this.eventCallbacks.forEach(callback => {
+      try {
+        callback(event)
+      } catch (error) {
+        console.error('[SnartNetCore] Error in event callback:', error)
+      }
+    })
+  }
+
+  // Mock methods for timeline (will be replaced with real P2P later)
   async getTimeline(): Promise<any[]> {
-    // Return mock timeline data
+    // Return mock timeline data for now
     return [
       {
         id: 'post_1',
@@ -163,60 +162,12 @@ class MockCore implements SnartNetCore {
       },
       {
         id: 'post_2', 
-        content: 'Just set up my profile on this new decentralized platform. Loving the crypto-powered security!',
+        content: 'Just created my first cryptographically signed post! 🔐',
         author: 'bob',
         timestamp: new Date(Date.now() - 1800000).toISOString(),
         tags: ['crypto', 'security']
       }
     ]
-  }
-
-  async sendMessage(recipientId: string, content: string): Promise<void> {
-    const message = {
-      id: 'msg_' + Date.now(),
-      recipientId,
-      content,
-      timestamp: new Date().toISOString(),
-      sender: this.storage.get('currentProfile')?.username || 'unknown'
-    }
-    
-    console.log('[MockCore] Sending message:', message)
-    this.emitEvent({ type: 'MessageReceived', message })
-  }
-
-  async getMessages(contactId: string): Promise<any[]> {
-    return [
-      {
-        id: 'msg_1',
-        sender: contactId,
-        content: 'Hello! How are you enjoying SnartNet?',
-        timestamp: new Date(Date.now() - 1800000).toISOString(),
-        encrypted: true
-      }
-    ]
-  }
-
-  subscribeToEvents(callback: EventCallback): () => void {
-    this.eventCallbacks.add(callback)
-    return () => this.eventCallbacks.delete(callback)
-  }
-
-  async setItem(key: string, value: any): Promise<void> {
-    this.storage.set(key, value)
-  }
-
-  async getItem(key: string): Promise<any> {
-    return this.storage.get(key)
-  }
-
-  private emitEvent(event: CoreEvent): void {
-    this.eventCallbacks.forEach(callback => {
-      try {
-        callback(event)
-      } catch (error) {
-        console.error('[MockCore] Error in event callback:', error)
-      }
-    })
   }
 }
 
@@ -225,16 +176,24 @@ let coreInstance: SnartNetCore | null = null
 
 /**
  * Initialize and get the core instance
- * In the future, this will load and instantiate the WASM module
  */
 export async function getCore(): Promise<SnartNetCore> {
   if (!coreInstance) {
-    // TODO: Replace with actual WASM loading
-    // const wasmModule = await import('./snartnet_core.wasm')
-    // coreInstance = new WasmCore(wasmModule)
-    
-    coreInstance = new MockCore()
-    await coreInstance.init()
+    try {
+      // Initialize WASM
+      await initWasm()
+      await init_core()
+      
+      // Create WASM core instance
+      const wasmCore = new WasmCore()
+      coreInstance = new SnartNetCore(wasmCore)
+      await coreInstance.init()
+      
+      console.log('[Core] Initialized successfully')
+    } catch (error) {
+      console.error('[Core] Initialization failed:', error)
+      throw error
+    }
   }
   return coreInstance
 }

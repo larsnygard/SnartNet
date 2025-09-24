@@ -50,4 +50,12 @@ export default defineConfig({
   define: {
     global: 'globalThis',
   },
+  optimizeDeps: {
+    exclude: ['snartnet-core']
+  },
+  server: {
+    fs: {
+      allow: ['..']
+    }
+  },
 })

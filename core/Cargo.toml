@@ -1,0 +1,33 @@
+[package]
+name = "snartnet-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v4", "js"] }
+chrono = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+base64 = { workspace = true }
+hex = "0.4"
+
+# WASM dependencies
+wasm-bindgen = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true }
+console_error_panic_hook = "0.1"
+wee_alloc = "0.4"
+
+# WASM-specific serde features
+serde-wasm-bindgen = "0.6"
+
+[dependencies.getrandom]
+version = "0.2"
+features = ["js"]
