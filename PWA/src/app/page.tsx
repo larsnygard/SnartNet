@@ -1,8 +1,9 @@
+import { Link } from 'react-router-dom'
 import { useProfileStore } from '@/stores/profileStore'
 import Layout from '@/components/Layout'
 
 export default function HomePage() {
-  const { currentProfile: profile, loading: isLoading } = useProfileStore()
+  const { currentProfile: profile, loading: isLoading, error } = useProfileStore()
 
   return (
     <Layout>
@@ -33,15 +34,57 @@ export default function HomePage() {
           </div>
           
           {isLoading && (
-            <p className="mt-4 text-gray-500">Loading profile...</p>
+            <div className="mt-4 flex items-center text-blue-600">
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-2"></div>
+              <p>Initializing WASM core...</p>
+            </div>
           )}
-          
-          {profile && (
-            <div className="mt-4 p-4 bg-green-50 dark:bg-green-900/20 rounded-lg">
-              <p className="text-green-700 dark:text-green-300">
-                Welcome back, {profile.displayName || profile.username}!
+
+          {error && (
+            <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+              <p className="text-red-700 dark:text-red-300 text-sm">
+                Error: {error}
               </p>
             </div>
+          )}
+          
+          {!isLoading && !error && (
+            <>
+              {profile ? (
+                <div className="mt-4 p-4 bg-green-50 dark:bg-green-900/20 rounded-lg">
+                  <p className="text-green-700 dark:text-green-300 mb-2">
+                    Welcome back, {profile.displayName || profile.username}! 🎉
+                  </p>
+                  <div className="flex space-x-3">
+                    <Link 
+                      to="/profile" 
+                      className="text-green-700 dark:text-green-300 underline hover:text-green-800 dark:hover:text-green-200"
+                    >
+                      View Profile
+                    </Link>
+                    <span className="text-green-600">•</span>
+                    <Link 
+                      to="/messages" 
+                      className="text-green-700 dark:text-green-300 underline hover:text-green-800 dark:hover:text-green-200"
+                    >
+                      Messages
+                    </Link>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-4 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                  <p className="text-blue-700 dark:text-blue-300 mb-3">
+                    🚀 Ready to get started! Create your cryptographic identity to join the network.
+                  </p>
+                  <Link
+                    to="/profile"
+                    className="inline-flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors"
+                  >
+                    Create Profile
+                  </Link>
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>

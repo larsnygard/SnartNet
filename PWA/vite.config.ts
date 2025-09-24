@@ -5,6 +5,7 @@ import { resolve } from 'path'
 
 // https://vitejs.dev/config/
 export default defineConfig({
+  base: '/net/',
   plugins: [
     react(),
     VitePWA({
@@ -17,8 +18,8 @@ export default defineConfig({
         theme_color: '#0d1117',
         background_color: '#ffffff',
         display: 'standalone',
-        scope: '/',
-        start_url: '/',
+        scope: '/net/',
+        start_url: '/net/',
         icons: [
           {
             src: 'icons/icon-192.png',
@@ -42,6 +43,9 @@ export default defineConfig({
   server: {
     port: 3000,
     host: true,
+    fs: {
+      allow: ['..']
+    }
   },
   build: {
     target: 'esnext',
@@ -52,10 +56,5 @@ export default defineConfig({
   },
   optimizeDeps: {
     exclude: ['snartnet-core']
-  },
-  server: {
-    fs: {
-      allow: ['..']
-    }
   },
 })

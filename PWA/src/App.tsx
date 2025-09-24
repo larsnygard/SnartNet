@@ -3,9 +3,12 @@ import HomePage from '@/pages/HomePage'
 import ProfilePage from '@/pages/ProfilePage'
 import MessagesPage from '@/pages/MessagesPage'
 import Layout from '@/components/Layout'
+import { useInitializeCore } from '@/hooks/useInitializeCore'
 import './App.css'
 
 function App() {
+  // Initialize the WASM core and load existing profile
+  useInitializeCore()
   return (
     <BrowserRouter>
       <Layout>
