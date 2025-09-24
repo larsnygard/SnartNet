@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
 import initWasm, { SnartNetCore as WasmCore, init_core } from '../wasm/snartnet_core'
+import { getTorrentService } from './torrent'
 
 /**
- * Core bindings for SnartNet Rust WASM module
+ * Core bindings for SnartNet Rust WASM module with WebTorrent integration
  */
 
 // Event types that the core can emit
@@ -147,6 +148,53 @@ class SnartNetCore {
         console.error('[SnartNetCore] Error in event callback:', error)
       }
     })
+  }
+
+  // Torrent functionality
+  async seedCurrentProfile(): Promise<string> {
+    try {
+      const profile = this.wasmCore.get_current_profile()
+      if (!profile) {
+        throw new Error('No current profile to seed')
+      }
+
+      const torrentService = getTorrentService()
+      const magnetURI = await torrentService.seedProfile(profile)
+      
+      console.log('[SnartNetCore] Profile seeding started:', magnetURI)
+      return magnetURI
+    } catch (error) {
+      console.error('[SnartNetCore] Failed to seed profile:', error)
+      throw error
+    }
+  }
+
+  async downloadProfileFromMagnet(magnetURI: string): Promise<any> {
+    try {
+      const torrentService = getTorrentService()
+      const profile = await torrentService.downloadProfile(magnetURI)
+      
+      console.log('[SnartNetCore] Profile downloaded:', profile)
+      return profile
+    } catch (error) {
+      console.error('[SnartNetCore] Failed to download profile:', error)
+      throw error
+    }
+  }
+
+  getTorrentStats() {
+    const torrentService = getTorrentService()
+    return torrentService.getStats()
+  }
+
+  getActiveTorrents() {
+    const torrentService = getTorrentService()
+    return torrentService.getActiveTorrents()
+  }
+
+  async stopSeeding(infoHash: string): Promise<void> {
+    const torrentService = getTorrentService()
+    torrentService.stopSeeding(infoHash)
   }
 
   // Mock methods for timeline (will be replaced with real P2P later)

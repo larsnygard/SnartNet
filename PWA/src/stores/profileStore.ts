@@ -6,7 +6,12 @@ interface Profile {
   displayName?: string
   bio?: string
   avatarHash?: string
+  avatar?: string
+  location?: string
+  website?: string
   magnetUri?: string
+  createdAt?: string
+  updatedAt?: string
 }
 
 interface ProfileState {

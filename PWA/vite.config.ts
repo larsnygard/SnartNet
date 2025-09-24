@@ -38,6 +38,13 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),
+      events: 'events',
+      util: 'util',
+      buffer: 'buffer',
+      path: 'path-browserify',
+      crypto: 'crypto-browserify',
+      stream: 'stream-browserify',
+      process: 'process',
     },
   },
   server: {
@@ -50,11 +57,22 @@ export default defineConfig({
   build: {
     target: 'esnext',
     sourcemap: true,
+    rollupOptions: {
+      external: ['webtorrent'],
+      output: {
+        manualChunks: (id) => {
+          if (id.includes('node_modules')) {
+            return 'vendor'
+          }
+        }
+      }
+    }
   },
   define: {
     global: 'globalThis',
   },
   optimizeDeps: {
-    exclude: ['snartnet-core']
+    exclude: ['snartnet-core'],
+    include: ['events', 'util', 'buffer']
   },
 })
