@@ -1,8 +1,8 @@
-
 import React, { useState } from 'react';
 import { useProfileStore } from '../stores/profileStore';
 import ProfileAvatar from './ProfileAvatar';
 import ProfilePictureUploader from './ProfilePictureUploader';
+import ProfilePosts from './ProfilePosts';
 
 const ProfileDisplay: React.FC = () => {
   const { currentProfile } = useProfileStore();
@@ -56,6 +56,10 @@ const ProfileDisplay: React.FC = () => {
           </div>
         </div>
       )}
+      {/* Profile posts section */}
+      <div className="w-full mt-8">
+        <ProfilePosts />
+      </div>
     </div>
   );
 };
