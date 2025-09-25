@@ -87,7 +87,13 @@ class TorrentService {
     try {
       const profileData = JSON.stringify(profile, null, 2)
       const fileName = `${profile.username}_profile.json`
-      const file = new File([profileData], fileName, { type: 'application/json' })
+      
+      // Ensure UTF-8 encoding by converting to Uint8Array first
+      const encoder = new TextEncoder()
+      const encodedData = encoder.encode(profileData)
+      const file = new File([encodedData], fileName, { 
+        type: 'application/json; charset=utf-8' 
+      })
 
       return new Promise((resolve, reject) => {
         const timeoutId = setTimeout(() => {
@@ -95,6 +101,13 @@ class TorrentService {
         }, 10000)
 
         try {
+          console.log('Seeding profile file:', {
+            fileName,
+            fileSize: file.size,
+            fileType: file.type,
+            profileDataLength: profileData.length
+          })
+          
           const torrent = this.client.seed([file], (torrent: any) => {
             clearTimeout(timeoutId)
             console.log('Profile seeded successfully:', torrent.magnetURI)
@@ -169,11 +182,34 @@ class TorrentService {
                 }
 
                 try {
-                  const profileData = JSON.parse(buffer.toString())
+                  // Convert buffer to string with proper encoding handling
+                  let jsonString: string
+                  
+                  if (buffer instanceof ArrayBuffer) {
+                    // Handle ArrayBuffer
+                    const uint8Array = new Uint8Array(buffer)
+                    const decoder = new TextDecoder('utf-8', { fatal: false })
+                    jsonString = decoder.decode(uint8Array)
+                  } else if (buffer && typeof buffer.toString === 'function') {
+                    // Handle Buffer-like objects
+                    jsonString = buffer.toString('utf8')
+                  } else {
+                    // Fallback for other buffer types
+                    jsonString = String(buffer)
+                  }
+
+                  // Parse the JSON
+                  const profileData = JSON.parse(jsonString)
                   this.emitEvent({ type: 'profile-downloaded', profile: profileData })
                   resolve(profileData)
                 } catch (parseError) {
-                  this.emitEvent({ type: 'error', error: 'Failed to parse profile data' })
+                  console.error('Profile parsing error:', parseError)
+                  console.error('Buffer type:', typeof buffer)
+                  console.error('Buffer constructor:', buffer?.constructor?.name)
+                  this.emitEvent({ 
+                    type: 'error', 
+                    error: `Failed to parse profile data: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`
+                  })
                   reject(parseError)
                 }
               })

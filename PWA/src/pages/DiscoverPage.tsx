@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import MagnetLinkManager from '@/components/MagnetLinkManager'
+import { useContactStore, type RelationshipType } from '@/stores/contactStore'
 
 interface DiscoveredProfile {
   id: string
@@ -14,6 +15,7 @@ interface DiscoveredProfile {
 
 export default function DiscoverPage() {
   const [discoveredProfiles, setDiscoveredProfiles] = useState<DiscoveredProfile[]>([])
+  const { addContact, getContact } = useContactStore()
 
   // Load discovered profiles from localStorage on mount
   useEffect(() => {
@@ -60,6 +62,29 @@ export default function DiscoverPage() {
 
   const removeProfile = (publicKey: string) => {
     setDiscoveredProfiles(prev => prev.filter(p => p.publicKey !== publicKey))
+  }
+
+  const addAsContact = (profile: DiscoveredProfile, relationship: RelationshipType = 'friend') => {
+    // Check if already a contact
+    const contactId = `contact_${btoa(profile.username + (profile.magnetURI || '')).slice(0, 16)}`
+    const existingContact = getContact(contactId)
+    
+    if (existingContact) {
+      alert(`${profile.username} is already in your contacts!`)
+      return
+    }
+
+    addContact({
+      username: profile.username,
+      displayName: profile.displayName,
+      relationship: relationship,
+      trustLevel: relationship === 'friend' ? 7 : 5,
+      magnetUri: profile.magnetURI || '',
+      avatar: profile.avatar,
+      notes: `Added from discovery on ${new Date().toLocaleDateString()}`
+    })
+
+    alert(`${profile.username} has been added to your ${relationship}s!`)
   }
 
   const formatDate = (isoString: string) => {
@@ -148,8 +173,23 @@ export default function DiscoverPage() {
                   <p className="font-mono">ID: {profile.id}</p>
                 </div>
 
+                <div className="flex gap-2 mb-2">
+                  <button
+                    onClick={() => addAsContact(profile, 'friend')}
+                    className="flex-1 px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    ➕ Add Friend
+                  </button>
+                  <button
+                    onClick={() => addAsContact(profile, 'acquaintance')}
+                    className="flex-1 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
+                  >
+                    🤝 Add Acquaintance
+                  </button>
+                </div>
+                
                 <div className="flex gap-2">
-                  <button className="flex-1 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors">
+                  <button className="flex-1 px-3 py-2 bg-gray-600 hover:bg-gray-700 text-white text-sm font-medium rounded-lg transition-colors">
                     💬 Message
                   </button>
                   <button className="flex-1 px-3 py-2 bg-gray-600 hover:bg-gray-700 text-white text-sm font-medium rounded-lg transition-colors">

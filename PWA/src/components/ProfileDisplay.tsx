@@ -49,7 +49,6 @@ export default function ProfileDisplay() {
     return (
       <EditProfile
         onCancel={() => setIsEditing(false)}
-        onSave={() => setIsEditing(false)}
       />
     )
   }

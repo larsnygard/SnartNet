@@ -158,8 +158,22 @@ class SnartNetCore {
         throw new Error('No current profile to seed')
       }
 
+      console.log('[SnartNetCore] Profile data type:', typeof profile)
+      console.log('[SnartNetCore] Profile data:', profile)
+      
+      // Ensure profile is properly serializable by converting to plain object
+      let cleanProfile: any
+      if (typeof profile === 'object' && profile !== null) {
+        // Convert to plain JavaScript object to ensure proper serialization
+        cleanProfile = JSON.parse(JSON.stringify(profile))
+      } else {
+        cleanProfile = profile
+      }
+
+      console.log('[SnartNetCore] Clean profile:', cleanProfile)
+
       const torrentService = getTorrentService()
-      const magnetURI = await torrentService.seedProfile(profile)
+      const magnetURI = await torrentService.seedProfile(cleanProfile)
       
       console.log('[SnartNetCore] Profile seeding started:', magnetURI)
       return magnetURI
