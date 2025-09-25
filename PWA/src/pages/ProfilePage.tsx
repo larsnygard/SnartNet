@@ -4,11 +4,13 @@ import CreateProfile from '@/components/CreateProfile'
 import ProfileDisplay from '@/components/ProfileDisplay'
 import WebTorrentStatus from '@/components/WebTorrentStatus'
 import MagnetLinkManager from '@/components/MagnetLinkManager'
+import BackupRestore from '@/components/BackupRestore'
 
 
 const ProfilePage: React.FC = () => {
   const { currentProfile, loading } = useProfileStore()
   const [showCreateNew, setShowCreateNew] = useState(false)
+  const [showBackupRestore, setShowBackupRestore] = useState(false)
 
   return (
     <div>
@@ -17,14 +19,24 @@ const ProfilePage: React.FC = () => {
           Profile Management
         </h1>
         
-        {currentProfile && !showCreateNew && (
-          <button
-            onClick={() => setShowCreateNew(true)}
-            className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white font-medium rounded-lg transition-colors"
-          >
-            Create New Profile
-          </button>
-        )}
+        <div className="flex gap-2">
+          {currentProfile && !showCreateNew && !showBackupRestore && (
+            <>
+              <button
+                onClick={() => setShowBackupRestore(true)}
+                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white font-medium rounded-lg transition-colors"
+              >
+                💾 Backup & Restore
+              </button>
+              <button
+                onClick={() => setShowCreateNew(true)}
+                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white font-medium rounded-lg transition-colors"
+              >
+                Create New Profile
+              </button>
+            </>
+          )}
+        </div>
       </div>
       
       {loading && (
@@ -36,7 +48,13 @@ const ProfilePage: React.FC = () => {
 
       {!loading && (
         <div className="space-y-8">
-          {showCreateNew && (
+          {showBackupRestore && (
+            <div>
+              <BackupRestore onClose={() => setShowBackupRestore(false)} />
+            </div>
+          )}
+
+          {showCreateNew && !showBackupRestore && (
             <div>
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
@@ -53,23 +71,27 @@ const ProfilePage: React.FC = () => {
             </div>
           )}
           
-          {currentProfile ? (
-            <div>
-              {!showCreateNew && (
-                <>
-                  <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
-                    Current Profile
-                  </h2>
-                  <ProfileDisplay />
-                </>
+          {!showBackupRestore && (
+            <>
+              {currentProfile ? (
+                <div>
+                  {!showCreateNew && (
+                    <>
+                      <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
+                        Current Profile
+                      </h2>
+                      <ProfileDisplay />
+                    </>
+                  )}
+                </div>
+              ) : (
+                !showCreateNew && <CreateProfile />
               )}
-            </div>
-          ) : (
-            !showCreateNew && <CreateProfile />
+              
+              <MagnetLinkManager />
+              <WebTorrentStatus />
+            </>
           )}
-          
-          <MagnetLinkManager />
-          <WebTorrentStatus />
         </div>
       )}
     </div>
