@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import MagnetLinkManager from '@/components/MagnetLinkManager'
 import { useContactStore, type Contact, type RelationshipType } from '../stores/contactStore'
 
 const ContactsPage: React.FC = () => {
@@ -28,6 +29,10 @@ const ContactsPage: React.FC = () => {
 
   return (
     <div className="max-w-6xl mx-auto p-6">
+      {/* Connect with Friends (MagnetLinkManager) */}
+      <div className="mb-10">
+        <MagnetLinkManager />
+      </div>
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
           Contacts & Relationships
@@ -139,6 +144,8 @@ const AddContactForm: React.FC<AddContactFormProps> = ({ onAdd, onCancel, defaul
               onChange={(e) => setFormData(prev => ({ ...prev, username: e.target.value }))}
               className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
               required
+              placeholder="Enter username"
+              title="Username"
             />
           </div>
 
@@ -151,6 +158,8 @@ const AddContactForm: React.FC<AddContactFormProps> = ({ onAdd, onCancel, defaul
               value={formData.displayName}
               onChange={(e) => setFormData(prev => ({ ...prev, displayName: e.target.value }))}
               className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+              placeholder="Enter display name (optional)"
+              title="Display Name"
             />
           </div>
 
@@ -162,6 +171,7 @@ const AddContactForm: React.FC<AddContactFormProps> = ({ onAdd, onCancel, defaul
               value={formData.relationship}
               onChange={(e) => setFormData(prev => ({ ...prev, relationship: e.target.value as RelationshipType }))}
               className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+              title="Relationship Type"
             >
               <option value="friend">Friend</option>
               <option value="acquaintance">Acquaintance</option>
@@ -181,6 +191,8 @@ const AddContactForm: React.FC<AddContactFormProps> = ({ onAdd, onCancel, defaul
               value={formData.trustLevel}
               onChange={(e) => setFormData(prev => ({ ...prev, trustLevel: parseInt(e.target.value) }))}
               className="w-full"
+              title="Trust Level"
+              placeholder="Trust Level"
             />
             <div className="text-center text-sm text-gray-500">{formData.trustLevel}</div>
           </div>

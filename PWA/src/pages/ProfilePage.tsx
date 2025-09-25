@@ -3,7 +3,6 @@ import { useProfileStore } from '@/stores/profileStore'
 import CreateProfile from '@/components/CreateProfile'
 import ProfileDisplay from '@/components/ProfileDisplay'
 import WebTorrentStatus from '@/components/WebTorrentStatus'
-import MagnetLinkManager from '@/components/MagnetLinkManager'
 import BackupRestore from '@/components/BackupRestore'
 
 
@@ -88,7 +87,6 @@ const ProfilePage: React.FC = () => {
                 !showCreateNew && <CreateProfile />
               )}
               
-              <MagnetLinkManager />
               <WebTorrentStatus />
             </>
           )}
