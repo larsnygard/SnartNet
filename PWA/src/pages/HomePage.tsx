@@ -1,17 +1,17 @@
 import { useEffect, useState } from 'react'
 import { useCore } from '@/lib/core'
+import CreatePost from '@/components/CreatePost'
+import PostTimeline from '@/components/PostTimeline'
+import { useProfileStore } from '@/stores/profileStore'
 
 const HomePage: React.FC = () => {
   const { core, loading: coreLoading } = useCore()
-  const [timeline, setTimeline] = useState<any[]>([])
+  const { currentProfile } = useProfileStore()
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     if (core) {
-      core.getTimeline().then(posts => {
-        setTimeline(posts)
-        setLoading(false)
-      })
+      setLoading(false)
     }
   }, [core])
 
@@ -34,69 +34,64 @@ const HomePage: React.FC = () => {
       
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 mb-6">
-            <h2 className="text-xl font-semibold mb-4">Timeline</h2>
-            <div className="space-y-4">
-              {timeline.map(post => (
-                <div key={post.id} className="border-b border-gray-200 dark:border-gray-700 pb-4 last:border-0">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-medium text-gray-900 dark:text-white">@{post.author}</span>
-                    <span className="text-sm text-gray-500">{new Date(post.timestamp).toLocaleString()}</span>
-                  </div>
-                  <p className="text-gray-700 dark:text-gray-300 mb-2">{post.content}</p>
-                  {post.tags && post.tags.length > 0 && (
-                    <div className="flex gap-2">
-                      {post.tags.map((tag: string) => (
-                        <span key={tag} className="text-xs bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 px-2 py-1 rounded">
-                          #{tag}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
+          {/* Create Post Section */}
+          {currentProfile && <CreatePost />}
+          
+          {/* Timeline */}
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+            <h2 className="text-xl font-semibold mb-6 flex items-center">
+              <span>Timeline</span>
+              <span className="ml-2 text-sm text-gray-500 dark:text-gray-400">(Torrent-seeded posts)</span>
+            </h2>
+            <PostTimeline />
           </div>
         </div>
         
         <div className="space-y-6">
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-            <h2 className="text-xl font-semibold mb-4">Getting Started</h2>
+            <h2 className="text-xl font-semibold mb-4">How It Works</h2>
             <p className="text-gray-600 dark:text-gray-300 mb-4">
-              Welcome to SnartNet! This is a decentralized social media platform built on 
-              BitTorrent-like swarm technology and modern cryptography.
+              Every post is a torrent seed! Your content is distributed across the swarm, 
+              making it censorship-resistant and decentralized.
             </p>
             <div className="space-y-2">
               <p className="text-sm text-gray-500">
-                🔐 Your identity is cryptographically secured
+                🌱 Posts are seeded as torrents
               </p>
               <p className="text-sm text-gray-500">
-                🌐 Content is distributed peer-to-peer
+                📷 Images included in torrent files
               </p>
               <p className="text-sm text-gray-500">
-                🤝 Trust is managed through your Ring of Trust
+                🔐 Content cryptographically signed
+              </p>
+              <p className="text-sm text-gray-500">
+                🤝 Shared through your Ring of Trust
               </p>
             </div>
           </div>
 
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-            <h3 className="text-lg font-semibold mb-3">Development Status</h3>
+            <h3 className="text-lg font-semibold mb-3">Features</h3>
             <div className="space-y-2 text-sm">
               <div className="flex items-center">
                 <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
-                <span>React PWA setup complete</span>
+                <span>Profile pictures & posts</span>
               </div>
               <div className="flex items-center">
                 <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
-                <span>Mock core interface active</span>
+                <span>Image upload & processing</span>
+              </div>
+              <div className="flex items-center">
+                <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
+                <span>Post torrent seeding</span>
+              </div>
+              <div className="flex items-center">
+                <span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>
+                <span>Chronological timeline</span>
               </div>
               <div className="flex items-center">
                 <span className="w-2 h-2 bg-yellow-500 rounded-full mr-2"></span>
-                <span>Rust WASM core (planned)</span>
-              </div>
-              <div className="flex items-center">
-                <span className="w-2 h-2 bg-gray-400 rounded-full mr-2"></span>
-                <span>P2P networking (future)</span>
+                <span>P2P post sharing (WIP)</span>
               </div>
             </div>
           </div>
