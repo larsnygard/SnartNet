@@ -266,3 +266,33 @@ export class ImageProcessor {
     return `linear-gradient(135deg, hsl(${hue1}, 70%, 50%), hsl(${hue2}, 70%, 70%))`
   }
 }
+
+export async function processAndStoreImage(file: File, _type: 'post-image' | 'avatar'): Promise<{ id: string, data: string, filename: string, size: number, mimeType: string } | null> {
+  // For now, we just convert to base64. We can add resizing later.
+  if (!file.type.startsWith('image/')) {
+    console.warn(`File is not an image: ${file.name}`);
+    return null;
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const data = e.target?.result as string;
+      if (data) {
+        resolve({
+          id: `${file.name}-${file.lastModified}`,
+          data,
+          filename: file.name,
+          size: file.size,
+          mimeType: file.type,
+        });
+      } else {
+        reject(new Error('Failed to read file data.'));
+      }
+    };
+    reader.onerror = (error) => {
+      reject(error);
+    };
+    reader.readAsDataURL(file);
+  });
+}

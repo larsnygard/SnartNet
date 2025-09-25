@@ -1,15 +1,47 @@
 import { useState, useEffect } from 'react'
 import initWasm, { SnartNetCore as WasmCore, init_core } from '../wasm/snartnet_core'
 import { getTorrentService } from './torrent'
+import profileSchema from '../schemas/profile.v1.json'
+import postSchema from '../schemas/post.v1.json'
 
-/**
- * Core bindings for SnartNet Rust WASM module with WebTorrent integration
- */
+// Normalized types
+export interface NormalizedProfile {
+  id: string
+  username: string
+  displayName?: string
+  bio?: string
+  avatarHash?: string
+  publicKey: string
+  fingerprint: string
+  createdAt: string
+  updatedAt: string
+  version: number
+  magnetUri?: string
+  schemaVersion: 1
+}
+
+function normalizeProfile(raw: any): NormalizedProfile | null {
+  if (!raw) return null
+  return {
+    id: raw.id,
+    username: raw.username,
+    displayName: raw.display_name || raw.displayName || undefined,
+    bio: raw.bio || undefined,
+    avatarHash: raw.avatar_hash || raw.avatarHash || undefined,
+    publicKey: raw.public_key || raw.publicKey,
+    fingerprint: raw.fingerprint,
+    createdAt: typeof raw.created_at === 'string' ? raw.created_at : raw.createdAt,
+    updatedAt: typeof raw.updated_at === 'string' ? raw.updated_at : raw.updatedAt,
+    version: raw.version || 1,
+    magnetUri: raw.magnet_uri || raw.magnetUri || undefined,
+    schemaVersion: 1,
+  }
+}
 
 // Event types that the core can emit
 export type CoreEvent = 
-  | { type: 'ProfileLoaded'; profile: any }
-  | { type: 'ProfileUpdated'; profile: any }
+  | { type: 'ProfileLoaded'; profile: NormalizedProfile }
+  | { type: 'ProfileUpdated'; profile: NormalizedProfile }
   | { type: 'PostAdded'; post: any }
   | { type: 'MessageReceived'; message: any }
   | { type: 'SyncStateChanged'; state: any }
@@ -17,12 +49,20 @@ export type CoreEvent =
 
 export type EventCallback = (event: CoreEvent) => void
 
+export interface CoreCapabilities {
+  profileJsonApi: boolean
+  postJsonApi: boolean
+  messageJsonApi: boolean
+  version: string
+}
+
 /**
  * TypeScript wrapper for the WASM core
  */
 class SnartNetCore {
   private wasmCore: WasmCore
   private eventCallbacks: Set<EventCallback> = new Set()
+  private capabilities: CoreCapabilities | null = null
 
   constructor(wasmCore: WasmCore) {
     this.wasmCore = wasmCore
@@ -39,47 +79,125 @@ class SnartNetCore {
     }
   }
 
+  async getCapabilities(): Promise<CoreCapabilities> {
+    if (this.capabilities) return this.capabilities
+    // Try calling a wasm capability probe if it exists; fall back to defaults.
+    let cap: CoreCapabilities = {
+      profileJsonApi: false,
+      postJsonApi: false,
+      messageJsonApi: false,
+      version: '0'
+    }
+    // @ts-ignore dynamic probing
+    const probe = (this.wasmCore as any).get_capabilities
+    if (typeof probe === 'function') {
+      try {
+        const raw = probe.call(this.wasmCore)
+        if (raw) {
+          // Accept either JSON string or object
+            let obj = raw
+            if (typeof raw === 'string') {
+              try { obj = JSON.parse(raw) } catch {}
+            }
+            cap = {
+              profileJsonApi: !!(obj.profileJsonApi || obj.profile_json_api),
+              postJsonApi: !!(obj.postJsonApi || obj.post_json_api),
+              messageJsonApi: !!(obj.messageJsonApi || obj.message_json_api),
+              version: obj.version ? String(obj.version) : '0'
+            }
+        }
+      } catch (e) {
+        console.warn('[Core] capability probe failed, using defaults', e)
+      }
+    }
+    this.capabilities = cap
+    return cap
+  }
+
   // Profile management
   async createProfile(username: string, displayName?: string, bio?: string): Promise<string> {
+    const caps = await this.getCapabilities()
+    if (caps.profileJsonApi && (this.wasmCore as any).create_profile_json) {
+      const payload = JSON.stringify({ username, displayName: displayName || null, bio: bio || null })
+      const env = (this.wasmCore as any).create_profile_json(payload)
+      const obj = typeof env === 'string' ? JSON.parse(env) : env
+      const profile = obj.profile || obj.profileJson || obj
+      const normalized = normalizeProfile(profile)
+      if (normalized) this.emitEvent({ type: 'ProfileLoaded', profile: normalized })
+      return obj.magnetUri || profile.magnetUri || ''
+    }
     try {
-      const magnetUri = this.wasmCore.create_profile(username, displayName || null, bio || null)
-      console.log('[SnartNetCore] Profile created:', { username, magnetUri })
-      
-      // Emit event
-      const profile = this.wasmCore.get_current_profile()
-      if (profile) {
-        this.emitEvent({ type: 'ProfileLoaded', profile })
-      }
-      
+      // Pass undefined instead of null for Option<String> to satisfy wasm-bindgen expectations
+      const magnetUri = (this.wasmCore as any).create_profile(
+        username,
+        displayName ? displayName : undefined,
+        bio ? bio : undefined
+      )
+      const raw = (this.wasmCore as any).get_current_profile()
+      const normalized = normalizeProfile(raw)
+      if (normalized) this.emitEvent({ type: 'ProfileLoaded', profile: normalized })
       return magnetUri
-    } catch (error) {
-      console.error('[SnartNetCore] Create profile error:', error)
-      throw error
+    } catch (e: any) {
+      const msg = String(e?.message || e)
+      console.error('[Core] legacy create_profile failed:', e)
+      // Attempt fallback to JSON API directly if capability probe failed earlier
+      const jsonApi = (this.wasmCore as any).create_profile_json
+      if (jsonApi) {
+        try {
+          const payload = JSON.stringify({ username, displayName: displayName || null, bio: bio || null })
+          const env = jsonApi(payload)
+          const obj = typeof env === 'string' ? JSON.parse(env) : env
+          const profile = obj.profile || obj.profileJson || obj
+          const normalized = normalizeProfile(profile)
+          if (normalized) this.emitEvent({ type: 'ProfileLoaded', profile: normalized })
+          return obj.magnetUri || profile.magnetUri || ''
+        } catch (e2) {
+          console.error('[Core] JSON fallback also failed:', e2)
+        }
+      }
+      if (/memory access out of bounds/i.test(msg)) {
+        // Possible corrupted persisted data; advise reset
+        console.warn('[Core] Detected possible corrupted WASM state; clearing persisted key/profile entries')
+        try {
+          localStorage.removeItem('snartnet_keypair')
+          localStorage.removeItem('snartnet_current_profile')
+        } catch {}
+      }
+      throw e
     }
   }
 
-  async getCurrentProfile(): Promise<any> {
-    try {
-      return this.wasmCore.get_current_profile()
-    } catch (error) {
-      console.error('[SnartNetCore] Get profile error:', error)
-      return null
+  async getCurrentProfile(): Promise<NormalizedProfile | null> {
+    const caps = await this.getCapabilities()
+    if (caps.profileJsonApi && (this.wasmCore as any).get_current_profile_json) {
+      const env = (this.wasmCore as any).get_current_profile_json()
+      if (!env) return null
+      const obj = typeof env === 'string' ? JSON.parse(env) : env
+      const profile = obj.profile || obj.profileJson || obj
+      return normalizeProfile(profile)
     }
+    const raw = this.wasmCore.get_current_profile()
+    return normalizeProfile(raw)
   }
 
   async updateProfile(displayName?: string, bio?: string): Promise<void> {
-    try {
-      await this.wasmCore.update_current_profile(displayName || null, bio || null)
-      
-      // Emit event
-      const profile = this.wasmCore.get_current_profile()
-      if (profile) {
-        this.emitEvent({ type: 'ProfileUpdated', profile })
-      }
-    } catch (error) {
-      console.error('[SnartNetCore] Update profile error:', error)
-      throw error
+    const caps = await this.getCapabilities()
+    if (caps.profileJsonApi && (this.wasmCore as any).update_profile_json) {
+      const payload = JSON.stringify({ displayName: displayName || null, bio: bio || null })
+      const env = (this.wasmCore as any).update_profile_json(payload)
+      const obj = typeof env === 'string' ? JSON.parse(env) : env
+      const profile = obj.profile || obj.profileJson || obj
+      const normalized = normalizeProfile(profile)
+      if (normalized) this.emitEvent({ type: 'ProfileUpdated', profile: normalized })
+      return
     }
+    await (this.wasmCore as any).update_current_profile(
+      displayName ? displayName : undefined,
+      bio ? bio : undefined
+    )
+    const raw = this.wasmCore.get_current_profile()
+    const normalized = normalizeProfile(raw)
+    if (normalized) this.emitEvent({ type: 'ProfileUpdated', profile: normalized })
   }
 
   // Key management
@@ -231,6 +349,17 @@ class SnartNetCore {
       }
     ]
   }
+
+  validateProfile(obj: any): boolean {
+    // minimal structural checks using schema constants (not full JSON Schema validation runtime yet)
+    if (!obj || typeof obj !== 'object') return false
+    for (const key of ['id','username','publicKey','fingerprint','createdAt','updatedAt']) {
+      if (!(key in obj)) return false
+    }
+    return true
+  }
+  // placeholder for future post validation
+  validatePost(obj: any): boolean { return !!obj && typeof obj === 'object' && 'id' in obj && 'author' in obj }
 }
 
 // Global core instance
@@ -279,3 +408,5 @@ export function useCore() {
 
   return { core, loading }
 }
+
+export { profileSchema, postSchema }

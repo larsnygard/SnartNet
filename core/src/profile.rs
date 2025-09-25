@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use wasm_bindgen::prelude::*;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+// removed unused base64 import
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
@@ -92,24 +92,46 @@ impl SignedProfile {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct ProfileData {
+    username: String,
+    displayName: Option<String>,
+    bio: Option<String>,
+}
+
 // WASM exports
 #[wasm_bindgen]
-pub fn create_profile(username: &str, key_info_json: &str) -> Result<JsValue, JsValue> {
-    let key_info: KeyInfo = serde_json::from_str(key_info_json)
-        .map_err(|e| JsValue::from_str(&format!("Invalid key info: {}", e)))?;
+pub fn create_profile(profile_data_json: &str) -> Result<JsValue, JsValue> {
+    let profile_data: ProfileData = serde_json::from_str(profile_data_json)
+        .map_err(|e| JsValue::from_str(&format!("Invalid profile data: {}", e)))?;
+
+    let keypair = KeyPair::generate()
+        .map_err(|e| JsValue::from_str(&format!("Failed to create keypair: {}", e)))?;
+    let key_info = keypair.get_public_info();
     
-    let profile = Profile::new(username.to_string(), key_info);
+    let mut profile = Profile::new(profile_data.username, key_info);
+    profile.display_name = profile_data.displayName;
+    profile.bio = profile_data.bio;
     
     serde_wasm_bindgen::to_value(&profile)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+#[derive(Serialize, Deserialize)]
+struct ProfileUpdateData {
+    displayName: Option<String>,
+    bio: Option<String>,
+}
+
 #[wasm_bindgen]
-pub fn update_profile(profile_json: &str, display_name: Option<String>, bio: Option<String>) -> Result<JsValue, JsValue> {
+pub fn update_profile(profile_json: &str, update_data_json: &str) -> Result<JsValue, JsValue> {
     let mut profile: Profile = serde_json::from_str(profile_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid profile JSON: {}", e)))?;
     
-    profile.update(display_name, bio);
+    let update_data: ProfileUpdateData = serde_json::from_str(update_data_json)
+        .map_err(|e| JsValue::from_str(&format!("Invalid update data: {}", e)))?;
+
+    profile.update(update_data.displayName, update_data.bio);
     
     serde_wasm_bindgen::to_value(&profile)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))

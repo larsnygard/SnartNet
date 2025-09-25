@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://snart.net/schemas/post.v1.json",
+  "title": "SnartNet Post (v1)",
+  "type": "object",
+  "required": ["id", "author", "content", "createdAt", "schemaVersion", "version"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "minLength": 8 },
+    "author": { "type": "string", "minLength": 1 },
+    "authorPublicKey": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+    "authorDisplayName": { "type": "string", "maxLength": 80 },
+    "authorAvatar": { "type": "string" },
+    "content": { "type": "string", "maxLength": 5000 },
+    "images": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "data", "mimeType"],
+        "properties": {
+          "id": { "type": "string" },
+          "data": { "type": "string", "pattern": "^data:image/.*;base64,.*" },
+          "mimeType": { "type": "string", "pattern": "^image/" },
+          "width": { "type": "integer", "minimum": 1 },
+          "height": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      },
+      "maxItems": 8
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "mimeType", "size"],
+        "properties": {
+          "id": { "type": "string" },
+            "name": { "type": "string", "minLength": 1 },
+            "mimeType": { "type": "string" },
+            "size": { "type": "integer", "minimum": 0 },
+            "magnetUri": { "type": "string" },
+            "sha256": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" }
+        },
+        "additionalProperties": false
+      },
+      "maxItems": 16
+    },
+    "magnetUri": { "type": "string" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "version": { "type": "integer", "minimum": 1 }
+  },
+  "additionalProperties": false
+}

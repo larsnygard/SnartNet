@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://snart.net/schemas/profile.v1.json",
+  "title": "SnartNet Profile (v1)",
+  "type": "object",
+  "required": ["id", "username", "publicKey", "fingerprint", "createdAt", "updatedAt", "version", "schemaVersion"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "username": { "type": "string", "pattern": "^[a-zA-Z0-9_.-]{3,32}$" },
+    "displayName": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "bio": { "type": "string", "maxLength": 500 },
+    "avatarHash": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" },
+    "publicKey": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+    "fingerprint": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "version": { "type": "integer", "minimum": 1 },
+    "magnetUri": { "type": "string" }
+  },
+  "additionalProperties": false
+}

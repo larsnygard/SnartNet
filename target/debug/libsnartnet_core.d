@@ -1,0 +1,1 @@
+/home/lars/src/SnartNet/target/debug/libsnartnet_core.rlib: /home/lars/src/SnartNet/core/src/crypto.rs /home/lars/src/SnartNet/core/src/lib.rs /home/lars/src/SnartNet/core/src/message.rs /home/lars/src/SnartNet/core/src/post.rs /home/lars/src/SnartNet/core/src/profile.rs /home/lars/src/SnartNet/core/src/storage.rs /home/lars/src/SnartNet/core/src/wasm.rs

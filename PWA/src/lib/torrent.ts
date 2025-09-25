@@ -1,10 +1,15 @@
 import type { Profile } from '@/stores/profileStore'
+import type { TorrentPost } from '@/stores/postStore'
 
 // Simple torrent service that works in both browser and build
 class TorrentService {
   private client: any = null
   private activeTorrents: Map<string, any> = new Map()
   private eventCallbacks: Array<(event: any) => void> = []
+  private readyPromise: Promise<void>
+  private resolveReady!: () => void
+  private clientReady = false
+  private pendingSeeds: Array<() => void> = []
   private stats = {
     torrents: 0,
     downloadSpeed: 0,
@@ -15,39 +20,61 @@ class TorrentService {
   }
 
   constructor() {
+    this.readyPromise = new Promise(resolve => {
+      this.resolveReady = resolve
+    })
     this.initializeClient()
   }
 
   private async initializeClient() {
-    // Only initialize in browser environment
     if (typeof window === 'undefined') return
-    
-    try {
-      // Use global WebTorrent from CDN
+    let attempts = 0
+    const maxAttempts = 10
+
+    const tryInit = () => {
+      attempts++
       const WebTorrentConstructor = (window as any).WebTorrent
-      
       if (!WebTorrentConstructor || typeof WebTorrentConstructor !== 'function') {
-        // Fallback - wait for CDN to load or show error
-        throw new Error('WebTorrent not available - please ensure CDN is loaded')
-      } else {
-        this.client = new WebTorrentConstructor()
+        if (attempts < maxAttempts) {
+          console.warn(`[TorrentService] WebTorrent not available yet (attempt ${attempts}), retrying...`)
+          setTimeout(tryInit, 500)
+          return
+        } else {
+          const err = new Error('WebTorrent not available after retries')
+          console.error('[TorrentService] ', err)
+          this.emitEvent({ type: 'error', error: err.message })
+          return
+        }
       }
 
-      this.client.on('error', (err: any) => {
-        this.emitEvent({ type: 'error', error: err.message })
-      })
-
-      this.client.on('torrent', (torrent: any) => {
-        this.activeTorrents.set(torrent.infoHash, torrent)
-        this.emitEvent({ type: 'torrent-added', torrent })
-        this.updateStats()
-      })
-
-      console.log('WebTorrent client initialized successfully')
-    } catch (error) {
-      console.error('Failed to initialize WebTorrent:', error)
-      this.emitEvent({ type: 'error', error: `Failed to initialize WebTorrent: ${error}` })
+      try {
+        this.client = new WebTorrentConstructor()
+        this.clientReady = true
+        this.client.on('error', (err: any) => {
+          console.error('[TorrentService] Client error:', err)
+          this.emitEvent({ type: 'error', error: err.message })
+        })
+        this.client.on('torrent', (torrent: any) => {
+          console.log('[TorrentService] Torrent added:', { name: torrent.name, infoHash: torrent.infoHash })
+          this.activeTorrents.set(torrent.infoHash, torrent)
+          this.emitEvent({ type: 'torrent-added', torrent })
+          this.updateStats()
+        })
+        console.log('[TorrentService] WebTorrent client initialized successfully')
+        this.resolveReady()
+        // Flush pending seeds
+        const queue = [...this.pendingSeeds]
+        this.pendingSeeds = []
+        queue.forEach(fn => {
+          try { fn() } catch (e) { console.error('[TorrentService] Pending seed failed:', e) }
+        })
+      } catch (error) {
+        console.error('[TorrentService] Failed to initialize:', error)
+        this.emitEvent({ type: 'error', error: String(error) })
+      }
     }
+
+    tryInit()
   }
 
   private emitEvent(event: any) {
@@ -80,6 +107,7 @@ class TorrentService {
   }
 
   async seedProfile(profile: Profile): Promise<string> {
+    await this.readyPromise
     if (!this.client) {
       throw new Error('WebTorrent client not initialized. Are you in a browser environment?')
     }
@@ -150,7 +178,72 @@ class TorrentService {
     }
   }
 
+  private ensureReadyAction(action: () => void) {
+    if (this.clientReady) {
+      action()
+    } else {
+      console.log('[TorrentService] Client not ready, queuing action')
+      this.pendingSeeds.push(action)
+    }
+  }
+
+  async seedPost(post: Omit<TorrentPost, 'id' | 'createdAt'>): Promise<string> {
+    await this.readyPromise
+    if (!this.client || !this.clientReady) {
+      throw new Error('WebTorrent client not ready for seeding')
+    }
+
+    const startTime = performance.now()
+    console.log('[TorrentService] Seeding post start', { author: post.author, hasImages: !!post.images?.length })
+
+    const postData = JSON.stringify(post, null, 2)
+    const fileName = `post_${Date.now()}.json`
+    const encodedData = new TextEncoder().encode(postData)
+    const file = new File([encodedData], fileName, { type: 'application/json; charset=utf-8' })
+
+    return new Promise((resolve, reject) => {
+      let resolved = false
+      const seedAction = () => {
+        try {
+          const torrent = this.client.seed([file], (torrent: any) => {
+            resolved = true
+            const duration = (performance.now() - startTime).toFixed(0)
+            console.log('[TorrentService] Post torrent ready', { infoHash: torrent.infoHash, magnet: torrent.magnetURI, durationMs: duration })
+            this.emitEvent({ type: 'seeding-started', post, magnetURI: torrent.magnetURI })
+            resolve(torrent.magnetURI)
+          })
+
+          torrent.on('error', (err: any) => {
+            if (!resolved) {
+              console.error('[TorrentService] Torrent error before ready:', err)
+              reject(err)
+            } else {
+              console.warn('[TorrentService] Torrent error after ready:', err)
+            }
+          })
+
+          torrent.on('wire', (wire: any) => {
+            this.emitEvent({ type: 'peer-connected', peerId: wire.peerId || 'unknown' })
+          })
+        } catch (e) {
+          console.error('[TorrentService] Seed action failed synchronously:', e)
+          reject(e)
+        }
+      }
+
+      this.ensureReadyAction(seedAction)
+
+      // Timeout safeguard
+      setTimeout(() => {
+        if (!resolved) {
+          reject(new Error('Seeding post timed out'))
+        }
+      }, 15000)
+    })
+  }
+
   async downloadProfile(magnetURI: string): Promise<Profile | null> {
+    await this.readyPromise
     if (!this.client) {
       throw new Error('WebTorrent client not initialized. Are you in a browser environment?')
     }
@@ -323,6 +416,7 @@ export function getTorrentService(): TorrentService {
 // Event types for better type safety
 export type TorrentEvent = 
   | { type: 'seeding-started'; profile: Profile; magnetURI: string }
+  | { type: 'seeding-started'; post: Omit<TorrentPost, 'id' | 'createdAt'>; magnetURI: string }
   | { type: 'peer-connected'; peerId: string }
   | { type: 'upload-progress'; uploadSpeed: number }
   | { type: 'profile-downloaded'; profile: Profile }

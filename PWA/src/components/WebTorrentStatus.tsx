@@ -45,7 +45,11 @@ export default function WebTorrentStatus() {
           
           switch (event.type) {
             case 'seeding-started':
-              setEvents(prev => [`[${timestamp}] ✅ Started seeding profile: ${event.profile.username}`, ...prev.slice(0, 9)])
+              if ('profile' in event && event.profile) {
+                setEvents(prev => [`[${timestamp}] ✅ Started seeding profile: ${event.profile.username}`, ...prev.slice(0, 9)])
+              } else if ('post' in event && event.post) {
+                setEvents(prev => [`[${timestamp}] ✅ Started seeding post by: ${event.post.authorDisplayName || 'anonymous'}`, ...prev.slice(0, 9)])
+              }
               break
             case 'peer-connected':
               setEvents(prev => [`[${timestamp}] 🔗 Peer connected: ${event.peerId}`, ...prev.slice(0, 9)])
@@ -57,7 +61,9 @@ export default function WebTorrentStatus() {
               }
               break
             case 'profile-downloaded':
-              setEvents(prev => [`[${timestamp}] ⬇️ Downloaded profile: ${event.profile.username}`, ...prev.slice(0, 9)])
+              if (event.profile) {
+                setEvents(prev => [`[${timestamp}] ⬇️ Downloaded profile: ${event.profile.username}`, ...prev.slice(0, 9)])
+              }
               break
             case 'download-progress':
               if (Math.random() < 0.1) { // Log ~10% of download events

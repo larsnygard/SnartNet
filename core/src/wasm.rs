@@ -4,6 +4,38 @@ use crate::profile::{Profile, SignedProfile};
 use crate::post::{Post, SignedPost};
 use crate::message::{Message, SignedMessage};
 use crate::storage::LocalStorage;
+use serde::{Serialize, Deserialize};
+
+// ----- Shared JSON API structs (additive, forward-compatible) -----
+#[derive(Serialize, Deserialize)]
+struct CreateProfileRequest {
+    username: String,
+    #[serde(rename = "displayName")] display_name: Option<String>,
+    bio: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct UpdateProfileRequest {
+    #[serde(rename = "displayName")] display_name: Option<String>,
+    bio: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ProfileEnvelope {
+    profile: Profile,
+    signature: String,
+    #[serde(rename = "magnetUri")] magnet_uri: String,
+    api: String,
+    version: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CapabilityDescriptor {
+    #[serde(rename = "profileJsonApi")] profile_json_api: bool,
+    #[serde(rename = "postJsonApi")] post_json_api: bool,
+    #[serde(rename = "messageJsonApi")] message_json_api: bool,
+    version: String,
+}
 
 // High-level WASM interface that matches the TypeScript interface
 #[wasm_bindgen]
@@ -58,13 +90,16 @@ impl SnartNetCore {
         let signed_profile = SignedProfile::create(profile, keypair)
             .map_err(|e| JsValue::from_str(&e))?;
         
-        let magnet_uri = signed_profile.profile.generate_magnet_uri();
+    let magnet_uri = signed_profile.profile.generate_magnet_uri();
+    // Store magnet URI inside profile for downstream consumers
+    let mut signed_profile = signed_profile;
+    signed_profile.profile.magnet_uri = Some(magnet_uri.clone());
         
         // Store keypair and profile
         LocalStorage::set_json("snartnet_keypair", keypair)?;
         LocalStorage::set_json("snartnet_current_profile", &signed_profile)?;
         
-        self.current_profile = Some(signed_profile);
+    self.current_profile = Some(signed_profile);
         
         Ok(magnet_uri)
     }
@@ -86,6 +121,9 @@ impl SnartNetCore {
             // Re-sign the profile
             let new_signed_profile = SignedProfile::create(profile.profile.clone(), keypair)
                 .map_err(|e| JsValue::from_str(&e))?;
+            let magnet_uri = new_signed_profile.profile.generate_magnet_uri();
+            let mut new_signed_profile = new_signed_profile;
+            new_signed_profile.profile.magnet_uri = Some(magnet_uri);
             
             // Store updated profile
             LocalStorage::set_json("snartnet_current_profile", &new_signed_profile)?;
@@ -95,6 +133,76 @@ impl SnartNetCore {
         } else {
             Err(JsValue::from_str("No current profile"))
         }
+    }
+
+    // --- Additive JSON-based API (forward-compatible) ---
+    #[wasm_bindgen]
+    pub fn create_profile_json(&mut self, payload_json: &str) -> Result<JsValue, JsValue> {
+        let req: CreateProfileRequest = serde_json::from_str(payload_json)
+            .map_err(|e| JsValue::from_str(&format!("Invalid create_profile_json payload: {}", e)))?;
+        let magnet = self.create_profile(&req.username, req.display_name.clone(), req.bio.clone())?;
+        // We just created it, so unwrap is safe
+        if let Some(ref signed) = self.current_profile {
+            let env = ProfileEnvelope {
+                profile: signed.profile.clone(),
+                signature: signed.signature.clone(),
+                magnet_uri: magnet.clone(),
+                api: "profile-json-v1".to_string(),
+                version: signed.profile.version,
+            };
+            return serde_wasm_bindgen::to_value(&env)
+                .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)));
+        }
+        Err(JsValue::from_str("Profile creation failed unexpectedly"))
+    }
+
+    #[wasm_bindgen]
+    pub fn update_profile_json(&mut self, payload_json: &str) -> Result<JsValue, JsValue> {
+        let req: UpdateProfileRequest = serde_json::from_str(payload_json)
+            .map_err(|e| JsValue::from_str(&format!("Invalid update_profile_json payload: {}", e)))?;
+        self.update_current_profile(req.display_name.clone(), req.bio.clone())?;
+        if let Some(ref signed) = self.current_profile {
+            let magnet_uri = signed.profile.magnet_uri.clone().unwrap_or_else(|| signed.profile.generate_magnet_uri());
+            let env = ProfileEnvelope {
+                profile: signed.profile.clone(),
+                signature: signed.signature.clone(),
+                magnet_uri,
+                api: "profile-json-v1".to_string(),
+                version: signed.profile.version,
+            };
+            return serde_wasm_bindgen::to_value(&env)
+                .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)));
+        }
+        Err(JsValue::from_str("No current profile"))
+    }
+
+    #[wasm_bindgen]
+    pub fn get_current_profile_json(&self) -> Result<JsValue, JsValue> {
+        if let Some(ref signed) = self.current_profile {
+            let magnet_uri = signed.profile.magnet_uri.clone().unwrap_or_else(|| signed.profile.generate_magnet_uri());
+            let env = ProfileEnvelope {
+                profile: signed.profile.clone(),
+                signature: signed.signature.clone(),
+                magnet_uri,
+                api: "profile-json-v1".to_string(),
+                version: signed.profile.version,
+            };
+            return serde_wasm_bindgen::to_value(&env)
+                .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)));
+        }
+        Ok(JsValue::null())
+    }
+
+    #[wasm_bindgen]
+    pub fn get_capabilities(&self) -> Result<JsValue, JsValue> {
+        let caps = CapabilityDescriptor {
+            profile_json_api: true,
+            post_json_api: false,
+            message_json_api: false,
+            version: "1".to_string(),
+        };
+        serde_wasm_bindgen::to_value(&caps)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
     }
     
     // Post management

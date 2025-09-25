@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { getCore } from '@/lib/core'
 import { useProfileStore } from '@/stores/profileStore'
+import { getTorrentService } from '@/lib/torrent'
 
 /**
  * Hook to initialize the core and load existing profile
@@ -19,6 +20,11 @@ export function useInitializeCore() {
         console.log('[useInitializeCore] Initializing core...')
         const core = await getCore()
         console.log('[useInitializeCore] Core initialized successfully')
+
+        // Initialize torrent service
+        console.log('[useInitializeCore] Initializing torrent service...')
+        getTorrentService();
+        console.log('[useInitializeCore] Torrent service initialized.')
 
         // Check if there's an existing profile
         if (core.hasProfile()) {
