@@ -1,6 +1,61 @@
 import type { Profile } from '@/stores/profileStore'
 import type { TorrentPost } from '@/stores/postStore'
 
+// ---- Post Index (Chain) Concept -------------------------------------------------
+// Each index torrent is a JSON file containing up to N (e.g. 200) post references.
+// A reference has basic metadata needed for preview & deciding whether to fetch full post torrent.
+// The index file also contains a pointer to the next (older) index magnet URI, or null if end.
+// This creates a backward-linked list (chain) enabling clients to paginate historically
+// without needing a global catalog. Clients choose a cut-off using:
+//   - maxPosts
+//   - since timestamp (ISO) OR months lookback
+// Index JSON shape (v1):
+// {
+//   "version": 1,
+//   "author": "<username or pubkey>",
+//   "generatedAt": "ISO timestamp",
+//   "posts": [ { id, magnetUri, author, createdAt, tags?, size?, infoHash? } ],
+//   "next": "magnet:?xt=..." | null,
+//   "count": <number of posts in this chunk>
+// }
+// Seeding strategy: when local posts change, optionally rebuild head index chunk(s)
+// and seed new head; previous head becomes next in chain if content diverged.
+// NOTE: For now we implement simple full rebuild creating a single chunk and seeding it.
+
+interface PostIndexEntry {
+  id: string
+  magnetUri: string
+  author: string
+  createdAt: string
+  tags?: string[]
+  infoHash?: string
+  size?: number
+}
+
+interface PostIndexFileV1 {
+  version: 1
+  author: string
+  generatedAt: string
+  posts: PostIndexEntry[]
+  next: string | null
+  count: number
+}
+
+export interface DownloadPostIndexOptions {
+  maxPosts?: number
+  since?: string // ISO timestamp
+  monthsLookback?: number // Alternative to since
+  maxChunks?: number // Safety cap on chain depth
+  signal?: AbortSignal
+}
+
+export interface DownloadedPostIndexResult {
+  entries: PostIndexEntry[]
+  truncated: boolean // true if stopped due to limits
+  chunksFetched: number
+  nextPointer: string | null
+}
+
 // Simple torrent service that works in both browser and build
 class TorrentService {
   private client: any = null
@@ -194,7 +249,7 @@ class TorrentService {
     }
 
     const startTime = performance.now()
-    console.log('[TorrentService] Seeding post start', { author: post.author, hasImages: !!post.images?.length })
+    console.log('[TorrentService] Seeding post start', { author: post.author, hasImages: !!post.images?.length, signed: !!(post as any).signature })
 
     const postData = JSON.stringify(post, null, 2)
     const fileName = `post_${Date.now()}.json`
@@ -239,6 +294,130 @@ class TorrentService {
           reject(new Error('Seeding post timed out'))
         }
       }, 15000)
+    })
+  }
+
+  // ---------------- Post Index Seeding ----------------
+  async seedPostIndex(posts: TorrentPost[], authorId: string, options?: { chunkSize?: number; previousHeadMagnet?: string | null }): Promise<{ magnetURI: string; count: number }> {
+    await this.readyPromise
+    if (!this.client || !this.clientReady) {
+      throw new Error('WebTorrent client not ready for seeding index')
+    }
+    const chunkSize = options?.chunkSize || 200
+    const slice = posts
+      .slice() // copy
+      .sort((a,b)=> new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, chunkSize)
+
+    const indexFile: PostIndexFileV1 = {
+      version: 1,
+      author: authorId,
+      generatedAt: new Date().toISOString(),
+      posts: slice.map(p => ({
+        id: p.id,
+        magnetUri: p.magnetUri || '',
+        author: p.author,
+        createdAt: p.createdAt,
+        tags: p.tags,
+      })),
+      next: options?.previousHeadMagnet || null,
+      count: slice.length,
+    }
+
+    const json = JSON.stringify(indexFile, null, 2)
+    const file = new File([new TextEncoder().encode(json)], `post_index_${Date.now()}.json`, { type: 'application/json; charset=utf-8' })
+
+    return new Promise((resolve, reject) => {
+      try {
+        const torrent = this.client.seed([file], (torrent: any) => {
+          this.emitEvent({ type: 'post-index-seeded', magnetURI: torrent.magnetURI, count: indexFile.count })
+          resolve({ magnetURI: torrent.magnetURI, count: indexFile.count })
+        })
+        torrent.on('error', (err: any) => reject(err))
+      } catch (e) {
+        reject(e)
+      }
+    })
+  }
+
+  // ---------------- Post Index Download ----------------
+  async downloadPostIndexChain(headMagnetURI: string, opts: DownloadPostIndexOptions = {}): Promise<DownloadedPostIndexResult> {
+    await this.readyPromise
+    if (!this.client) throw new Error('WebTorrent client not initialized')
+    const maxPosts = opts.maxPosts ?? 500
+    const maxChunks = opts.maxChunks ?? 20
+    let sinceTs: number | null = null
+    if (opts.since) {
+      sinceTs = new Date(opts.since).getTime()
+    } else if (opts.monthsLookback) {
+      const d = new Date()
+      d.setMonth(d.getMonth() - opts.monthsLookback)
+      sinceTs = d.getTime()
+    }
+
+    const collected: PostIndexEntry[] = []
+    let currentMagnet: string | null = headMagnetURI
+    let chunks = 0
+    let truncated = false
+    let nextPointer: string | null = null
+
+    while (currentMagnet && chunks < maxChunks && collected.length < maxPosts) {
+      if (opts.signal?.aborted) throw new Error('Aborted')
+      const { indexData, next } = await this.downloadSingleIndex(currentMagnet)
+      chunks++
+      this.emitEvent({ type: 'post-index-downloaded', magnetURI: currentMagnet, count: indexData.count })
+
+      for (const entry of indexData.posts) {
+        if (collected.length >= maxPosts) { truncated = true; break }
+        if (sinceTs) {
+          const ts = new Date(entry.createdAt).getTime()
+            if (isNaN(ts)) continue
+          if (ts < sinceTs) { truncated = true; break }
+        }
+        collected.push(entry)
+      }
+      if (truncated) break
+      currentMagnet = next
+      nextPointer = next
+    }
+
+    return { entries: collected, truncated, chunksFetched: chunks, nextPointer }
+  }
+
+  private async downloadSingleIndex(magnetURI: string): Promise<{ indexData: PostIndexFileV1; next: string | null }> {
+    return new Promise((resolve, reject) => {
+      try {
+        const torrent = this.client.add(magnetURI, () => {
+          // torrent metadata fetch initiated
+        })
+        const timeout = setTimeout(() => reject(new Error('Index download timeout')), 20000)
+        torrent.on('done', () => {
+          clearTimeout(timeout)
+          const file = torrent.files.find((f: any) => f.name && f.name.startsWith('post_index_'))
+          if (!file) return reject(new Error('Index file not found in torrent'))
+          file.getBuffer((err: any, buffer: any) => {
+            if (err) return reject(err)
+            try {
+              let jsonStr: string
+              if (buffer instanceof ArrayBuffer) {
+                jsonStr = new TextDecoder('utf-8').decode(new Uint8Array(buffer))
+              } else if (buffer && typeof buffer.toString === 'function') {
+                jsonStr = buffer.toString('utf8')
+              } else {
+                jsonStr = String(buffer)
+              }
+              const parsed = JSON.parse(jsonStr) as PostIndexFileV1
+              if (parsed.version !== 1) return reject(new Error('Unsupported index version'))
+              resolve({ indexData: parsed, next: parsed.next || null })
+            } catch (e) {
+              reject(e)
+            }
+          })
+        })
+        torrent.on('error', (err: any) => reject(err))
+      } catch (e) {
+        reject(e)
+      }
     })
   }
 
@@ -338,6 +517,43 @@ class TorrentService {
     }
   }
 
+  // Download a single post JSON torrent (expects a file named starting with 'post_' and .json)
+  async downloadPost(magnetURI: string): Promise<any | null> {
+    await this.readyPromise
+    if (!this.client) throw new Error('WebTorrent client not initialized')
+    return new Promise((resolve, reject) => {
+      try {
+        const torrent = this.client.add(magnetURI, () => {})
+        const timeout = setTimeout(() => reject(new Error('Post download timeout')), 20000)
+        torrent.on('done', () => {
+          clearTimeout(timeout)
+            const file = torrent.files.find((f: any) => f.name && f.name.startsWith('post_') && f.name.endsWith('.json'))
+            if (!file) return reject(new Error('Post JSON file not found in torrent'))
+            file.getBuffer((err: any, buffer: any) => {
+              if (err) return reject(err)
+              try {
+                let jsonStr: string
+                if (buffer instanceof ArrayBuffer) {
+                  jsonStr = new TextDecoder('utf-8').decode(new Uint8Array(buffer))
+                } else if (buffer && typeof buffer.toString === 'function') {
+                  jsonStr = buffer.toString('utf8')
+                } else {
+                  jsonStr = String(buffer)
+                }
+                const parsed = JSON.parse(jsonStr)
+                resolve(parsed)
+              } catch (e) {
+                reject(e)
+              }
+            })
+        })
+        torrent.on('error', (err: any) => reject(err))
+      } catch (e) {
+        reject(e)
+      }
+    })
+  }
+
   getStats() {
     this.updateStats()
     return { ...this.stats }
@@ -424,6 +640,8 @@ export type TorrentEvent =
   | { type: 'error'; error: string }
   | { type: 'torrent-added'; torrent: any }
   | { type: 'download-complete'; torrent: any }
+  | { type: 'post-index-seeded'; magnetURI: string; count: number }
+  | { type: 'post-index-downloaded'; magnetURI: string; count: number }
 
 export { TorrentService }
 export default getTorrentService

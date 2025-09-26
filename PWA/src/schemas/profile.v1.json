@@ -16,7 +16,10 @@
     "createdAt": { "type": "string", "format": "date-time" },
     "updatedAt": { "type": "string", "format": "date-time" },
     "version": { "type": "integer", "minimum": 1 },
-    "magnetUri": { "type": "string" }
+    "magnetUri": { "type": "string" },
+    "profilePicture": { "type": "string", "description": "Base64 encoded full profile picture image (small size recommended)" },
+    "profilePictureThumbnail": { "type": "string", "description": "Base64 encoded thumbnail of profile picture" },
+    "postIndexMagnetUri": { "type": "string", "description": "Magnet URI of the latest post index head" }
   },
   "additionalProperties": false
 }
