@@ -291,6 +291,42 @@ class SnartNetCore {
       console.log('[SnartNetCore] Clean profile:', cleanProfile)
 
       const torrentService = getTorrentService()
+
+      // Merge in extended / local enhancements (profilePicture etc.) if available
+      try {
+        const username = cleanProfile.username || cleanProfile.id
+        if (username) {
+          const pic = localStorage.getItem(`profile-picture-${username}`)
+          const thumb = localStorage.getItem(`profile-picture-thumb-${username}`)
+          if (pic) cleanProfile.profilePicture = pic
+          if (thumb) cleanProfile.profilePictureThumbnail = thumb
+          // Extended profile fields (location, website, avatar URL) persisted separately
+          const extendedRaw = localStorage.getItem(`profile-extended-${username}`)
+          if (extendedRaw) {
+            try {
+              const extended = JSON.parse(extendedRaw)
+              if (extended && typeof extended === 'object') {
+                if (extended.location) cleanProfile.location = extended.location
+                if (extended.website) cleanProfile.website = extended.website
+                if (extended.avatar) cleanProfile.avatar = extended.avatar
+              }
+            } catch { /* ignore parse errors */ }
+          }
+        }
+      } catch (e) {
+        console.warn('[SnartNetCore] Failed merging extended profile data', e)
+      }
+
+      // Ensure a post index magnet exists (even if empty) so consumers can always sync
+      if (!cleanProfile.postIndexMagnetUri && !cleanProfile.post_index_magnet) {
+        try {
+          const emptyIndex = await torrentService.seedPostIndex([], cleanProfile.username || cleanProfile.id || 'unknown', {})
+          cleanProfile.postIndexMagnetUri = emptyIndex.magnetURI
+        } catch (e) {
+          console.warn('[SnartNetCore] Failed to seed empty post index', e)
+        }
+      }
+
       const magnetURI = await torrentService.seedProfile(cleanProfile)
       
       console.log('[SnartNetCore] Profile seeding started:', magnetURI)
@@ -330,25 +366,7 @@ class SnartNetCore {
   }
 
   // Mock methods for timeline (will be replaced with real P2P later)
-  async getTimeline(): Promise<any[]> {
-    // Return mock timeline data for now
-    return [
-      {
-        id: 'post_1',
-        content: 'Welcome to SnartNet! This is a decentralized social media platform.',
-        author: 'alice',
-        timestamp: new Date(Date.now() - 3600000).toISOString(),
-        tags: ['introduction', 'snartnet']
-      },
-      {
-        id: 'post_2', 
-        content: 'Just created my first cryptographically signed post! 🔐',
-        author: 'bob',
-        timestamp: new Date(Date.now() - 1800000).toISOString(),
-        tags: ['crypto', 'security']
-      }
-    ]
-  }
+  // (Removed legacy mock getTimeline; real data flows through torrent + stores)
 
   validateProfile(obj: any): boolean {
     // minimal structural checks using schema constants (not full JSON Schema validation runtime yet)

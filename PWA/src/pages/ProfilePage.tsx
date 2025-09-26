@@ -1,15 +1,37 @@
 import { useState } from 'react'
 import { useProfileStore } from '@/stores/profileStore'
+import { getCore } from '@/lib/core'
 import CreateProfile from '@/components/CreateProfile'
 import ProfileDisplay from '@/components/ProfileDisplay'
+import EditProfile from '@/components/EditProfile'
 import WebTorrentStatus from '@/components/WebTorrentStatus'
 import BackupRestore from '@/components/BackupRestore'
 
 
 const ProfilePage: React.FC = () => {
-  const { currentProfile, loading } = useProfileStore()
+  const { currentProfile, loading, seedProfileEnabled, setSeedProfileEnabled } = useProfileStore()
   const [showCreateNew, setShowCreateNew] = useState(false)
   const [showBackupRestore, setShowBackupRestore] = useState(false)
+  const [autoSeedStatus, setAutoSeedStatus] = useState<string>('')
+  const [showEditProfile, setShowEditProfile] = useState(false)
+
+  // Auto seed when toggle ON and profile exists
+  async function ensureSeeding() {
+    if (!currentProfile || !seedProfileEnabled) return
+    try {
+      setAutoSeedStatus('Seeding profile...')
+      const core = await getCore()
+      const magnet = await core.seedCurrentProfile()
+      setAutoSeedStatus(`Seeding ✓ (${magnet.slice(0,40)}...)`)
+    } catch (e:any) {
+      setAutoSeedStatus(`Seeding failed: ${e?.message || 'error'}`)
+    }
+  }
+
+  if (currentProfile && seedProfileEnabled && autoSeedStatus === '') {
+    // fire and forget (simple guard to avoid loops)
+    ensureSeeding()
+  }
 
   return (
     <div>
@@ -18,8 +40,25 @@ const ProfilePage: React.FC = () => {
           Profile Management
         </h1>
         
-        <div className="flex gap-2">
-          {currentProfile && !showCreateNew && !showBackupRestore && (
+        <div className="flex gap-4 items-center">
+          <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              className="rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500"
+              checked={seedProfileEnabled}
+              onChange={e => {
+                setSeedProfileEnabled(e.target.checked)
+                if (e.target.checked) {
+                  ensureSeeding()
+                }
+              }}
+            />
+            <span>Seed my profile (auto)</span>
+            {autoSeedStatus && (
+              <span className="text-xs text-gray-500 dark:text-gray-400">{autoSeedStatus}</span>
+            )}
+          </label>
+          {currentProfile && !showCreateNew && !showBackupRestore && !showEditProfile && (
             <>
               <button
                 onClick={() => setShowBackupRestore(true)}
@@ -32,6 +71,12 @@ const ProfilePage: React.FC = () => {
                 className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white font-medium rounded-lg transition-colors"
               >
                 Create New Profile
+              </button>
+              <button
+                onClick={() => setShowEditProfile(true)}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors"
+              >
+                Edit Profile
               </button>
             </>
           )}
@@ -53,7 +98,7 @@ const ProfilePage: React.FC = () => {
             </div>
           )}
 
-          {showCreateNew && !showBackupRestore && (
+          {showCreateNew && !showBackupRestore && !showEditProfile && (
             <div>
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
@@ -70,7 +115,7 @@ const ProfilePage: React.FC = () => {
             </div>
           )}
           
-          {!showBackupRestore && (
+          {!showBackupRestore && !showEditProfile && (
             <>
               {currentProfile ? (
                 <div>
@@ -89,6 +134,20 @@ const ProfilePage: React.FC = () => {
               
               <WebTorrentStatus />
             </>
+          )}
+          {showEditProfile && currentProfile && !showBackupRestore && !showCreateNew && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between mb-2">
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Edit Profile</h2>
+                <button
+                  onClick={() => setShowEditProfile(false)}
+                  className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                >
+                  ✕ Close
+                </button>
+              </div>
+              <EditProfile onCancel={() => setShowEditProfile(false)} />
+            </div>
           )}
         </div>
       )}

@@ -249,7 +249,7 @@ class TorrentService {
     }
 
     const startTime = performance.now()
-    console.log('[TorrentService] Seeding post start', { author: post.author, hasImages: !!post.images?.length })
+    console.log('[TorrentService] Seeding post start', { author: post.author, hasImages: !!post.images?.length, signed: !!(post as any).signature })
 
     const postData = JSON.stringify(post, null, 2)
     const fileName = `post_${Date.now()}.json`
@@ -387,8 +387,8 @@ class TorrentService {
   private async downloadSingleIndex(magnetURI: string): Promise<{ indexData: PostIndexFileV1; next: string | null }> {
     return new Promise((resolve, reject) => {
       try {
-        const torrent = this.client.add(magnetURI, (torrent: any) => {
-          // noop; wait for done
+        const torrent = this.client.add(magnetURI, () => {
+          // torrent metadata fetch initiated
         })
         const timeout = setTimeout(() => reject(new Error('Index download timeout')), 20000)
         torrent.on('done', () => {
@@ -515,6 +515,43 @@ class TorrentService {
       console.error('Error downloading profile:', error)
       throw error
     }
+  }
+
+  // Download a single post JSON torrent (expects a file named starting with 'post_' and .json)
+  async downloadPost(magnetURI: string): Promise<any | null> {
+    await this.readyPromise
+    if (!this.client) throw new Error('WebTorrent client not initialized')
+    return new Promise((resolve, reject) => {
+      try {
+        const torrent = this.client.add(magnetURI, () => {})
+        const timeout = setTimeout(() => reject(new Error('Post download timeout')), 20000)
+        torrent.on('done', () => {
+          clearTimeout(timeout)
+            const file = torrent.files.find((f: any) => f.name && f.name.startsWith('post_') && f.name.endsWith('.json'))
+            if (!file) return reject(new Error('Post JSON file not found in torrent'))
+            file.getBuffer((err: any, buffer: any) => {
+              if (err) return reject(err)
+              try {
+                let jsonStr: string
+                if (buffer instanceof ArrayBuffer) {
+                  jsonStr = new TextDecoder('utf-8').decode(new Uint8Array(buffer))
+                } else if (buffer && typeof buffer.toString === 'function') {
+                  jsonStr = buffer.toString('utf8')
+                } else {
+                  jsonStr = String(buffer)
+                }
+                const parsed = JSON.parse(jsonStr)
+                resolve(parsed)
+              } catch (e) {
+                reject(e)
+              }
+            })
+        })
+        torrent.on('error', (err: any) => reject(err))
+      } catch (e) {
+        reject(e)
+      }
+    })
   }
 
   getStats() {

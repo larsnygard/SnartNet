@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { getCore } from '@/lib/core'
 
 interface ProfilePost {
   id: string;
@@ -28,24 +29,31 @@ interface ProfileState {
   profiles: Map<string, Profile>;
   loading: boolean;
   error: string | null;
+  seedProfileEnabled: boolean; // preference for auto seeding
   
   // Actions
   setCurrentProfile: (profile: Profile | null) => void;
   addProfile: (profile: Profile) => void;
   updateProfile: (username: string, updates: Partial<Profile>) => void;
   updateProfilePicture: (username: string, profilePicture: string, thumbnail?: string) => void;
-  addProfilePost: (username: string, content: string) => void;
-  removeProfilePost: (username: string, postId: string) => void;
+  setSeedProfileEnabled: (enabled: boolean) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
   clearError: () => void;
 }
+
+const SEED_PREF_KEY = 'snartnet:profile:seed-enabled'
 
 export const useProfileStore = create<ProfileState>((set) => ({
   currentProfile: null,
   profiles: new Map(),
   loading: false,
   error: null,
+  seedProfileEnabled: (() => {
+    const stored = localStorage.getItem(SEED_PREF_KEY)
+    if (stored === null) return true // default ON
+    return stored === 'true'
+  })(),
 
   setCurrentProfile: (profile) => set({ currentProfile: profile }),
   
@@ -99,51 +107,21 @@ export const useProfileStore = create<ProfileState>((set) => ({
       }
     }
     
+    // Fire & forget reseed to propagate new picture (debounced effect could be added later)
+    if (newCurrentProfile) {
+      getCore().then(core => {
+        core.seedCurrentProfile().catch(e => console.warn('Reseed after picture update failed', e))
+      }).catch(()=>{})
+    }
     return { 
       profiles: newProfiles,
       currentProfile: newCurrentProfile
     }
   }),
   
-  addProfilePost: (username, content) => set((state) => {
-    const newProfiles = new Map(state.profiles);
-    const existing = newProfiles.get(username);
-    const newPost = {
-      id: Math.random().toString(36).slice(2),
-      content,
-      createdAt: new Date().toISOString(),
-    };
-    if (existing) {
-      const posts = existing.posts ? [newPost, ...existing.posts] : [newPost];
-      newProfiles.set(username, { ...existing, posts });
-    }
-    let newCurrentProfile = state.currentProfile;
-    if (state.currentProfile?.username === username) {
-      const posts = state.currentProfile.posts ? [newPost, ...state.currentProfile.posts] : [newPost];
-      newCurrentProfile = { ...state.currentProfile, posts };
-    }
-    return {
-      profiles: newProfiles,
-      currentProfile: newCurrentProfile,
-    };
-  }),
-  
-  removeProfilePost: (username, postId) => set((state) => {
-    const newProfiles = new Map(state.profiles);
-    const existing = newProfiles.get(username);
-    if (existing && existing.posts) {
-      const posts = existing.posts.filter((p) => p.id !== postId);
-      newProfiles.set(username, { ...existing, posts });
-    }
-    let newCurrentProfile = state.currentProfile;
-    if (state.currentProfile?.username === username && state.currentProfile.posts) {
-      const posts = state.currentProfile.posts.filter((p) => p.id !== postId);
-      newCurrentProfile = { ...state.currentProfile, posts };
-    }
-    return {
-      profiles: newProfiles,
-      currentProfile: newCurrentProfile,
-    };
+  setSeedProfileEnabled: (enabled) => set(() => {
+    try { localStorage.setItem(SEED_PREF_KEY, String(enabled)) } catch {}
+    return { seedProfileEnabled: enabled }
   }),
   
   setLoading: (loading) => set({ loading }),

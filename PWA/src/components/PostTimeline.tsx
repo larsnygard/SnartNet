@@ -95,6 +95,21 @@ const PostCard: React.FC<PostCardProps> = ({ post }) => {
               {post.authorDisplayName || post.author}
             </h3>
             <span className="text-gray-500 dark:text-gray-400">@{post.author}</span>
+            {post.signatureVerified ? (
+              <span
+                className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 border border-green-300 dark:border-green-700"
+                title={`Signature verified${post.fingerprint ? ` • ${post.fingerprint}` : ''}`}
+              >
+                ✅ ver
+              </span>
+            ) : (
+              <span
+                className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-yellow-100 dark:bg-yellow-900 text-yellow-700 dark:text-yellow-300 border border-yellow-300 dark:border-yellow-700"
+                title={post.signatureError === 'missing-signature' ? 'No signature present' : `Signature invalid: ${post.signatureError || 'unknown'}`}
+              >
+                ⚠️ unverified
+              </span>
+            )}
           </div>
           <div className="flex items-center space-x-2 text-sm text-gray-500 dark:text-gray-400">
             <span>{formatTimeAgo(post.createdAt)}</span>
