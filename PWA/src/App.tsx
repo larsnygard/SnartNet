@@ -4,6 +4,7 @@ import ProfilePage from '@/pages/ProfilePage'
 import MessagesPage from '@/pages/MessagesPage'
 import DiscoverPage from '@/pages/DiscoverPage'
 import ContactsPage from '@/pages/ContactsPage'
+import FriendsPage from '@/pages/FriendsPage'
 import Layout from '@/components/Layout'
 import { useInitializeCore } from '@/hooks/useInitializeCore'
 import './App.css'
@@ -19,6 +20,7 @@ function App() {
           <Route path="/profile/:id?" element={<ProfilePage />} />
           <Route path="/discover" element={<DiscoverPage />} />
           <Route path="/contacts" element={<ContactsPage />} />
+          <Route path="/friends" element={<FriendsPage />} />
           <Route path="/messages/:id?" element={<MessagesPage />} />
         </Routes>
       </Layout>

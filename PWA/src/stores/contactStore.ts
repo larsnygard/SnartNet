@@ -21,6 +21,11 @@ export interface Contact {
   avatar?: string
   notes?: string
   permissions: ContactPermissions
+  // Optional magnet URI to the head of this contact's post index chain
+  postIndexMagnetUri?: string
+  // Sync preferences
+  syncMaxPosts?: number // e.g. 100
+  syncMonthsLookback?: number // e.g. 5 (last 5 months)
 }
 
 interface ContactState {

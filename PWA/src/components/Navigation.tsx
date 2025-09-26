@@ -28,6 +28,12 @@ const Navigation: React.FC = () => {
               Discover
             </Link>
             <Link 
+              to="/friends" 
+              className="text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
+            >
+              Friends
+            </Link>
+            <Link 
               to="/contacts" 
               className="text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
             >

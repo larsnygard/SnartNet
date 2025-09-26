@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { getTorrentService } from '@/lib/torrent'
+import { useContactStore } from './contactStore'
 
 export interface PostImage {
   id: string
@@ -72,6 +73,7 @@ interface PostState {
   setLoading: (loading: boolean) => void
   setError: (error: string | null) => void
   clearError: () => void
+  syncPostsForContact: (contactId: string, options?: { maxPosts?: number; monthsLookback?: number }) => Promise<void>
 }
 
 export const usePostStore = create<PostState>((set) => ({
@@ -139,24 +141,70 @@ export const usePostStore = create<PostState>((set) => ({
   },
 
   loadPostsFromContacts: async () => {
-    // TODO: Implement loading posts from contacts via P2P
-    // This would fetch posts from magnet URIs of contacts
+    // Basic mock: generate placeholder posts from contacts if timeline empty
     set({ loading: true })
-    
     try {
-      // Mock implementation - replace with actual P2P fetching
-      await new Promise(resolve => setTimeout(resolve, 1000))
-      
+      const contacts = useContactStore.getState().contacts
+      // Simulate network delay
+      await new Promise(resolve => setTimeout(resolve, 600))
+      set((state) => {
+        if (state.posts.length === 0 && contacts.length > 0) {
+          const mock = contacts.slice(0, 5).map(c => ({
+            id: `mock_${c.id}_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+            author: c.username,
+            authorDisplayName: c.displayName,
+            content: `Hello from @${c.username}! (mock)`,
+            createdAt: new Date(Date.now() - Math.random()*3600_000).toISOString(),
+            images: []
+          })) as TorrentPost[]
+          return { posts: [...state.posts, ...mock].sort((a,b)=> new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()) }
+        }
+        return {}
+      })
       set({ loading: false })
     } catch (error) {
-      set({ 
-        loading: false, 
-        error: error instanceof Error ? error.message : 'Failed to load posts'
-      })
+      set({ loading: false, error: error instanceof Error ? error.message : 'Failed to load posts' })
     }
   },
 
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
   clearError: () => set({ error: null }),
+  
+  syncPostsForContact: async (contactId, options) => {
+    const contactStore = useContactStore.getState()
+    const contact = contactStore.contacts.find(c => c.id === contactId)
+    if (!contact || !contact.postIndexMagnetUri) return
+    set({ loading: true })
+    try {
+      const torrentService = getTorrentService()
+      const result = await (torrentService as any).downloadPostIndexChain(contact.postIndexMagnetUri, {
+        maxPosts: options?.maxPosts ?? contact.syncMaxPosts ?? 100,
+        monthsLookback: options?.monthsLookback ?? contact.syncMonthsLookback,
+      })
+      // For now we only add placeholder posts for entries we don't have yet (no actual post torrent download yet)
+      set((state) => {
+        const existingIds = new Set(state.posts.map(p => p.id))
+        const newOnes: TorrentPost[] = []
+        for (const e of result.entries) {
+          if (existingIds.has(e.id)) continue
+          newOnes.push({
+            id: e.id,
+            author: e.author,
+            content: `(Indexed placeholder) Post ${e.id} from @${e.author}. Fetch torrent to view contents.`,
+            createdAt: e.createdAt,
+            magnetUri: e.magnetUri,
+            images: []
+          })
+        }
+        if (newOnes.length === 0) return { loading: false }
+        return { 
+          posts: [...state.posts, ...newOnes].sort((a,b)=> new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+          loading: false 
+        }
+      })
+    } catch (e) {
+      set({ loading: false, error: e instanceof Error ? e.message : 'Failed to sync posts' })
+    }
+  }
 }))

@@ -1,11 +1,13 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useMemo } from 'react'
 import { usePostStore, TorrentPost } from '../stores/postStore'
 import { useContactStore } from '../stores/contactStore'
+import { useProfileStore } from '@/stores/profileStore'
 import { ImageProcessor } from '../lib/imageProcessor'
 
 const PostTimeline: React.FC = () => {
   const { posts, loading, loadPostsFromContacts } = usePostStore()
-  const { loadContacts } = useContactStore()
+  const { loadContacts, contacts } = useContactStore()
+  const { currentProfile } = useProfileStore()
 
   useEffect(() => {
     // Load contacts and their posts
@@ -14,6 +16,28 @@ const PostTimeline: React.FC = () => {
   }, [loadContacts, loadPostsFromContacts])
 
 
+
+  // Compute allowed author identifiers (username or public key fingerprint basis)
+  const allowedAuthors = useMemo(() => {
+    const set = new Set<string>()
+    if (currentProfile) {
+      if (currentProfile.publicKey) set.add(currentProfile.publicKey)
+      set.add(currentProfile.username)
+    }
+    contacts.forEach(c => {
+      if (c.relationship === 'friend' || c.relationship === 'ring-of-trust') {
+        set.add(c.username)
+        // In future we may map to public key fingerprint
+      }
+    })
+    return set
+  }, [contacts, currentProfile])
+
+  const filteredPosts = useMemo(() => {
+    // If no contacts yet, show all local posts (author = current profile) so user sees own posts
+    if (allowedAuthors.size === 0) return posts
+    return posts.filter(p => allowedAuthors.has(p.author) || (p.authorDisplayName && allowedAuthors.has(p.authorDisplayName)))
+  }, [posts, allowedAuthors])
 
   if (loading) {
     return (
@@ -26,18 +50,18 @@ const PostTimeline: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {posts.length === 0 ? (
+      {filteredPosts.length === 0 ? (
         <div className="text-center py-12">
           <div className="text-6xl mb-4">🌱</div>
           <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">
             No posts yet
           </h3>
           <p className="text-gray-500 dark:text-gray-400">
-            Be the first to seed a post on the swarm!
+            Add some friends or seed a post to see activity here.
           </p>
         </div>
       ) : (
-        posts.map((post: TorrentPost) => (
+        filteredPosts.map((post: TorrentPost) => (
           <PostCard key={post.id} post={post} />
         ))
       )}
