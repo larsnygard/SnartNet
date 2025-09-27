@@ -8,7 +8,8 @@
 */
 
 // WASM bindings (lazy imported to avoid cost if not needed immediately)
-import initWasm, { generate_keypair, sign_data, verify_signature_wasm } from "../../wasm/snartnet_core";
+//import initWasm, { generate_keypair, sign_data, verify_signature_wasm } from "../../wasm/snartnet_core";
+import initWasm, { generate_keypair, sign_data, verify_signature_wasm } from '../../wasm/snartnet_core.js';
 
 const KEYPAIR_STORAGE_KEY = "snartnet:ed25519:keypair:v1";
 

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import initWasm, { SnartNetCore as WasmCore, init_core } from '../wasm/snartnet_core'
+//import initWasm, { SnartNetCore as WasmCore, init_core } from '../wasm/snartnet_core'
+import initWasm, { SnartNetCore as WasmCore, init_core } from 'PWA/wasm/snartnet_core.js'
 import { getTorrentService } from './torrent'
 import profileSchema from '../schemas/profile.v1.json'
 import postSchema from '../schemas/post.v1.json'
