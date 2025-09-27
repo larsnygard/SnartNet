@@ -99,7 +99,7 @@ interface PostState {
 
 const LOCAL_STORAGE_KEY = 'snartnet:posts';
 
-export const usePostStore = create<PostState>((set, get) => ({
+export const usePostStore = create<PostState>((set) => ({
   posts: (() => {
     try {
       const raw = localStorage.getItem(LOCAL_STORAGE_KEY)
