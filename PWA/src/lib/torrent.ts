@@ -95,7 +95,7 @@ class TorrentService {
       'udp://tracker.leechers-paradise.org:6969'
     ];
 
-    const tryInit = () => {
+  const tryInit = () => {
       attempts++
       const WebTorrentConstructor = (window as any).WebTorrent
       if (!WebTorrentConstructor || typeof WebTorrentConstructor !== 'function') {
@@ -119,6 +119,13 @@ class TorrentService {
           dht: true, // Enable DHT for better peer discovery
           webSeeds: false // Disable web seeds for now
         })
+        // Increase max listeners to avoid EventEmitter warnings
+        if (typeof this.client.setMaxListeners === 'function') {
+          this.client.setMaxListeners(30)
+        } else if (this.client && this.client._events && typeof this.client._events === 'object') {
+          // Defensive: try to set on prototype if available
+          try { this.client.constructor?.prototype?.setMaxListeners?.(30) } catch {}
+        }
         this.clientReady = true
         this.client.on('error', (err: any) => {
           console.error('[TorrentService] Client error:', err)
@@ -713,6 +720,16 @@ let torrentServiceInstance: TorrentService | null = null
 export function getTorrentService(): TorrentService {
   if (!torrentServiceInstance) {
     torrentServiceInstance = new TorrentService()
+    // Global cleanup on window unload
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('beforeunload', () => {
+        try {
+          torrentServiceInstance?.destroy()
+        } catch (e) {
+          // Ignore
+        }
+      })
+    }
   }
   return torrentServiceInstance
 }
