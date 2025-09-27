@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import MagnetLinkManager from '@/components/MagnetLinkManager'
 import QRCodeManager from '@/components/QRCodeManager'
 import { useContactStore, type Contact, type RelationshipType } from '../stores/contactStore'
+import { usePostStore } from '../stores/postStore'
 
 const ContactsPage: React.FC = () => {
   const { 
@@ -11,9 +12,17 @@ const ContactsPage: React.FC = () => {
     updateContact, 
     getContactsByRelationship 
   } = useContactStore()
+  const { loadPostsFromContacts } = usePostStore()
   
   const [activeTab, setActiveTab] = useState<RelationshipType>('friend')
   const [showAddForm, setShowAddForm] = useState(false)
+  
+  // Handle contact addition with automatic post sync
+  const handleContactAdded = async () => {
+    await loadContacts()
+    // Trigger post sync for all contacts (including the newly added one)
+    setTimeout(() => loadPostsFromContacts(), 100)
+  }
 
   useEffect(() => {
     loadContacts()
@@ -34,7 +43,7 @@ const ContactsPage: React.FC = () => {
       <div className="mb-10 space-y-6">
         <div>
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Connect with Friends</h2>
-          <QRCodeManager onContactAdded={() => loadContacts()} />
+          <QRCodeManager onContactAdded={handleContactAdded} />
         </div>
         
         <div>

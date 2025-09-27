@@ -3,6 +3,7 @@ import QRCode from 'qrcode'
 import QrScanner from 'qr-scanner'
 import { useProfileStore } from '@/stores/profileStore'
 import { useContactStore } from '@/stores/contactStore'
+import { getCore } from '@/lib/core'
 
 interface QRCodeManagerProps {
   onContactAdded?: (contact: any) => void
@@ -21,23 +22,43 @@ export const QRCodeManager: React.FC<QRCodeManagerProps> = ({ onContactAdded }) 
 
   // Generate QR code for current profile
   useEffect(() => {
-    if (showQR && currentProfile?.magnetUri) {
-      const profileData = {
-        username: currentProfile.username,
-        displayName: currentProfile.displayName || currentProfile.username,
-        magnetUri: currentProfile.magnetUri,
-        type: 'snartnet-profile'
-      }
-      
-      QRCode.toDataURL(JSON.stringify(profileData), {
-        width: 256,
-        margin: 2,
-        color: {
-          dark: '#000000',
-          light: '#ffffff'
+    const generateQRCode = async () => {
+      if (showQR && currentProfile) {
+        let magnetUri = currentProfile.magnetUri
+        
+        // If no magnetUri is available, try to generate one by seeding the profile
+        if (!magnetUri && currentProfile.username) {
+          try {
+            const core = await getCore()
+            magnetUri = await core.seedCurrentProfile()
+            console.log('[QRCodeManager] Generated magnet URI for QR code:', magnetUri)
+          } catch (error) {
+            console.error('[QRCodeManager] Failed to generate magnet URI:', error)
+            return
+          }
         }
-      }).then(setQrDataURL).catch(console.error)
+        
+        if (magnetUri) {
+          const profileData = {
+            username: currentProfile.username,
+            displayName: currentProfile.displayName || currentProfile.username,
+            magnetUri: magnetUri,
+            type: 'snartnet-profile'
+          }
+          
+          QRCode.toDataURL(JSON.stringify(profileData), {
+            width: 256,
+            margin: 2,
+            color: {
+              dark: '#000000',
+              light: '#ffffff'
+            }
+          }).then(setQrDataURL).catch(console.error)
+        }
+      }
     }
+    
+    generateQRCode()
   }, [showQR, currentProfile])
 
   // Initialize QR scanner
@@ -132,7 +153,7 @@ export const QRCodeManager: React.FC<QRCodeManagerProps> = ({ onContactAdded }) 
       <div className="flex gap-4">
         <button
           onClick={() => setShowQR(true)}
-          disabled={!currentProfile?.magnetUri}
+          disabled={!currentProfile?.username}
           className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white rounded-lg transition-colors flex items-center gap-2"
         >
           📱 Show My QR Code

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import QRCodeManager from '@/components/QRCodeManager'
 import { useContactStore, type RelationshipType } from '@/stores/contactStore'
+import { usePostStore } from '@/stores/postStore'
 
 const relationshipTabs: Array<{ id: RelationshipType | 'all'; label: string; icon: string }> = [
   { id: 'all', label: 'All', icon: '🌐' },
@@ -13,11 +14,19 @@ const relationshipTabs: Array<{ id: RelationshipType | 'all'; label: string; ico
 
 const NetworkPage: React.FC = () => {
   const { loadContacts, contacts, addContactFromMagnet, removeContact } = useContactStore()
+  const { loadPostsFromContacts } = usePostStore()
   const [activeTab, setActiveTab] = useState<'all' | RelationshipType>('all')
   const [magnetInput, setMagnetInput] = useState('')
   const [adding, setAdding] = useState(false)
   const [relationship, setRelationship] = useState<RelationshipType>('friend')
   const [error, setError] = useState<string | null>(null)
+  
+  // Handle contact addition with automatic post sync
+  const handleContactAdded = async () => {
+    await loadContacts()
+    // Trigger post sync for all contacts (including the newly added one)
+    setTimeout(() => loadPostsFromContacts(), 100)
+  }
 
   useEffect(() => { loadContacts() }, [loadContacts])
 
@@ -30,8 +39,13 @@ const NetworkPage: React.FC = () => {
     setAdding(true)
     try {
       const added = await addContactFromMagnet(magnetInput.trim(), relationship)
-      if (!added) setError('Failed to load profile from magnet (no peers or invalid data)')
-      else setMagnetInput('')
+      if (!added) {
+        setError('Failed to load profile from magnet (no peers or invalid data)')
+      } else {
+        setMagnetInput('')
+        // Trigger post sync for the newly added contact
+        setTimeout(() => loadPostsFromContacts(), 100)
+      }
     } catch (e:any) {
       setError(e?.message || 'Failed to add contact')
     } finally {
@@ -52,7 +66,7 @@ const NetworkPage: React.FC = () => {
         {/* QR Code Section */}
         <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Quick Connect</h2>
-          <QRCodeManager onContactAdded={loadContacts} />
+          <QRCodeManager onContactAdded={handleContactAdded} />
         </div>
         
         {/* Manual Magnet Link Form */}

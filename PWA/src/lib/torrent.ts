@@ -85,6 +85,15 @@ class TorrentService {
     if (typeof window === 'undefined') return
     let attempts = 0
     const maxAttempts = 10
+    const customTrackers = [
+      'wss://tracker.webtorrent.dev',
+      'wss://tracker.openwebtorrent.com',
+      'udp://tracker.openbittorrent.com:6969',
+      'udp://tracker.openbittorrent.com:80',
+      'udp://tracker.coppersurfer.tk:6969',
+      'udp://9.rarbg.to:2710',
+      'udp://tracker.leechers-paradise.org:6969'
+    ];
 
     const tryInit = () => {
       attempts++
@@ -103,7 +112,13 @@ class TorrentService {
       }
 
       try {
-        this.client = new WebTorrentConstructor()
+        // Configure WebTorrent with only our custom trackers
+        this.client = new WebTorrentConstructor({
+          announce: customTrackers,
+          announceList: [customTrackers],
+          dht: true, // Enable DHT for better peer discovery
+          webSeeds: false // Disable web seeds for now
+        })
         this.clientReady = true
         this.client.on('error', (err: any) => {
           console.error('[TorrentService] Client error:', err)
@@ -191,9 +206,22 @@ class TorrentService {
             profileDataLength: profileData.length
           })
           
-          const torrent = this.client.seed([file], (torrent: any) => {
+          const customTrackers = [
+            'wss://tracker.webtorrent.dev',
+            'wss://tracker.openwebtorrent.com',
+            'udp://tracker.openbittorrent.com:6969',
+            'udp://tracker.openbittorrent.com:80'
+          ];
+          const torrent = this.client.seed([file], {
+            announce: customTrackers,
+            announceList: [customTrackers]
+          }, (torrent: any) => {
             clearTimeout(timeoutId)
-            console.log('Profile seeded successfully:', torrent.magnetURI)
+            console.log('Profile seeded successfully:', { 
+              magnetURI: torrent.magnetURI,
+              infoHash: torrent.infoHash,
+              numPeers: torrent.numPeers
+            })
             this.emitEvent({ 
               type: 'seeding-started', 
               profile, 
@@ -206,6 +234,12 @@ class TorrentService {
             clearTimeout(timeoutId)
             this.emitEvent({ type: 'error', error: err.message })
             reject(err)
+          })
+
+          torrent.on('warning', (err: any) => {
+            if (err.message && err.message.includes('tracker')) {
+              console.warn('[TorrentService] Profile tracker warning (expected):', err.message)
+            }
           })
 
           torrent.on('wire', (wire: any) => {
@@ -258,12 +292,28 @@ class TorrentService {
 
     return new Promise((resolve, reject) => {
       let resolved = false
+      let trackerWarningsShown = false
+      
       const seedAction = () => {
         try {
-          const torrent = this.client.seed([file], (torrent: any) => {
+          const customTrackers = [
+            'wss://tracker.webtorrent.dev',
+            'wss://tracker.openwebtorrent.com',
+            'udp://tracker.openbittorrent.com:6969',
+            'udp://tracker.openbittorrent.com:80'
+          ];
+          const torrent = this.client.seed([file], {
+            announce: customTrackers,
+            announceList: [customTrackers]
+          }, (torrent: any) => {
             resolved = true
             const duration = (performance.now() - startTime).toFixed(0)
-            console.log('[TorrentService] Post torrent ready', { infoHash: torrent.infoHash, magnet: torrent.magnetURI, durationMs: duration })
+            console.log('[TorrentService] Post torrent ready', { 
+              infoHash: torrent.infoHash, 
+              magnet: torrent.magnetURI, 
+              durationMs: duration,
+              numPeers: torrent.numPeers 
+            })
             this.emitEvent({ type: 'seeding-started', post, magnetURI: torrent.magnetURI })
             resolve(torrent.magnetURI)
           })
@@ -273,12 +323,25 @@ class TorrentService {
               console.error('[TorrentService] Torrent error before ready:', err)
               reject(err)
             } else {
-              console.warn('[TorrentService] Torrent error after ready:', err)
+              console.warn('[TorrentService] Torrent error after ready (non-fatal):', err)
+            }
+          })
+
+          // Handle tracker warnings gracefully
+          torrent.on('warning', (err: any) => {
+            if (!trackerWarningsShown && err.message && err.message.includes('tracker')) {
+              console.warn('[TorrentService] Tracker warning (expected, trying alternatives):', err.message)
+              trackerWarningsShown = true
             }
           })
 
           torrent.on('wire', (wire: any) => {
             this.emitEvent({ type: 'peer-connected', peerId: wire.peerId || 'unknown' })
+          })
+
+          // Log successful tracker connections
+          torrent.on('peer', (peer: any) => {
+            console.log('[TorrentService] Peer connected for post torrent:', peer.id || 'unknown')
           })
         } catch (e) {
           console.error('[TorrentService] Seed action failed synchronously:', e)
@@ -329,12 +392,37 @@ class TorrentService {
 
     return new Promise((resolve, reject) => {
       try {
-        const torrent = this.client.seed([file], (torrent: any) => {
+        const customTrackers = [
+          'wss://tracker.webtorrent.dev',
+          'wss://tracker.openwebtorrent.com',
+          'udp://tracker.openbittorrent.com:6969',
+          'udp://tracker.openbittorrent.com:80'
+        ];
+        const torrent = this.client.seed([file], {
+          announce: customTrackers,
+          announceList: [customTrackers]
+        }, (torrent: any) => {
+          console.log('[TorrentService] Post index seeded successfully:', {
+            magnetURI: torrent.magnetURI,
+            count: indexFile.count,
+            numPeers: torrent.numPeers
+          })
           this.emitEvent({ type: 'post-index-seeded', magnetURI: torrent.magnetURI, count: indexFile.count })
           resolve({ magnetURI: torrent.magnetURI, count: indexFile.count })
         })
-        torrent.on('error', (err: any) => reject(err))
+        
+        torrent.on('error', (err: any) => {
+          console.error('[TorrentService] Post index torrent error:', err)
+          reject(err)
+        })
+        
+        torrent.on('warning', (err: any) => {
+          if (err.message && err.message.includes('tracker')) {
+            console.warn('[TorrentService] Post index tracker warning (expected):', err.message)
+          }
+        })
       } catch (e) {
+        console.error('[TorrentService] Failed to seed post index:', e)
         reject(e)
       }
     })
