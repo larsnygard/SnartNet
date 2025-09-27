@@ -16,7 +16,11 @@ export const PushStatus: React.FC = () => {
       const w: any = window as any
       const node: any = w.snartnetLibp2p
       const received = (w.__sn_head_sig_cache?.length) || 0
-      const published = (w.lastPublishedHeadUpdate ? (w.__sn_head_published_count || 0) : (w.__sn_head_published_count || 0))
+      // Track published events: increment counter when we publish
+      if (w.lastPublishedHeadUpdate && !w.__sn_head_published_count) {
+        w.__sn_head_published_count = 1
+      }
+      const published = w.__sn_head_published_count || 0
       setStats({
         transport: node ? 'libp2p' : 'in-memory',
         peers: node?.getPeers ? node.getPeers().length : (node?.getConnections ? node.getConnections().length : 0),

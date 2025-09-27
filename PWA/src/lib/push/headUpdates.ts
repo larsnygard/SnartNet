@@ -24,6 +24,9 @@ export async function publishHeadUpdate(evt: Omit<CanonicalHeadUpdate, 'authorPu
   await t.publish(signed)
   if (typeof window !== 'undefined') {
     (window as any).lastPublishedHeadUpdate = signed
+    // Increment published counter for UI
+    const w = window as any
+    w.__sn_head_published_count = (w.__sn_head_published_count || 0) + 1
   }
 }
 

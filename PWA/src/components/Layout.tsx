@@ -1,4 +1,5 @@
 import Navigation from './Navigation'
+import PushStatus from './PushStatus'
 
 // Version injected via define (optional) else fallback unknown
 const APP_VERSION = (import.meta as any).env?.VITE_APP_VERSION || 'dev'
@@ -19,6 +20,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         <span className="mx-2">•</span>
         <span>Development build</span>
       </footer>
+      <PushStatus />
     </div>
   )
 }
