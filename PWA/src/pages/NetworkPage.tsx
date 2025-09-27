@@ -1,4 +1,22 @@
 import React, { useEffect, useState } from 'react'
+// Utility: copy to clipboard and optionally share
+async function copyOrShareMagnet(magnetUri: string, username: string) {
+  try {
+    await navigator.clipboard.writeText(magnetUri)
+    // Try Web Share API if available
+    if (navigator.share) {
+      await navigator.share({
+        title: `SnartNet profile: ${username}`,
+        text: `Add me on SnartNet!\n\nmagnet:?xt=${magnetUri}`,
+        url: window.location.href
+      })
+    } else {
+      alert('Magnet link copied to clipboard!')
+    }
+  } catch (e) {
+    alert('Failed to copy/share magnet link: ' + (e instanceof Error ? e.message : e))
+  }
+}
 import { Link } from 'react-router-dom'
 import QRCodeManager from '@/components/QRCodeManager'
 import { useContactStore, type RelationshipType } from '@/stores/contactStore'
@@ -149,10 +167,20 @@ const NetworkPage: React.FC = () => {
                 </Link>
                 <div className="text-xs text-gray-400 dark:text-gray-500 mt-1">Trust {c.trustLevel}/10 • Added {new Date(c.addedDate).toLocaleDateString()}</div>
               </div>
-              <button
-                onClick={() => removeContact(c.id)}
-                className="text-xs px-3 py-1 bg-red-100 hover:bg-red-200 dark:bg-red-900 dark:hover:bg-red-800 text-red-700 dark:text-red-300 rounded"
-              >Remove</button>
+              <div className="flex flex-col gap-2 items-end">
+                <button
+                  onClick={() => copyOrShareMagnet(c.magnetUri, c.username)}
+                  className="text-xs px-3 py-1 bg-blue-100 hover:bg-blue-200 dark:bg-blue-900 dark:hover:bg-blue-800 text-blue-700 dark:text-blue-300 rounded flex items-center gap-1"
+                  title="Copy/share magnet link"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16h8M8 12h8m-7 8h6a2 2 0 002-2V6a2 2 0 00-2-2H8a2 2 0 00-2 2v2" /></svg>
+                  Magnet
+                </button>
+                <button
+                  onClick={() => removeContact(c.id)}
+                  className="text-xs px-3 py-1 bg-red-100 hover:bg-red-200 dark:bg-red-900 dark:hover:bg-red-800 text-red-700 dark:text-red-300 rounded"
+                >Remove</button>
+              </div>
             </div>
           ))
         )}
