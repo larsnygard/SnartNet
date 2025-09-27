@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import MagnetLinkManager from '@/components/MagnetLinkManager'
+import QRCodeManager from '@/components/QRCodeManager'
 import { useContactStore, type Contact, type RelationshipType } from '../stores/contactStore'
 
 const ContactsPage: React.FC = () => {
@@ -29,9 +30,17 @@ const ContactsPage: React.FC = () => {
 
   return (
     <div className="max-w-6xl mx-auto p-6">
-      {/* Connect with Friends (MagnetLinkManager) */}
-      <div className="mb-10">
-        <MagnetLinkManager />
+      {/* Connect with Friends */}
+      <div className="mb-10 space-y-6">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Connect with Friends</h2>
+          <QRCodeManager onContactAdded={() => loadContacts()} />
+        </div>
+        
+        <div>
+          <h3 className="text-md font-medium text-gray-700 dark:text-gray-300 mb-3">Or add via Magnet Link</h3>
+          <MagnetLinkManager />
+        </div>
       </div>
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
