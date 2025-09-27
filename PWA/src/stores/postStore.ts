@@ -97,8 +97,16 @@ interface PostState {
   deletePost: (postId: string) => Promise<void>
 }
 
-export const usePostStore = create<PostState>((set) => ({
-  posts: [],
+const LOCAL_STORAGE_KEY = 'snartnet:posts';
+
+export const usePostStore = create<PostState>((set, get) => ({
+  posts: (() => {
+    try {
+      const raw = localStorage.getItem(LOCAL_STORAGE_KEY)
+      if (raw) return JSON.parse(raw)
+    } catch {}
+    return []
+  })(),
   loading: false,
   error: null,
 
@@ -135,52 +143,64 @@ export const usePostStore = create<PostState>((set) => ({
     }
     const newPost: TorrentPost = normalizePost(base) as any
     
-    set((state) => ({
-      posts: [newPost, ...state.posts].sort((a, b) => 
+    set((state) => {
+      const posts = [newPost, ...state.posts].sort((a, b) => 
         new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
       )
-    }))
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+      return { posts }
+    })
 
     try {
       const torrentService = getTorrentService()
   // Seed full post including signature fields
   const magnetUri = await torrentService.seedPost({ ...(newPost as any) })
       
-      set((state) => ({
-        posts: state.posts.map(p => 
+      set((state) => {
+        const posts = state.posts.map(p => 
           p.id === newPost.id ? { ...p, magnetUri, seedProgress: 100, isSeeding: false } : p
         )
-      }))
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+        return { posts }
+      })
     } catch (error) {
       console.error('Failed to seed post:', error)
-      set((state) => ({
-        posts: state.posts.map(p => 
+      set((state) => {
+        const posts = state.posts.map(p => 
           p.id === newPost.id ? { ...p, isSeeding: false, seedProgress: 0, seedError: (error instanceof Error ? error.message : 'Failed to seed') } : p
         )
-      }))
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+        return { posts }
+      })
     }
   },
 
   removePost: (postId) => {
-    set((state) => ({
-      posts: state.posts.filter(post => post.id !== postId)
-    }))
+    set((state) => {
+      const posts = state.posts.filter(post => post.id !== postId)
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+      return { posts }
+    })
   },
 
   updatePost: (postId, updates) => {
-    set((state) => ({
-      posts: state.posts.map(post => 
+    set((state) => {
+      const posts = state.posts.map(post => 
         post.id === postId ? { ...post, ...updates } : post
       )
-    }))
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+      return { posts }
+    })
   },
 
   updateSeedingStatus: (postId, isSeeding, progress) => {
-    set((state) => ({
-      posts: state.posts.map(post => 
+    set((state) => {
+      const posts = state.posts.map(post => 
         post.id === postId ? { ...post, isSeeding, seedProgress: progress } : post
       )
-    }))
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+      return { posts }
+    })
   },
 
   loadPostsFromContacts: async () => {
@@ -299,10 +319,11 @@ export const usePostStore = create<PostState>((set) => ({
         }))
       }
       if (downloaded.length) {
-        set((state) => ({
-          posts: [...state.posts, ...downloaded].sort((a,b)=> new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
-          loading: false
-        }))
+        set((state) => {
+          const posts = [...state.posts, ...downloaded].sort((a,b)=> new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+          localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+          return { posts, loading: false }
+        })
       } else {
         set({ loading: false })
       }

@@ -1,3 +1,21 @@
+// Utility: copy to clipboard and optionally share
+async function copyOrShareOwnMagnet(magnetUri: string, username: string) {
+  try {
+    await navigator.clipboard.writeText(magnetUri)
+    // Try Web Share API if available
+    if (navigator.share) {
+      await navigator.share({
+        title: `SnartNet profile: ${username}`,
+        text: `Add me on SnartNet!\n\n${magnetUri}`,
+        url: window.location.href
+      })
+    } else {
+      alert('Magnet link copied to clipboard!')
+    }
+  } catch (e) {
+    alert('Failed to copy/share magnet link: ' + (e instanceof Error ? e.message : e))
+  }
+}
 import React, { useState, useEffect, useRef } from 'react'
 import QRCode from 'qrcode'
 import QrScanner from 'qr-scanner'
@@ -158,12 +176,34 @@ export const QRCodeManager: React.FC<QRCodeManagerProps> = ({ onContactAdded }) 
         >
           📱 Show My QR Code
         </button>
-        
         <button
           onClick={() => setShowScanner(true)}
           className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors flex items-center gap-2"
         >
           📷 Scan QR Code
+        </button>
+        <button
+          onClick={async () => {
+            let magnetUri = currentProfile?.magnetUri
+            if (!magnetUri && currentProfile?.username) {
+              try {
+                const core = await getCore()
+                magnetUri = await core.seedCurrentProfile()
+              } catch (e) {
+                alert('Failed to generate magnet link')
+                return
+              }
+            }
+            if (magnetUri && currentProfile?.username) {
+              copyOrShareOwnMagnet(magnetUri, currentProfile.username)
+            } else {
+              alert('No magnet link available for your profile')
+            }
+          }}
+          disabled={!currentProfile?.username}
+          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-400 text-white rounded-lg transition-colors flex items-center gap-2"
+        >
+          🔗 Copy Magnet Link
         </button>
       </div>
 
