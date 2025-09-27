@@ -95,7 +95,7 @@ impl SignedProfile {
 #[derive(Serialize, Deserialize)]
 struct ProfileData {
     username: String,
-    displayName: Option<String>,
+    display_name: Option<String>,
     bio: Option<String>,
 }
 
@@ -110,7 +110,7 @@ pub fn create_profile(profile_data_json: &str) -> Result<JsValue, JsValue> {
     let key_info = keypair.get_public_info();
     
     let mut profile = Profile::new(profile_data.username, key_info);
-    profile.display_name = profile_data.displayName;
+    profile.display_name = profile_data.display_name;
     profile.bio = profile_data.bio;
     
     serde_wasm_bindgen::to_value(&profile)
@@ -119,7 +119,7 @@ pub fn create_profile(profile_data_json: &str) -> Result<JsValue, JsValue> {
 
 #[derive(Serialize, Deserialize)]
 struct ProfileUpdateData {
-    displayName: Option<String>,
+    display_name: Option<String>,
     bio: Option<String>,
 }
 
@@ -131,7 +131,7 @@ pub fn update_profile(profile_json: &str, update_data_json: &str) -> Result<JsVa
     let update_data: ProfileUpdateData = serde_json::from_str(update_data_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid update data: {}", e)))?;
 
-    profile.update(update_data.displayName, update_data.bio);
+    profile.update(update_data.display_name, update_data.bio);
     
     serde_wasm_bindgen::to_value(&profile)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))

@@ -80,7 +80,7 @@ interface PostState {
   posts: TorrentPost[]
   loading: boolean
   error: string | null
-  
+
   // Actions
   addPost: (post: Omit<TorrentPost, 'id' | 'createdAt' | 'magnetUri'>) => Promise<void>
   removePost: (postId: string) => void
@@ -97,8 +97,16 @@ interface PostState {
   deletePost: (postId: string) => Promise<void>
 }
 
+const LOCAL_STORAGE_KEY = 'snartnet:posts';
+
 export const usePostStore = create<PostState>((set) => ({
-  posts: [],
+  posts: (() => {
+    try {
+      const raw = localStorage.getItem(LOCAL_STORAGE_KEY)
+      if (raw) return JSON.parse(raw)
+    } catch { }
+    return []
+  })(),
   loading: false,
   error: null,
 
@@ -134,53 +142,65 @@ export const usePostStore = create<PostState>((set) => ({
       signatureVerified: !!signature, // locally created so we trust it
     }
     const newPost: TorrentPost = normalizePost(base) as any
-    
-    set((state) => ({
-      posts: [newPost, ...state.posts].sort((a, b) => 
+
+    set((state) => {
+      const posts = [newPost, ...state.posts].sort((a, b) =>
         new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
       )
-    }))
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+      return { posts }
+    })
 
     try {
       const torrentService = getTorrentService()
-  // Seed full post including signature fields
-  const magnetUri = await torrentService.seedPost({ ...(newPost as any) })
-      
-      set((state) => ({
-        posts: state.posts.map(p => 
+      // Seed full post including signature fields
+      const magnetUri = await torrentService.seedPost({ ...(newPost as any) })
+
+      set((state) => {
+        const posts = state.posts.map(p =>
           p.id === newPost.id ? { ...p, magnetUri, seedProgress: 100, isSeeding: false } : p
         )
-      }))
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+        return { posts }
+      })
     } catch (error) {
       console.error('Failed to seed post:', error)
-      set((state) => ({
-        posts: state.posts.map(p => 
+      set((state) => {
+        const posts = state.posts.map(p =>
           p.id === newPost.id ? { ...p, isSeeding: false, seedProgress: 0, seedError: (error instanceof Error ? error.message : 'Failed to seed') } : p
         )
-      }))
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+        return { posts }
+      })
     }
   },
 
   removePost: (postId) => {
-    set((state) => ({
-      posts: state.posts.filter(post => post.id !== postId)
-    }))
+    set((state) => {
+      const posts = state.posts.filter(post => post.id !== postId)
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+      return { posts }
+    })
   },
 
   updatePost: (postId, updates) => {
-    set((state) => ({
-      posts: state.posts.map(post => 
+    set((state) => {
+      const posts = state.posts.map(post =>
         post.id === postId ? { ...post, ...updates } : post
       )
-    }))
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+      return { posts }
+    })
   },
 
   updateSeedingStatus: (postId, isSeeding, progress) => {
-    set((state) => ({
-      posts: state.posts.map(post => 
+    set((state) => {
+      const posts = state.posts.map(post =>
         post.id === postId ? { ...post, isSeeding, seedProgress: progress } : post
       )
-    }))
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+      return { posts }
+    })
   },
 
   loadPostsFromContacts: async () => {
@@ -230,7 +250,7 @@ export const usePostStore = create<PostState>((set) => ({
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
   clearError: () => set({ error: null }),
-  
+
   syncPostsForContact: async (contactId, options) => {
     const contactStore = useContactStore.getState()
     const contact = contactStore.contacts.find(c => c.id === contactId)
@@ -244,13 +264,13 @@ export const usePostStore = create<PostState>((set) => ({
       })
       // Download post torrents for new entries (limited concurrency)
       const existingIds = new Set(usePostStore.getState().posts.map(p => p.id))
-  const targets = result.entries.filter((e: any) => e.magnetUri && !existingIds.has(e.id))
+      const targets = result.entries.filter((e: any) => e.magnetUri && !existingIds.has(e.id))
       const limit = 3
       const queue = [...targets]
       const downloaded: TorrentPost[] = []
       while (queue.length > 0) {
         const batch = queue.splice(0, limit)
-  await Promise.all(batch.map(async (e: any) => {
+        await Promise.all(batch.map(async (e: any) => {
           try {
             const post = await (getTorrentService() as any).downloadPost(e.magnetUri)
             if (post && typeof post === 'object') {
@@ -270,7 +290,7 @@ export const usePostStore = create<PostState>((set) => ({
                   verifiedPost.signatureVerified = false
                   verifiedPost.signatureError = 'missing-signature'
                 }
-              } catch (verr:any) {
+              } catch (verr: any) {
                 verifiedPost.signatureVerified = false
                 verifiedPost.signatureError = verr?.message || 'verify-failed'
               }
@@ -299,10 +319,11 @@ export const usePostStore = create<PostState>((set) => ({
         }))
       }
       if (downloaded.length) {
-        set((state) => ({
-          posts: [...state.posts, ...downloaded].sort((a,b)=> new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
-          loading: false
-        }))
+        set((state) => {
+          const posts = [...state.posts, ...downloaded].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+          localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+          return { posts, loading: false }
+        })
       } else {
         set({ loading: false })
       }
@@ -324,13 +345,13 @@ export const usePostStore = create<PostState>((set) => ({
             kind: 'post'
           })
           processed.signatureVerified = ok
-            processed.signatureError = ok ? undefined : error || 'invalid-signature'
+          processed.signatureError = ok ? undefined : error || 'invalid-signature'
           processed.fingerprint = raw.authorPublicKey ? deriveFingerprint(raw.authorPublicKey) : raw.fingerprint
         } else {
           processed.signatureVerified = false
           processed.signatureError = 'missing-signature'
         }
-      } catch (e:any) {
+      } catch (e: any) {
         processed.signatureVerified = false
         processed.signatureError = e?.message || 'verify-failed'
       }
@@ -341,7 +362,7 @@ export const usePostStore = create<PostState>((set) => ({
         if (exists) {
           return { posts: state.posts.map(p => p.id === normalized.id ? { ...p, ...normalized } : p) }
         }
-        return { posts: [normalized as any, ...state.posts].sort((a,b)=> new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()) }
+        return { posts: [normalized as any, ...state.posts].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()) }
       })
       return normalized as any
     } catch (e) {
@@ -403,7 +424,10 @@ export const usePostStore = create<PostState>((set) => ({
       if (currentProfile && currentProfile.username === author) {
         // Update profile with new head and reseed profile
         useProfileStore.getState().updateProfile(author, { postIndexMagnetUri: result.magnetURI })
-        try { (await import('@/lib/core')).getCore().then(c => c.seedCurrentProfile()) } catch {}
+        try { 
+          const { getCore } = await import('@/lib/core')
+          getCore().then((c: any) => c.seedCurrentProfile()) 
+        } catch { }
       }
     } catch (e) {
       console.warn('Failed to regenerate post index', e)

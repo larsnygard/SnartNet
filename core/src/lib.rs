@@ -14,10 +14,7 @@ pub use message::*;
 pub use storage::*;
 pub use wasm::*;
 
-// Set up panic hook and allocator for WASM
-#[cfg(feature = "wee_alloc")]
-#[global_allocator]
-static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
+// Removed unused wee_alloc allocator block
 
 #[wasm_bindgen(start)]
 pub fn main() {

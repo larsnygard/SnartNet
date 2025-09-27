@@ -1,8 +1,8 @@
+import { getTorrentService } from '@/lib/torrent'
 // Handle incoming head update event
 export async function handleIncomingHeadUpdate(evt: any) {
   // Import verify util lazily
   const { verifyHeadUpdateSignature } = await import('@/lib/crypto/headUpdate');
-  const { usePostStore } = await import('./postStore');
   // Basic shape check
   if (!evt || evt.kind !== 'postIndexHeadUpdate' || !evt.profileId || !evt.newHead || !evt.signature) {
     return;
@@ -61,6 +61,7 @@ export async function handleIncomingHeadUpdate(evt: any) {
   }
 }
 import { create } from 'zustand'
+import { usePostStore } from './postStore'
 
 export type RelationshipType = 'ring-of-trust' | 'friend' | 'acquaintance' | 'group-member'
 
@@ -207,8 +208,6 @@ export const useContactStore = create<ContactState>((set, get) => ({
       const existing = get().contacts
       set({ contacts: [...existing, placeholder] })
 
-      // Dynamically import torrent service accessor to avoid circular import concerns
-      const { getTorrentService } = await import('@/lib/torrent')
       const svc: any = getTorrentService()
       const profile = await svc.downloadProfile(magnetUri)
       if (!profile) {
@@ -240,7 +239,6 @@ export const useContactStore = create<ContactState>((set, get) => ({
       // Auto-sync posts for the new contact if they have a postIndexMagnetUri
       if (addedContact && finalContact.postIndexMagnetUri) {
         // Dynamically import post store to avoid circular dependencies
-        const { usePostStore } = await import('./postStore')
         try {
           await usePostStore.getState().syncPostsForContact(addedContact.id, {
             maxPosts: finalContact.syncMaxPosts || 50,

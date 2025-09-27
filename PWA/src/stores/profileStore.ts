@@ -22,6 +22,7 @@ interface Profile {
   createdAt?: string;
   updatedAt?: string;
   posts?: ProfilePost[]; // Add posts array
+  postIndexMagnetUri?: string; // Added for post index support
 }
 
 interface ProfileState {
