@@ -1,3 +1,65 @@
+// Handle incoming head update event
+export async function handleIncomingHeadUpdate(evt: any) {
+  // Import verify util lazily
+  const { verifyHeadUpdateSignature } = await import('@/lib/crypto/headUpdate');
+  const { usePostStore } = await import('./postStore');
+  // Basic shape check
+  if (!evt || evt.kind !== 'postIndexHeadUpdate' || !evt.profileId || !evt.newHead || !evt.signature) {
+    return;
+  }
+  // Replay / dedupe cache (in-memory). Keep last 200 signatures.
+  const g: any = (window as any);
+  if (!g.__sn_head_sig_cache) g.__sn_head_sig_cache = [];
+  if (g.__sn_head_sig_cache.includes(evt.signature)) return;
+  const { ok } = await verifyHeadUpdateSignature(evt);
+  if (!ok) {
+    console.warn('Rejected head update: invalid signature', evt);
+    return;
+  }
+  // Insert into cache
+  g.__sn_head_sig_cache.push(evt.signature);
+  if (g.__sn_head_sig_cache.length > 200) g.__sn_head_sig_cache.splice(0, g.__sn_head_sig_cache.length - 200);
+  // Flood control: track per profileId events per minute
+  if (!g.__sn_head_rate) g.__sn_head_rate = {};
+  const now = Date.now();
+  const windowMs = 60_000;
+  const bucketKey = evt.profileId;
+  const rate = g.__sn_head_rate[bucketKey] || { start: now, count: 0 };
+  if (now - rate.start > windowMs) {
+    rate.start = now; rate.count = 0;
+  }
+  rate.count++;
+  g.__sn_head_rate[bucketKey] = rate;
+  if (rate.count > 30) { // arbitrary limit: 30 head updates / minute per profile
+    if (!g.__sn_head_rate_warned) g.__sn_head_rate_warned = new Set();
+    if (!g.__sn_head_rate_warned.has(bucketKey)) {
+      console.warn('Rate limiting head updates for', bucketKey);
+      g.__sn_head_rate_warned.add(bucketKey);
+    }
+    return;
+  }
+  // Timestamp freshness check (allow 5 min skew)
+  try {
+    const issued = new Date(evt.issuedAt).getTime();
+    if (!isNaN(issued)) {
+      const skew = Math.abs(Date.now() - issued);
+      if (skew > 5 * 60_000) {
+        console.warn('Discarding stale/future head update (skew >5m)', evt);
+        return;
+      }
+  }
+  } catch {}
+  // Find contact by profileId (username)
+  const contact = useContactStore.getState().contacts.find(c => c.username === evt.profileId);
+  if (!contact) return;
+  // Only update if new head is different and issuedAt is newer
+  if (contact.postIndexMagnetUri !== evt.newHead) {
+    // Optionally: check issuedAt > last seen (not tracked yet)
+    useContactStore.getState().updateContact(contact.id, { postIndexMagnetUri: evt.newHead });
+    // Trigger targeted sync
+    usePostStore.getState().syncPostsForContact(contact.id, { maxPosts: contact.syncMaxPosts });
+  }
+}
 import { create } from 'zustand'
 
 export type RelationshipType = 'ring-of-trust' | 'friend' | 'acquaintance' | 'group-member'
@@ -87,8 +149,14 @@ export const useContactStore = create<ContactState>((set, get) => ({
     try {
       const stored = localStorage.getItem('snartnet-contacts')
       if (stored) {
-        const contacts = JSON.parse(stored)
+        let contacts = JSON.parse(stored)
+        // Ensure all contacts have a valid id
+        contacts = contacts.map((c: any) => ({
+          ...c,
+          id: c.id || generateContactId(c.username, c.magnetUri)
+        }))
         set({ contacts })
+        localStorage.setItem('snartnet-contacts', JSON.stringify(contacts))
       }
     } catch (error) {
       console.error('Failed to load contacts:', error)
@@ -167,7 +235,24 @@ export const useContactStore = create<ContactState>((set, get) => ({
       // Remove placeholder then add real contact
       set({ contacts: get().contacts.filter(c => c.id !== tempId) })
       get().addContact(finalContact)
-      return get().contacts.find(c => c.username === username && c.magnetUri === magnetUri) || null
+      const addedContact = get().contacts.find(c => c.username === username && c.magnetUri === magnetUri)
+      
+      // Auto-sync posts for the new contact if they have a postIndexMagnetUri
+      if (addedContact && finalContact.postIndexMagnetUri) {
+        // Dynamically import post store to avoid circular dependencies
+        const { usePostStore } = await import('./postStore')
+        try {
+          await usePostStore.getState().syncPostsForContact(addedContact.id, {
+            maxPosts: finalContact.syncMaxPosts || 50,
+            monthsLookback: finalContact.syncMonthsLookback || 6
+          })
+          console.log('[ContactStore] Auto-synced posts for new contact:', username)
+        } catch (error) {
+          console.warn('[ContactStore] Failed to auto-sync posts for new contact:', error)
+        }
+      }
+      
+      return addedContact || null
     } catch (e) {
       console.error('addContactFromMagnet failed', e)
       // Remove placeholder if present

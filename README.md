@@ -157,12 +157,74 @@ SnartNet is currently in **Phase 2 shift planning**: establishing a reusable cor
 
 See the **[complete roadmap](./docs/ROADMAP.md)** for detailed timelines and milestones.
 
-## 🛠️ Technology Stack
+## � DHT Push Updates (Experimental)
+
+SnartNet includes an experimental real-time push notification system for head updates using libp2p gossipsub. This feature enables instant propagation of new posts without polling.
+
+### How It Works
+
+- When you create or edit a post, your client regenerates the post index head and publishes a signed head update event
+- Other clients subscribed to the gossipsub topic (`snartnet.head.v1`) receive the update immediately
+- The update contains the new head magnet URI, allowing peers to sync your latest posts instantly
+- All updates are Ed25519 signed and verified to prevent spam and ensure authenticity
+
+### Enabling libp2p Push
+
+By default, SnartNet uses an in-memory transport for head updates (local testing only). To enable real network push:
+
+**Option 1: Environment Variable (Recommended)**
+```bash
+# In PWA/.env.development or PWA/.env.local
+VITE_ENABLE_LIBP2P=true
+```
+
+**Option 2: Runtime Flag**
+```javascript
+// In browser console before initialization
+window.SNARTNET_ENABLE_LIBP2P = true
+```
+
+Then restart your development server (`npm run dev` in the PWA directory).
+
+### Debugging Push Network
+
+When libp2p is enabled, several debugging objects are exposed on `window`:
+
+- `window.snartnetLibp2p` - The libp2p node instance
+- `window.lastPublishedHeadUpdate` - Most recent head update you published
+- `window.__sn_head_sig_cache` - Cache of received signature hashes (dedupe)
+- `window.__sn_head_published_count` - Number of head updates you've published
+
+The PWA includes a live status indicator in the bottom-right corner showing:
+- Transport type (in-memory vs libp2p)
+- Connected peer count
+- Head updates received/published
+
+### Bootstrap Peers (Optional)
+
+To connect to other libp2p nodes, add bootstrap peer multiaddresses to localStorage:
+
+```javascript
+localStorage.setItem('snartnet:bootstrapPeers', JSON.stringify([
+  '/ip4/192.168.1.100/tcp/4001/p2p/12D3KooW...',
+  '/ip6/::1/tcp/4001/p2p/12D3KooW...'
+]))
+```
+
+### Security & Rate Limiting
+
+The push system includes built-in protections:
+- **Signature verification**: All head updates must be properly signed
+- **Deduplication**: Identical signatures are ignored
+- **Rate limiting**: Max 30 updates per profile per minute
+- **Timestamp validation**: Updates outside ±5 minute window are rejected
+
+## �🛠️ Technology Stack
 
 ### Core Protocol
 - **Language:** Rust (performance, safety, cross-platform)
 - **Cryptography:** libsodium, Ed25519, Curve25519
-- **Networking:** libtorrent-rasterbar, DHT, WebRTC
+- **Networking:** libtorrent-rasterbar, DHT, WebRTC, **libp2p gossipsub** (push updates)
 - **Serialization:** JSON, Protocol Buffers
 
 ### Client Applications

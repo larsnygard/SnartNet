@@ -12,7 +12,6 @@ const Navigation: React.FC = () => {
             <div className="flex space-x-4 items-center">
               <Link to="/" className="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white">Home</Link>
               <Link to="/profile" className="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white">Profile</Link>
-              <Link to="/discover" className="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white">Discover</Link>
               <Link to="/network" className="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white">Network</Link>
               <Link to="/messages" className="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white">Messages</Link>
             </div>

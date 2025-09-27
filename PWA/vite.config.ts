@@ -3,6 +3,16 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import { resolve } from 'path'
 import pkg from './package.json'
+import { execSync } from 'child_process'
+
+function safeCmd(cmd: string, fallback: string) {
+  try { return execSync(cmd, { stdio: ['ignore','pipe','ignore'] }).toString().trim() || fallback } catch { return fallback }
+}
+
+const GIT_COMMIT = safeCmd('git rev-parse --short=12 HEAD', 'unknown')
+const GIT_BRANCH = safeCmd('git rev-parse --abbrev-ref HEAD', 'unknown')
+const GIT_TAG = safeCmd('git describe --tags --abbrev=0', '')
+const BUILD_TIME = new Date().toISOString()
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -98,7 +108,11 @@ export default defineConfig({
   },
   define: {
     global: 'globalThis',
-    'import.meta.env.VITE_APP_VERSION': JSON.stringify(pkg.version || '0.0.0-dev')
+    'import.meta.env.VITE_APP_VERSION': JSON.stringify(pkg.version || '0.0.0-dev'),
+    'import.meta.env.VITE_GIT_COMMIT': JSON.stringify(GIT_COMMIT),
+    'import.meta.env.VITE_GIT_BRANCH': JSON.stringify(GIT_BRANCH),
+    'import.meta.env.VITE_GIT_TAG': JSON.stringify(GIT_TAG),
+    'import.meta.env.VITE_BUILD_TIME': JSON.stringify(BUILD_TIME)
   },
   optimizeDeps: {
     exclude: ['snartnet-core'],
