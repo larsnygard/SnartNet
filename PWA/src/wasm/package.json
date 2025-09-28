@@ -1,0 +1,15 @@
+{
+  "name": "snartnet-core",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "snartnet_core_bg.wasm",
+    "snartnet_core.js",
+    "snartnet_core.d.ts"
+  ],
+  "main": "snartnet_core.js",
+  "types": "snartnet_core.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
