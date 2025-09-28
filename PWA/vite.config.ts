@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
+import tailwindcss from '@tailwindcss/vite'
 import { resolve } from 'path'
 import pkg from './package.json'
 import { execSync } from 'child_process'
@@ -18,6 +19,7 @@ const BUILD_TIME = new Date().toISOString()
 export default defineConfig({
   base: '/net/',
   plugins: [
+    tailwindcss(),
     react(),
     VitePWA({
       registerType: 'autoUpdate',
