@@ -54,8 +54,12 @@ SnartNet is a revolutionary decentralized social media protocol that gives users
 # Install from source (once available)
 git clone https://github.com/larsnygard/SnartNet.git
 cd SnartNet
+# edit PWA/src/config.ts if server base path is other than /net/
 cargo build --release
-
+./clean.sh
+./build.sh
+# rsync -av PWA/dist/ yourserver:/webroot/net/
+# 
 # Or download pre-built binaries (future)
 curl -sSL https://github.com/larsnygard/SnartNet/releases/latest/download/snartnet-linux.tar.gz | tar xz
 ```
