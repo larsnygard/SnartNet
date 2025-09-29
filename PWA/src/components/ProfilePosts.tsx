@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import getTorrentService from '../lib/torrent';
 import { useProfileStore } from '../stores/profileStore';
 import { usePostStore } from '../stores/postStore';
 
@@ -35,6 +36,35 @@ const ProfilePosts: React.FC = () => {
       setPostContent('');
     } finally {
       setPosting(false);
+    }
+  };
+
+  // Download post file from torrent and trigger browser download
+  const handleDownloadPostFile = async (magnetUri: string, filename = 'post.json') => {
+    try {
+      const svc = getTorrentService();
+      const client = (svc as any).client;
+      if (!client) throw new Error('WebTorrent client not initialized');
+      const torrent = client.get(magnetUri) || client.add(magnetUri);
+      torrent.on('done', () => {
+        const file = torrent.files.find((f: any) => f.name && f.name.startsWith('post_') && f.name.endsWith('.json'));
+        if (!file) return alert('Post file not found in torrent');
+        file.getBlob((err: any, blob: Blob) => {
+          if (err) return alert('Failed to get file: ' + err.message);
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = file.name || filename;
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          }, 100);
+        });
+      });
+    } catch (e: any) {
+      alert('Download failed: ' + (e?.message || e));
     }
   };
 
@@ -80,6 +110,15 @@ const ProfilePosts: React.FC = () => {
                     >
                       {post.signatureVerified ? 'Verified' : 'Invalid'}
                     </span>
+                  )}
+                  {post.magnetUri && (
+                    <button
+                      className="text-green-600 hover:text-green-800 text-xs border border-green-200 dark:border-green-700 rounded px-2 py-0.5 ml-2"
+                      onClick={() => handleDownloadPostFile(post.magnetUri, `post_${post.id}.json`)}
+                      title="Download post file from torrent"
+                    >
+                      ⬇️ Download
+                    </button>
                   )}
                   <button
                     className="text-blue-500 hover:text-blue-700 text-xs"

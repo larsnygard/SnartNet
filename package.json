@@ -10,11 +10,17 @@
     "@vitejs/plugin-react": "^5.0.4",
     "eslint": "^9.36.0",
     "eslint-plugin-react-hooks": "^5.2.0",
+    "filer": "^1.4.1",
+    "jszip": "^3.10.1",
     "nanoid": "^5.1.6",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-router-dom": "^7.9.3",
     "tailwindcss": "^4.1.13",
+    "webtorrent": "^2.8.4",
     "zustand": "^5.0.8"
+  },
+  "devDependencies": {
+    "@types/jszip": "^3.4.1"
   }
 }

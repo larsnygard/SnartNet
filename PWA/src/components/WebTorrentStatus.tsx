@@ -175,7 +175,11 @@ export default function WebTorrentStatus() {
           </h3>
           <div className="space-y-2">
             {activeTorrents.map((torrent) => (
-              <div key={torrent.infoHash} className="bg-gray-50 dark:bg-gray-700 rounded-lg p-3">
+              <div
+                key={torrent.infoHash}
+                className="block bg-gray-50 dark:bg-gray-700 rounded-lg p-3 hover:bg-blue-50 dark:hover:bg-blue-900 transition-colors"
+                title="Download the first file in this torrent"
+              >
                 <div className="flex items-center justify-between mb-2">
                   <div className="font-medium text-gray-900 dark:text-white truncate">
                     {torrent.name || 'Unnamed Torrent'}
@@ -185,9 +189,41 @@ export default function WebTorrentStatus() {
                   </div>
                 </div>
                 <ProgressBar progress={torrent.progress} className="mb-2" />
-                <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
+                <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400 items-center">
                   <span>Peers: {torrent.numPeers}</span>
                   <span>⬆️ {formatBytes(torrent.uploadSpeed)}/s ⬇️ {formatBytes(torrent.downloadSpeed)}/s</span>
+                  <button
+                    className="ml-2 px-2 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded"
+                    onClick={async () => {
+                      try {
+                        const svc = getTorrentService();
+                        const client = (svc as any).client;
+                        if (!client) throw new Error('WebTorrent client not initialized');
+                        const t = client.get(torrent.magnetURI) || client.add(torrent.magnetURI);
+                        t.on('done', () => {
+                          const file = t.files[0];
+                          if (!file) return alert('No file found in torrent');
+                          file.getBlob((err: any, blob: Blob) => {
+                            if (err) return alert('Failed to get file: ' + err.message);
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = file.name || 'downloaded_file';
+                            document.body.appendChild(a);
+                            a.click();
+                            setTimeout(() => {
+                              document.body.removeChild(a);
+                              URL.revokeObjectURL(url);
+                            }, 100);
+                          });
+                        });
+                      } catch (e: any) {
+                        alert('Download failed: ' + (e?.message || e));
+                      }
+                    }}
+                  >
+                    ⬇️ Download
+                  </button>
                 </div>
               </div>
             ))}

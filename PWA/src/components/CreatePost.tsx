@@ -18,7 +18,10 @@ export default function CreatePost() {
         const processedImages = await Promise.all(
           files.map(file => processAndStoreImage(file, 'post-image'))
         )
-        setImages(prev => [...prev, ...processedImages.filter((img): img is PostImage => img !== null)])
+        setImages(prev => [
+          ...prev,
+          ...processedImages.filter((img): img is PostImage => !!img && typeof img === 'object' && 'id' in img && 'data' in img && 'filename' in img)
+        ])
       } catch (error) {
         console.error("Error processing images:", error)
         // Optionally, show an error message to the user
@@ -38,10 +41,9 @@ export default function CreatePost() {
     
     try {
       const authorKey = currentProfile.publicKey || currentProfile.username
-      await addPost({
+      await addPost?.({
         author: authorKey,
         authorDisplayName: currentProfile.displayName || currentProfile.username,
-        authorAvatar: currentProfile.avatar,
         content,
         images,
       })

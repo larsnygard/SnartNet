@@ -35,7 +35,9 @@
     "react-router-dom": "^7.9.3",
     "stream-browserify": "^3.0.0",
     "util": "^0.12.5",
-    "zustand": "^5.0.8"
+    "zustand": "^5.0.8",
+    "filer": "^1.4.0",
+    "jszip": "^3.10.1"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",

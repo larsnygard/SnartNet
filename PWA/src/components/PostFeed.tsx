@@ -7,13 +7,13 @@ export default function PostFeed() {
   const posts = usePostStore((state) => state.posts)
   const loading = usePostStore((state) => state.loading)
   const error = usePostStore((state) => state.error)
-  const loadPosts = usePostStore((state) => state.loadPostsFromContacts)
+  const loadPosts = usePostStore((state) => state.loadPosts)
 
   const [postCount, setPostCount] = useState(20)
   const [timePeriod, setTimePeriod] = useState<TimePeriod>('all')
 
   useEffect(() => {
-    loadPosts()
+  if (loadPosts) loadPosts();
   }, [loadPosts])
 
   const filteredPosts = useMemo(() => {

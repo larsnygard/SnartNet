@@ -1,5 +1,7 @@
 import { create } from 'zustand'
-import { getCore } from '@/lib/core'
+import { SnartStorage } from '../lib/SnartStorage'
+
+const storage = new SnartStorage();
 
 interface ProfilePost {
   id: string;
@@ -30,8 +32,8 @@ interface ProfileState {
   profiles: Map<string, Profile>;
   loading: boolean;
   error: string | null;
-  seedProfileEnabled: boolean; // preference for auto seeding
-  
+  seedProfileEnabled: boolean;
+
   // Actions
   setCurrentProfile: (profile: Profile | null) => void;
   addProfile: (profile: Profile) => void;
@@ -41,93 +43,76 @@ interface ProfileState {
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
   clearError: () => void;
+  saveProfile: (profile: Profile) => Promise<void>;
+  loadProfiles: () => Promise<void>;
 }
 
-const SEED_PREF_KEY = 'snartnet:profile:seed-enabled'
 
-export const useProfileStore = create<ProfileState>((set) => ({
+const PROFILE_DIR = '/profiles';
+const SEED_PREF_PATH = '/settings/profile-seed-enabled.json';
+
+export const useProfileStore = create<ProfileState>((set, get) => ({
   currentProfile: null,
   profiles: new Map(),
   loading: false,
   error: null,
-  seedProfileEnabled: (() => {
-    const stored = localStorage.getItem(SEED_PREF_KEY)
-    if (stored === null) return true // default ON
-    return stored === 'true'
-  })(),
+  seedProfileEnabled: true,
+
+  // Load all profiles from Filer FS
+  async loadProfiles() {
+    set({ loading: true });
+    try {
+      const files = await storage.listFiles(PROFILE_DIR);
+      const profiles = new Map();
+      for (const file of files) {
+        const data = await storage.readFile(`${PROFILE_DIR}/${file}`);
+        const profile = JSON.parse(data);
+        profiles.set(profile.username, profile);
+      }
+      set({ profiles, loading: false });
+    } catch (e) {
+      set({ error: (e as Error).message, loading: false });
+    }
+  },
+
+  // Save a profile to Filer FS
+  async saveProfile(profile: Profile) {
+    await storage.writeFile(`${PROFILE_DIR}/${profile.username}.json`, JSON.stringify(profile));
+  },
 
   setCurrentProfile: (profile) => set({ currentProfile: profile }),
-  
-  addProfile: (profile) => set((state) => {
-    const newProfiles = new Map(state.profiles)
-    newProfiles.set(profile.username, profile)
-    return { profiles: newProfiles }
-  }),
-  
-  updateProfile: (username, updates) => set((state) => {
-    const newProfiles = new Map(state.profiles)
-    const existing = newProfiles.get(username)
+
+  addProfile: async (profile) => {
+    await get().saveProfile(profile);
+    get().loadProfiles();
+  },
+
+  updateProfile: async (username, updates) => {
+    const state = get();
+    const existing = state.profiles.get(username);
     if (existing) {
-      newProfiles.set(username, { ...existing, ...updates })
-    }
-    
-    // Also update current profile if it matches
-    let newCurrentProfile = state.currentProfile
-    if (state.currentProfile?.username === username) {
-      newCurrentProfile = { ...state.currentProfile, ...updates }
-    }
-    
-    return { 
-      profiles: newProfiles,
-      currentProfile: newCurrentProfile
-    }
-  }),
-  
-  updateProfilePicture: (username, profilePicture, thumbnail) => set((state) => {
-    const updates = { 
-      profilePicture,
-      profilePictureThumbnail: thumbnail || profilePicture,
-      updatedAt: new Date().toISOString()
-    }
-    
-    const newProfiles = new Map(state.profiles)
-    const existing = newProfiles.get(username)
-    if (existing) {
-      newProfiles.set(username, { ...existing, ...updates })
-    }
-    
-    // Also update current profile if it matches
-    let newCurrentProfile = state.currentProfile
-    if (state.currentProfile?.username === username) {
-      newCurrentProfile = { ...state.currentProfile, ...updates }
-      
-      // Store profile picture in localStorage for persistence
-      localStorage.setItem(`profile-picture-${username}`, profilePicture)
-      if (thumbnail) {
-        localStorage.setItem(`profile-picture-thumb-${username}`, thumbnail)
+      const updated = { ...existing, ...updates };
+      await get().saveProfile(updated);
+      get().loadProfiles();
+      if (state.currentProfile?.username === username) {
+        set({ currentProfile: updated });
       }
     }
-    
-    // Fire & forget reseed to propagate new picture (debounced effect could be added later)
-    if (newCurrentProfile) {
-      getCore().then(core => {
-        core.seedCurrentProfile().catch(e => console.warn('Reseed after picture update failed', e))
-      }).catch(()=>{})
-    }
-    return { 
-      profiles: newProfiles,
-      currentProfile: newCurrentProfile
-    }
-  }),
-  
-  setSeedProfileEnabled: (enabled) => set(() => {
-    try { localStorage.setItem(SEED_PREF_KEY, String(enabled)) } catch {}
-    return { seedProfileEnabled: enabled }
-  }),
-  
+  },
+
+  updateProfilePicture: async (username, profilePicture, thumbnail) => {
+    await get().updateProfile(username, { profilePicture, profilePictureThumbnail: thumbnail });
+  },
+
+  setSeedProfileEnabled: async (enabled) => {
+    await storage.writeFile(SEED_PREF_PATH, JSON.stringify({ enabled }));
+    set({ seedProfileEnabled: enabled });
+  },
+
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
   clearError: () => set({ error: null }),
-}))
+}));
+// (Legacy/duplicate logic removed. All persistence now uses SnartStorage async helpers above.)
 
 export type { Profile, ProfilePost }

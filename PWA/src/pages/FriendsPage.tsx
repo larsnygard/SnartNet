@@ -3,13 +3,16 @@ import { useContactStore } from '@/stores/contactStore'
 
 // Simple friends page focusing on "friend" relationship (and showing ring-of-trust inline)
 const FriendsPage: React.FC = () => {
-  const { loadContacts, getContactsByRelationship } = useContactStore()
+  const getContactsByRelationship = useContactStore(state => state.getContactsByRelationship)
   const friends = getContactsByRelationship('friend')
   const ring = getContactsByRelationship('ring-of-trust')
 
   useEffect(() => {
-    loadContacts()
-  }, [loadContacts])
+    (async () => {
+      const { loadContacts } = await import('@/stores/contactStore')
+      await loadContacts()
+    })()
+  }, [])
 
   return (
     <div className="max-w-4xl mx-auto p-6">

@@ -1,40 +1,23 @@
-import React, { useEffect, useMemo, useState } from 'react'
+// Removed stray contact lookup at top level
+import React from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useContactStore } from '@/stores/contactStore'
 import { usePostStore } from '@/stores/postStore'
-import { ImageProcessor } from '@/lib/imageProcessor'
+import { ImageProcessor } from '@/lib/imageProcessor' // Keep this import if it's used later
 
 const ContactProfilePage: React.FC = () => {
   const { id } = useParams<{ id: string }>()
-  const { contacts, loadContacts } = useContactStore()
-  const { posts, loadPostsFromContacts } = usePostStore()
-  const syncPostsForContact = usePostStore(s => s.syncPostsForContact)
-  const [syncing, setSyncing] = useState(false)
-  const [syncMsg, setSyncMsg] = useState<string>('')
-
-  useEffect(() => { loadContacts() }, [loadContacts])
-  useEffect(() => { loadPostsFromContacts() }, [loadPostsFromContacts])
+  const contacts = useContactStore(state => state.contacts)
+  const posts = usePostStore(state => state.posts)
 
   const contact = contacts.find(c => c.id === id)
+  const contactPosts = posts.filter(p => p.author === id)
 
-  const contactPosts = useMemo(() => {
-    if (!contact) return []
-    return posts
-      .filter(p => p.author === contact.username)
-      .sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .slice(0, 50)
-  }, [posts, contact])
+  React.useEffect(() => { (async () => { await (await import('@/stores/contactStore')).loadContacts() })() }, [])
+  React.useEffect(() => { (async () => { await (await import('@/stores/postStore')).loadPosts?.() })() }, [])
 
   if (!contact) {
-    return (
-      <div className="max-w-4xl mx-auto p-6">
-        <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-8 text-center">
-          <h1 className="text-xl font-semibold mb-2 text-gray-800 dark:text-gray-100">Contact not found</h1>
-          <p className="text-gray-500 dark:text-gray-400 mb-4">The contact you are looking for does not exist or has been removed.</p>
-          <Link to="/network" className="text-blue-600 dark:text-blue-400 hover:underline text-sm">Back to Network</Link>
-        </div>
-      </div>
-    )
+    return <div className="max-w-2xl mx-auto p-6 text-center text-red-600 dark:text-red-400">Contact not found.</div>;
   }
 
   return (
@@ -68,29 +51,6 @@ const ContactProfilePage: React.FC = () => {
           {contact.postIndexMagnetUri && (
             <span className="text-xs text-green-600 dark:text-green-400">Index ready</span>
           )}
-          <button
-            disabled={syncing || !contact.postIndexMagnetUri}
-            onClick={async () => {
-              if (!contact.postIndexMagnetUri) return
-              setSyncing(true)
-              setSyncMsg('Syncing…')
-              const start = performance.now()
-              try {
-                await syncPostsForContact(contact.id, { maxPosts: contact.syncMaxPosts, monthsLookback: contact.syncMonthsLookback })
-                const dur = (performance.now() - start)/1000
-                setSyncMsg(`Synced in ${dur.toFixed(1)}s`)
-              } catch (e:any) {
-                setSyncMsg(e?.message || 'Sync failed')
-              } finally {
-                setSyncing(false)
-                setTimeout(()=> setSyncMsg(''), 5000)
-              }
-            }}
-            className="px-3 py-1.5 text-xs rounded bg-blue-600 disabled:bg-gray-400 hover:bg-blue-700 text-white font-medium shadow"
-          >
-            {syncing ? 'Syncing…' : 'Sync Contact'}
-          </button>
-          {syncMsg && <span className="text-[10px] text-gray-500 dark:text-gray-400">{syncMsg}</span>}
         </div>
       </div>
 
@@ -118,7 +78,7 @@ const ContactProfilePage: React.FC = () => {
                 <p className="text-sm text-gray-900 dark:text-gray-100 whitespace-pre-line mb-2">{post.content}</p>
                 {post.images && post.images.length > 0 && (
                   <div className="grid gap-2 grid-cols-2">
-                    {post.images.map(img => (
+                    {post.images.map((img: any) => (
                       <img key={img.id} src={ImageProcessor.base64ToDataUrl(img.data)} className="w-full h-40 object-cover rounded" alt={img.filename} />
                     ))}
                   </div>

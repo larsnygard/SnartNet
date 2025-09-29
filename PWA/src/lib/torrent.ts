@@ -1,3 +1,4 @@
+  // Public method to add a torrent by magnet URI (for reseeding)
 import type { Profile } from '@/stores/profileStore'
 import type { TorrentPost } from '@/stores/postStore'
 
@@ -58,6 +59,15 @@ export interface DownloadedPostIndexResult {
 
 // Simple torrent service that works in both browser and build
 class TorrentService {
+  // Public method to add a torrent by magnet URI (for reseeding)
+  public addMagnet(magnetUri: string) {
+    if (!this.client) return;
+    // Only add if not already present
+    if (this.client.get(magnetUri)) return;
+    this.client.add(magnetUri, () => {
+      // Optionally: log or emit event
+    });
+  }
   private client: any = null
   private activeTorrents: Map<string, any> = new Map()
   private eventCallbacks: Array<(event: any) => void> = []
@@ -84,7 +94,6 @@ class TorrentService {
   private async initializeClient() {
     if (typeof window === 'undefined') return
     let attempts = 0
-    const maxAttempts = 10
     const customTrackers = [
       'wss://tracker.webtorrent.dev',
       'wss://tracker.openwebtorrent.com',
@@ -97,23 +106,11 @@ class TorrentService {
 
   const tryInit = () => {
       attempts++
-      const WebTorrentConstructor = (window as any).WebTorrent
-      if (!WebTorrentConstructor || typeof WebTorrentConstructor !== 'function') {
-        if (attempts < maxAttempts) {
-          console.warn(`[TorrentService] WebTorrent not available yet (attempt ${attempts}), retrying...`)
-          setTimeout(tryInit, 500)
-          return
-        } else {
-          const err = new Error('WebTorrent not available after retries')
-          console.error('[TorrentService] ', err)
-          this.emitEvent({ type: 'error', error: err.message })
-          return
-        }
-      }
-
       try {
-        // Configure WebTorrent with only our custom trackers
-        this.client = new WebTorrentConstructor({
+        // Import WebTorrent from npm package
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const WebTorrent = require('webtorrent')
+        this.client = new WebTorrent({
           announce: customTrackers,
           announceList: [customTrackers],
           dht: true, // Enable DHT for better peer discovery

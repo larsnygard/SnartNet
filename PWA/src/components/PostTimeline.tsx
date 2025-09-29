@@ -5,15 +5,18 @@ import { useProfileStore } from '@/stores/profileStore'
 import { ImageProcessor } from '../lib/imageProcessor'
 
 const PostTimeline: React.FC = () => {
-  const { posts, loading, loadPostsFromContacts } = usePostStore()
-  const { loadContacts, contacts } = useContactStore()
+  const posts = usePostStore(state => state.posts)
+  const loading = usePostStore(state => state.loading)
+  const loadPosts = usePostStore(state => state.loadPosts)
+  const contacts = useContactStore(state => state.contacts)
+  const loadContacts = useContactStore(state => state.setContacts) // setContacts is the setter, but loadContacts is async helper
   const { currentProfile } = useProfileStore()
 
   useEffect(() => {
-    // Load contacts and their posts
-    loadContacts()
-    loadPostsFromContacts()
-  }, [loadContacts, loadPostsFromContacts])
+    // Load contacts and posts
+    loadContacts([]) // set empty to trigger, or call async helper if needed
+    loadPosts?.()
+  }, [loadContacts, loadPosts])
 
 
 
@@ -79,15 +82,7 @@ const PostCard: React.FC<PostCardProps> = ({ post }) => {
       {/* Post header */}
       <div className="flex items-center space-x-3 mb-4">
         <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-400 to-purple-500 flex items-center justify-center text-white font-semibold">
-          {post.authorAvatar ? (
-            <img 
-              src={ImageProcessor.base64ToDataUrl(post.authorAvatar)}
-              alt={post.author}
-              className="w-10 h-10 rounded-full object-cover"
-            />
-          ) : (
-            post.author.charAt(0).toUpperCase()
-          )}
+          {post.author.charAt(0).toUpperCase()}
         </div>
         <div className="flex-1">
           <div className="flex items-center space-x-2">

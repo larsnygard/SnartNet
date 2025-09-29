@@ -1,0 +1,301 @@
+{
+  "version": "0.1.0",
+  "name": "snartnet-pwa",
+  "problems": [
+    "missing: @chainsafe/libp2p-noise@^17.0.0, required by snartnet-pwa@0.1.0",
+    "missing: @libp2p/gossipsub@^15.0.3, required by snartnet-pwa@0.1.0",
+    "missing: @libp2p/mplex@^12.0.2, required by snartnet-pwa@0.1.0",
+    "missing: @libp2p/websockets@^10.0.2, required by snartnet-pwa@0.1.0",
+    "missing: @libp2p/webtransport@^6.0.3, required by snartnet-pwa@0.1.0",
+    "missing: @tailwindcss/vite@^4.1.13, required by snartnet-pwa@0.1.0",
+    "missing: @types/node@^24.5.2, required by snartnet-pwa@0.1.0",
+    "missing: @types/qrcode@^1.5.5, required by snartnet-pwa@0.1.0",
+    "missing: @types/react-dom@^19.1.9, required by snartnet-pwa@0.1.0",
+    "missing: @types/react@^19.1.15, required by snartnet-pwa@0.1.0",
+    "missing: @types/webtorrent@^0.110.1, required by snartnet-pwa@0.1.0",
+    "missing: @typescript-eslint/eslint-plugin@^8.44.1, required by snartnet-pwa@0.1.0",
+    "missing: @typescript-eslint/parser@^8.44.1, required by snartnet-pwa@0.1.0",
+    "missing: @vitejs/plugin-react@^5.0.4, required by snartnet-pwa@0.1.0",
+    "missing: autoprefixer@^10.4.16, required by snartnet-pwa@0.1.0",
+    "missing: buffer@^6.0.3, required by snartnet-pwa@0.1.0",
+    "missing: crypto-browserify@^3.12.1, required by snartnet-pwa@0.1.0",
+    "missing: eslint-plugin-react-hooks@^5.2.0, required by snartnet-pwa@0.1.0",
+    "missing: eslint-plugin-react-refresh@^0.4.5, required by snartnet-pwa@0.1.0",
+    "missing: eslint@^9.36.0, required by snartnet-pwa@0.1.0",
+    "missing: events@^3.3.0, required by snartnet-pwa@0.1.0",
+    "missing: libp2p@^3.0.2, required by snartnet-pwa@0.1.0",
+    "missing: path-browserify@^1.0.1, required by snartnet-pwa@0.1.0",
+    "missing: postcss@^8.4.32, required by snartnet-pwa@0.1.0",
+    "missing: prettier@^3.1.1, required by snartnet-pwa@0.1.0",
+    "missing: process@^0.11.10, required by snartnet-pwa@0.1.0",
+    "missing: qr-scanner@^1.4.2, required by snartnet-pwa@0.1.0",
+    "missing: qrcode@^1.5.4, required by snartnet-pwa@0.1.0",
+    "missing: react-dom@^19.1.1, required by snartnet-pwa@0.1.0",
+    "missing: react-router-dom@^7.9.3, required by snartnet-pwa@0.1.0",
+    "missing: react@^19.1.1, required by snartnet-pwa@0.1.0",
+    "missing: stream-browserify@^3.0.0, required by snartnet-pwa@0.1.0",
+    "missing: tailwindcss@^4.1.13, required by snartnet-pwa@0.1.0",
+    "missing: tsx@^4.6.2, required by snartnet-pwa@0.1.0",
+    "missing: typescript@^5.2.2, required by snartnet-pwa@0.1.0",
+    "missing: util@^0.12.5, required by snartnet-pwa@0.1.0",
+    "missing: vite-plugin-pwa@^1.0.3, required by snartnet-pwa@0.1.0",
+    "missing: vite@^5.2.10, required by snartnet-pwa@0.1.0",
+    "missing: vitest@^3.2.4, required by snartnet-pwa@0.1.0",
+    "missing: workbox-window@^7.0.0, required by snartnet-pwa@0.1.0",
+    "missing: zustand@^5.0.8, required by snartnet-pwa@0.1.0"
+  ],
+  "dependencies": {
+    "@chainsafe/libp2p-noise": {
+      "required": "^17.0.0",
+      "missing": true,
+      "problems": [
+        "missing: @chainsafe/libp2p-noise@^17.0.0, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "@libp2p/gossipsub": {
+      "missing": true,
+      "problems": [
+        "missing: @libp2p/gossipsub@^15.0.3, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "@libp2p/mplex": {
+      "missing": true,
+      "problems": [
+        "missing: @libp2p/mplex@^12.0.2, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "@libp2p/websockets": {
+      "missing": true,
+      "problems": [
+        "missing: @libp2p/websockets@^10.0.2, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "@libp2p/webtransport": {
+      "missing": true,
+      "problems": [
+        "missing: @libp2p/webtransport@^6.0.3, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "@tailwindcss/vite": {
+      "missing": true,
+      "problems": [
+        "missing: @tailwindcss/vite@^4.1.13, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "@types/node": {
+      "missing": true,
+      "problems": [
+        "missing: @types/node@^24.5.2, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "@types/qrcode": {
+      "missing": true,
+      "problems": [
+        "missing: @types/qrcode@^1.5.5, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "@types/react-dom": {
+      "missing": true,
+      "problems": [
+        "missing: @types/react-dom@^19.1.9, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "@types/react": {
+      "missing": true,
+      "problems": [
+        "missing: @types/react@^19.1.15, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "@types/webtorrent": {
+      "missing": true,
+      "problems": [
+        "missing: @types/webtorrent@^0.110.1, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "@typescript-eslint/eslint-plugin": {
+      "missing": true,
+      "problems": [
+        "missing: @typescript-eslint/eslint-plugin@^8.44.1, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "@typescript-eslint/parser": {
+      "missing": true,
+      "problems": [
+        "missing: @typescript-eslint/parser@^8.44.1, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "@vitejs/plugin-react": {
+      "missing": true,
+      "problems": [
+        "missing: @vitejs/plugin-react@^5.0.4, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "autoprefixer": {
+      "missing": true,
+      "problems": [
+        "missing: autoprefixer@^10.4.16, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "buffer": {
+      "missing": true,
+      "problems": [
+        "missing: buffer@^6.0.3, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "crypto-browserify": {
+      "missing": true,
+      "problems": [
+        "missing: crypto-browserify@^3.12.1, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "eslint-plugin-react-hooks": {
+      "missing": true,
+      "problems": [
+        "missing: eslint-plugin-react-hooks@^5.2.0, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "eslint-plugin-react-refresh": {
+      "missing": true,
+      "problems": [
+        "missing: eslint-plugin-react-refresh@^0.4.5, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "eslint": {
+      "missing": true,
+      "problems": [
+        "missing: eslint@^9.36.0, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "events": {
+      "missing": true,
+      "problems": [
+        "missing: events@^3.3.0, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "libp2p": {
+      "missing": true,
+      "problems": [
+        "missing: libp2p@^3.0.2, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "path-browserify": {
+      "missing": true,
+      "problems": [
+        "missing: path-browserify@^1.0.1, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "postcss": {
+      "missing": true,
+      "problems": [
+        "missing: postcss@^8.4.32, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "prettier": {
+      "missing": true,
+      "problems": [
+        "missing: prettier@^3.1.1, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "process": {
+      "missing": true,
+      "problems": [
+        "missing: process@^0.11.10, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "qr-scanner": {
+      "missing": true,
+      "problems": [
+        "missing: qr-scanner@^1.4.2, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "qrcode": {
+      "missing": true,
+      "problems": [
+        "missing: qrcode@^1.5.4, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "react-dom": {
+      "missing": true,
+      "problems": [
+        "missing: react-dom@^19.1.1, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "react-router-dom": {
+      "missing": true,
+      "problems": [
+        "missing: react-router-dom@^7.9.3, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "react": {
+      "missing": true,
+      "problems": [
+        "missing: react@^19.1.1, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "stream-browserify": {
+      "missing": true,
+      "problems": [
+        "missing: stream-browserify@^3.0.0, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "tailwindcss": {
+      "missing": true,
+      "problems": [
+        "missing: tailwindcss@^4.1.13, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "tsx": {
+      "missing": true,
+      "problems": [
+        "missing: tsx@^4.6.2, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "typescript": {
+      "missing": true,
+      "problems": [
+        "missing: typescript@^5.2.2, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "util": {
+      "missing": true,
+      "problems": [
+        "missing: util@^0.12.5, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "vite-plugin-pwa": {
+      "missing": true,
+      "problems": [
+        "missing: vite-plugin-pwa@^1.0.3, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "vite": {
+      "missing": true,
+      "problems": [
+        "missing: vite@^5.2.10, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "vitest": {
+      "missing": true,
+      "problems": [
+        "missing: vitest@^3.2.4, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "workbox-window": {
+      "missing": true,
+      "problems": [
+        "missing: workbox-window@^7.0.0, required by snartnet-pwa@0.1.0"
+      ]
+    },
+    "zustand": {
+      "missing": true,
+      "problems": [
+        "missing: zustand@^5.0.8, required by snartnet-pwa@0.1.0"
+      ]
+    }
+  },
+  "error": {
+    "code": "ELSPROBLEMS",
+    "summary": "missing: @chainsafe/libp2p-noise@^17.0.0, required by snartnet-pwa@0.1.0\nmissing: @libp2p/gossipsub@^15.0.3, required by snartnet-pwa@0.1.0\nmissing: @libp2p/mplex@^12.0.2, required by snartnet-pwa@0.1.0\nmissing: @libp2p/websockets@^10.0.2, required by snartnet-pwa@0.1.0\nmissing: @libp2p/webtransport@^6.0.3, required by snartnet-pwa@0.1.0\nmissing: @tailwindcss/vite@^4.1.13, required by snartnet-pwa@0.1.0\nmissing: @types/node@^24.5.2, required by snartnet-pwa@0.1.0\nmissing: @types/qrcode@^1.5.5, required by snartnet-pwa@0.1.0\nmissing: @types/react-dom@^19.1.9, required by snartnet-pwa@0.1.0\nmissing: @types/react@^19.1.15, required by snartnet-pwa@0.1.0\nmissing: @types/webtorrent@^0.110.1, required by snartnet-pwa@0.1.0\nmissing: @typescript-eslint/eslint-plugin@^8.44.1, required by snartnet-pwa@0.1.0\nmissing: @typescript-eslint/parser@^8.44.1, required by snartnet-pwa@0.1.0\nmissing: @vitejs/plugin-react@^5.0.4, required by snartnet-pwa@0.1.0\nmissing: autoprefixer@^10.4.16, required by snartnet-pwa@0.1.0\nmissing: buffer@^6.0.3, required by snartnet-pwa@0.1.0\nmissing: crypto-browserify@^3.12.1, required by snartnet-pwa@0.1.0\nmissing: eslint-plugin-react-hooks@^5.2.0, required by snartnet-pwa@0.1.0\nmissing: eslint-plugin-react-refresh@^0.4.5, required by snartnet-pwa@0.1.0\nmissing: eslint@^9.36.0, required by snartnet-pwa@0.1.0\nmissing: events@^3.3.0, required by snartnet-pwa@0.1.0\nmissing: libp2p@^3.0.2, required by snartnet-pwa@0.1.0\nmissing: path-browserify@^1.0.1, required by snartnet-pwa@0.1.0\nmissing: postcss@^8.4.32, required by snartnet-pwa@0.1.0\nmissing: prettier@^3.1.1, required by snartnet-pwa@0.1.0\nmissing: process@^0.11.10, required by snartnet-pwa@0.1.0\nmissing: qr-scanner@^1.4.2, required by snartnet-pwa@0.1.0\nmissing: qrcode@^1.5.4, required by snartnet-pwa@0.1.0\nmissing: react-dom@^19.1.1, required by snartnet-pwa@0.1.0\nmissing: react-router-dom@^7.9.3, required by snartnet-pwa@0.1.0\nmissing: react@^19.1.1, required by snartnet-pwa@0.1.0\nmissing: stream-browserify@^3.0.0, required by snartnet-pwa@0.1.0\nmissing: tailwindcss@^4.1.13, required by snartnet-pwa@0.1.0\nmissing: tsx@^4.6.2, required by snartnet-pwa@0.1.0\nmissing: typescript@^5.2.2, required by snartnet-pwa@0.1.0\nmissing: util@^0.12.5, required by snartnet-pwa@0.1.0\nmissing: vite-plugin-pwa@^1.0.3, required by snartnet-pwa@0.1.0\nmissing: vite@^5.2.10, required by snartnet-pwa@0.1.0\nmissing: vitest@^3.2.4, required by snartnet-pwa@0.1.0\nmissing: workbox-window@^7.0.0, required by snartnet-pwa@0.1.0\nmissing: zustand@^5.0.8, required by snartnet-pwa@0.1.0",
+    "detail": ""
+  }
+}

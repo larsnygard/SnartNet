@@ -20,7 +20,7 @@ async function copyOrShareMagnet(magnetUri: string, username: string) {
 import { Link } from 'react-router-dom'
 import QRCodeManager from '@/components/QRCodeManager'
 import { useContactStore, type RelationshipType } from '@/stores/contactStore'
-import { usePostStore } from '@/stores/postStore'
+
 
 const relationshipTabs: Array<{ id: RelationshipType | 'all'; label: string; icon: string }> = [
   { id: 'all', label: 'All', icon: '🌐' },
@@ -31,8 +31,7 @@ const relationshipTabs: Array<{ id: RelationshipType | 'all'; label: string; ico
 ]
 
 const NetworkPage: React.FC = () => {
-  const { loadContacts, contacts, addContactFromMagnet, removeContact } = useContactStore()
-  const { loadPostsFromContacts } = usePostStore()
+  const contacts = useContactStore(state => state.contacts)
   const [activeTab, setActiveTab] = useState<'all' | RelationshipType>('all')
   const [magnetInput, setMagnetInput] = useState('')
   const [adding, setAdding] = useState(false)
@@ -41,12 +40,18 @@ const NetworkPage: React.FC = () => {
   
   // Handle contact addition with automatic post sync
   const handleContactAdded = async () => {
+    const { loadContacts } = await import('@/stores/contactStore')
+    const { loadPosts } = await import('@/stores/postStore')
     await loadContacts()
-    // Trigger post sync for all contacts (including the newly added one)
-    setTimeout(() => loadPostsFromContacts(), 100)
+    setTimeout(() => loadPosts?.(), 100)
   }
 
-  useEffect(() => { loadContacts() }, [loadContacts])
+  useEffect(() => {
+    (async () => {
+      const { loadContacts } = await import('@/stores/contactStore')
+      await loadContacts()
+    })()
+  }, [])
 
   const filtered = contacts.filter(c => activeTab === 'all' ? true : c.relationship === activeTab)
 
@@ -56,14 +61,18 @@ const NetworkPage: React.FC = () => {
     if (!magnetInput.trim()) return
     setAdding(true)
     try {
-      const added = await addContactFromMagnet(magnetInput.trim(), relationship)
-      if (!added) {
-        setError('Failed to load profile from magnet (no peers or invalid data)')
-      } else {
-        setMagnetInput('')
-        // Trigger post sync for the newly added contact
-        setTimeout(() => loadPostsFromContacts(), 100)
-      }
+      // Add contact from magnet: parse and call addContact async helper
+      const { addContact } = await import('@/stores/contactStore')
+      await addContact({
+        username: magnetInput.trim(),
+        displayName: magnetInput.trim(),
+        relationship,
+        trustLevel: 1,
+        magnetUri: magnetInput.trim(),
+      })
+      setMagnetInput('')
+      const { loadPosts } = await import('@/stores/postStore')
+      setTimeout(() => loadPosts?.(), 100)
     } catch (e:any) {
       setError(e?.message || 'Failed to add contact')
     } finally {
@@ -177,7 +186,11 @@ const NetworkPage: React.FC = () => {
                   Magnet
                 </button>
                 <button
-                  onClick={() => removeContact(c.id)}
+                  onClick={async () => {
+                    const { removeContact } = await import('@/stores/contactStore');
+                    await removeContact(c.id);
+                    handleContactAdded();
+                  }}
                   className="text-xs px-3 py-1 bg-red-100 hover:bg-red-200 dark:bg-red-900 dark:hover:bg-red-800 text-red-700 dark:text-red-300 rounded"
                 >Remove</button>
               </div>

@@ -2,31 +2,32 @@ import React, { useState, useEffect } from 'react'
 import MagnetLinkManager from '@/components/MagnetLinkManager'
 import QRCodeManager from '@/components/QRCodeManager'
 import { useContactStore, type Contact, type RelationshipType } from '../stores/contactStore'
-import { usePostStore } from '../stores/postStore'
+
 
 const ContactsPage: React.FC = () => {
-  const { 
-    loadContacts, 
-    addContact, 
-    removeContact, 
-    updateContact, 
-    getContactsByRelationship 
-  } = useContactStore()
-  const { loadPostsFromContacts } = usePostStore()
+
+  const getContactsByRelationship = useContactStore(state => state.getContactsByRelationship)
+  // Use async helpers for contact actions
+  // import { loadContacts, addContact, removeContact, updateContact } from '../stores/contactStore'
+  // import { loadPosts } from '../stores/postStore'
   
   const [activeTab, setActiveTab] = useState<RelationshipType>('friend')
   const [showAddForm, setShowAddForm] = useState(false)
   
   // Handle contact addition with automatic post sync
   const handleContactAdded = async () => {
+    const { loadContacts } = await import('../stores/contactStore')
+    const { loadPosts } = await import('../stores/postStore')
     await loadContacts()
-    // Trigger post sync for all contacts (including the newly added one)
-    setTimeout(() => loadPostsFromContacts(), 100)
+    setTimeout(() => loadPosts?.(), 100)
   }
 
   useEffect(() => {
-    loadContacts()
-  }, [loadContacts])
+    (async () => {
+      const { loadContacts } = await import('../stores/contactStore')
+      await loadContacts()
+    })()
+  }, [])
 
   const tabs = [
     { id: 'friend' as RelationshipType, label: 'Friends', icon: '👥' },
@@ -89,7 +90,11 @@ const ContactsPage: React.FC = () => {
       {/* Add Contact Form */}
       {showAddForm && (
         <AddContactForm 
-          onAdd={addContact}
+          onAdd={async (contactData) => {
+            const { addContact } = await import('../stores/contactStore');
+            await addContact(contactData);
+            handleContactAdded();
+          }}
           onCancel={() => setShowAddForm(false)}
           defaultRelationship={activeTab}
         />
@@ -104,8 +109,16 @@ const ContactsPage: React.FC = () => {
             <ContactCard 
               key={contact.id}
               contact={contact}
-              onUpdate={updateContact}
-              onRemove={removeContact}
+              onUpdate={async (contactId, updates) => {
+                const { updateContact } = await import('../stores/contactStore');
+                await updateContact(contactId, updates);
+                handleContactAdded();
+              }}
+              onRemove={async (contactId) => {
+                const { removeContact } = await import('../stores/contactStore');
+                await removeContact(contactId);
+                handleContactAdded();
+              }}
             />
           ))
         )}
@@ -271,12 +284,25 @@ interface ContactCardProps {
 
 const ContactCard: React.FC<ContactCardProps> = ({ contact, onRemove }) => {
   const [isEditing, setIsEditing] = useState(false)
-  
-  // Suppress unused parameter warning - will be used for inline editing
+  const [storageLimit, setStorageLimit] = useState<number | null>(contact.storageLimitMB ?? null);
+  const [savingLimit, setSavingLimit] = useState(false);
+
   const handleUpdate = () => {
-    // TODO: Implement inline editing
     setIsEditing(!isEditing)
   }
+
+  const handleStorageLimitChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value === '' ? null : Math.max(0, parseInt(e.target.value));
+    setStorageLimit(value);
+  };
+
+  const handleStorageLimitBlur = async () => {
+    if (storageLimit === contact.storageLimitMB) return;
+    setSavingLimit(true);
+  const { updateContact } = await import('../stores/contactStore');
+  await updateContact(contact.id, { storageLimitMB: storageLimit });
+    setSavingLimit(false);
+  };
 
   const getRelationshipColor = (relationship: RelationshipType) => {
     switch (relationship) {
@@ -319,6 +345,26 @@ const ContactCard: React.FC<ContactCardProps> = ({ contact, onRemove }) => {
               <span className="text-xs text-gray-500 dark:text-gray-400">
                 Trust: {contact.trustLevel}/10
               </span>
+            </div>
+            <div className="flex items-center space-x-2 mt-2">
+              <label className="text-xs text-gray-500 dark:text-gray-400" htmlFor={`storage-limit-${contact.id}`}>Storage Limit (MB):</label>
+              <input
+                id={`storage-limit-${contact.id}`}
+                type="number"
+                min={0}
+                step={1}
+                className="w-20 px-2 py-1 border border-gray-300 dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                value={storageLimit === null ? '' : storageLimit}
+                onChange={handleStorageLimitChange}
+                onBlur={handleStorageLimitBlur}
+                disabled={savingLimit}
+                placeholder="∞"
+                title="Set max storage for this contact (MB)"
+              />
+              {savingLimit && <span className="text-xs text-blue-500 ml-1">Saving…</span>}
+              {contact.storageUsed !== undefined && (
+                <span className="text-xs text-gray-400 ml-2">Used: {Math.round((contact.storageUsed || 0) / 1024 / 1024)} MB</span>
+              )}
             </div>
           </div>
         </div>

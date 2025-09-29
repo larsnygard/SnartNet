@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react'
 import QRCode from 'qrcode'
 import QrScanner from 'qr-scanner'
 import { useProfileStore } from '@/stores/profileStore'
-import { useContactStore } from '@/stores/contactStore'
+
+import { addContact } from '@/stores/contactStore'
 import { getCore } from '@/lib/core'
 
 interface QRCodeManagerProps {
@@ -18,7 +19,26 @@ export const QRCodeManager: React.FC<QRCodeManagerProps> = ({ onContactAdded }) 
   const scannerRef = useRef<QrScanner | null>(null)
 
   const { currentProfile } = useProfileStore()
-  const { addContactFromMagnet } = useContactStore()
+
+  // Helper to add contact from magnet URI or profile data
+  const addContactFromMagnet = async (magnetUri: string, relationship: string = 'friend') => {
+    // Try to parse username from magnetUri or fallback
+    let username = 'unknown';
+    try {
+      const url = new URL(magnetUri);
+      const params = new URLSearchParams(url.search);
+      username = params.get('dn') || 'unknown';
+    } catch {}
+    const contactData = {
+      username,
+      displayName: username,
+      relationship,
+      trustLevel: 1,
+      magnetUri,
+    };
+    await addContact(contactData as any);
+    return contactData;
+  };
 
   // Generate QR code for current profile
   useEffect(() => {
