@@ -9,19 +9,31 @@ import { registerSW } from 'virtual:pwa-register'
 const updateSW = registerSW({
   immediate: true,
   onNeedRefresh() {
-    // Immediately update without asking user
+    console.info('[PWA] New content available, updating...')
     updateSW(true)
   },
   onOfflineReady() {
-    // Optional: could display a toast
+    console.info('[PWA] App ready for offline use.')
   },
   onRegisteredSW(swUrl: string, r: ServiceWorkerRegistration | undefined) {
-    // Periodic check for updates (every 30 min)
-  if (r && typeof r.update === 'function') {
-      setInterval(() => {
-        r.update()
-      }, 30 * 60 * 1000)
-    } else if (navigator.serviceWorker.controller) {
+    console.info('[PWA] Service worker registered at', swUrl)
+    if (r) {
+      // Listen for controller change to auto reload once when new SW activates
+      let refreshed = false
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (refreshed) return
+        refreshed = true
+        console.info('[PWA] New service worker activated, reloading...')
+        window.location.reload()
+      })
+      // Periodic check for updates (every 30 min)
+      if (typeof r.update === 'function') {
+        setInterval(() => {
+          r.update().catch(e => console.warn('[PWA] update check failed', e))
+        }, 30 * 60 * 1000)
+      }
+    } else if (navigator.onLine) {
+      // Fallback manual fetch if registration object missing
       fetch(swUrl).catch(() => {})
     }
   }

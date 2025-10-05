@@ -168,3 +168,102 @@ Or if you are a skilled programmer, ask to join the project.
 ## 📜 License
 
 Unless otherwise stated, all content in this repository is © Lars Nygard. For usage permissions, contact: lars@snart.com
+
+---
+
+## 📦 Persistent File System Layer (ZenFS + Fallback PFS)
+
+SnartNet stores a large number of small objects (profile fragments, message chunks, packed media blobs) and must retain them across reloads, offline sessions, and PWA updates. We now ship a two‑tier storage strategy:
+
+| Priority | Layer  | Backing Store (current) | Persistence | Purpose |
+|----------|--------|-------------------------|-------------|---------|
+| 1 | ZenFS  | IndexedDB via `@zenfs/dom` | Durable | Provides a Unix‑like hierarchical FS API with future pluggable backends (OPFS, memory, etc.) |
+| 2 | PFS Fallback (`pfs.ts`) | OPFS → IndexedDB → Memory | Durable / Ephemeral | Safety net if ZenFS init fails (permissions, unsupported browser, quota errors) |
+
+### Why ZenFS?
+ZenFS consolidates file operations behind a familiar POSIX‑style API while remaining fully in-process (no service worker requirement) and enabling future backend substitution (e.g. direct OPFS mount once available). It reduces custom code surface and provides consistent semantics (mkdirp, stats, directory traversal) useful for future pack/manifest logic.
+
+### Code Locations
+| Feature | Path |
+|---------|------|
+| ZenFS init & helpers | `src/lib/zenfs.ts` |
+| ZenFS React hook | `src/hooks/useZenFs.ts` |
+| Fallback PFS implementation | `src/lib/pfs.ts` |
+| Fallback React hook | `src/hooks/usePfs.ts` |
+| Initialization orchestration | `src/hooks/useInitializeCore.ts` |
+
+During app startup we attempt ZenFS first. If it throws or reports failure, we automatically fall back to the lightweight `pfs` abstraction so callers continue to function. Console logs indicate which layer was selected.
+
+### ZenFS Helper API (simplified)
+```ts
+// from src/lib/zenfs.ts
+export async function initZenFs() : Promise<{
+  fs: typeof import('@zenfs/core')
+  writeText(path: string, data: string): Promise<void>
+  readText(path: string): Promise<string>
+  exists(path: string): Promise<boolean>
+}>;
+```
+
+Usage example:
+```ts
+import { initZenFs } from '@/lib/zenfs'
+
+const { writeText, readText } = await initZenFs()
+await writeText('/data/hello.txt', 'Hello SnartNet')
+console.log(await readText('/data/hello.txt'))
+```
+
+React hook:
+```ts
+import { useZenFs } from '@/hooks/useZenFs'
+const { ready, backend, writeText, readText } = useZenFs()
+```
+
+If `ready` is false and a fallback occurred, `backend` may indicate `pfs:fallback` (depending on implementation details).
+
+### Fallback PFS API
+`pfs` exposes a richer interface for direct file introspection used internally or as a secondary path:
+```ts
+interface PfsApi {
+  writeFile(path: string, data: Blob | Uint8Array | string): Promise<void>
+  readFile(path: string, asText?: boolean): Promise<Uint8Array | string>
+  readBlob(path: string): Promise<Blob>
+  deleteFile(path: string): Promise<void>
+  exists(path: string): Promise<boolean>
+  stat(path: string): Promise<{ path: string; size: number; mtime: number } | null>
+  list(prefix?: string): Promise<{ path: string; size: number; mtime: number }[]>
+  estimate(): Promise<{ usage: number; quota: number }>
+}
+```
+
+### Planned Enhancements (Roadmap)
+1. Pack & Manifest Layer
+   - Aggregate many tiny logical files into larger content‑addressed pack blobs (improved torrent and quota performance)
+   - BLAKE3 hash tree and per‑entry integrity metadata
+2. Service Worker Integration
+   - `fetch` interception mapping URLs under `/fs/` → ZenFS / packs
+   - Streaming range requests for partial media extraction
+3. Quota & Health Dashboard
+   - Live storage usage (used vs. quota) + eviction strategies
+4. Optional Encryption / Signing
+   - Encrypted pack payloads, signed manifests for trust distribution
+5. OPFS Backend for ZenFS
+   - Evaluate adding OPFS mount once exposed in `@zenfs/dom` (reduces IndexedDB overhead for large binary writes)
+
+### Migration Notes
+Existing code that previously imported `getPfs()` can migrate to ZenFS gradually. A unified facade (planned) will expose a superset so application code rarely needs to distinguish the active backend.
+
+### Troubleshooting
+| Symptom | Likely Cause | Action |
+|---------|-------------|--------|
+| ZenFS init throws quota / UnknownError | Browser storage pressure or private mode limits | Clear site data or expand storage allowance |
+| Fallback always used | Unsupported API or early exception | Check console for `[zenfs] init failed` logs |
+| Large file writes slow | IndexedDB transaction overhead | Await OPFS backend support / implement pack layer |
+
+### Verification
+On first load you should see a console log indicating: `ZenFS initialized (backend=indexeddb)`. Reload the PWA; previously written test files (e.g. `/data/hello.txt`) should still be readable—confirming durability.
+
+---
+
+> Historical Note: An earlier placeholder suggested ZenFS was unavailable. This has been superseded by the current integration using `@zenfs/core` + `@zenfs/dom`.

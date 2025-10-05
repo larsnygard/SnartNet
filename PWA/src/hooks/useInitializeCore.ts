@@ -2,6 +2,8 @@ import { useEffect } from 'react'
 import { getCore } from '@/lib/core'
 import { useProfileStore } from '@/stores/profileStore'
 import { getTorrentService } from '@/lib/torrent'
+import { getPfs } from '@/lib/pfs'
+import { initZenFs } from '@/lib/zenfs'
 
 /**
  * Hook to initialize the core and load existing profile
@@ -20,6 +22,16 @@ export function useInitializeCore() {
         console.log('[useInitializeCore] Initializing core...')
         const core = await getCore()
         console.log('[useInitializeCore] Core initialized successfully')
+
+        // Fire & forget ZenFS init, fallback to PFS if unavailable
+        initZenFs()
+          .then(status => console.log(`[useInitializeCore] ZenFS ready (backend=${status.backend})`))
+          .catch(e => {
+            console.warn('[useInitializeCore] ZenFS init failed, falling back to PFS', e)
+            getPfs()
+              .then(() => console.log('[useInitializeCore] PFS fallback ready'))
+              .catch(err => console.warn('[useInitializeCore] PFS fallback failed', err))
+          })
 
         // Initialize torrent service
         console.log('[useInitializeCore] Initializing torrent service...')

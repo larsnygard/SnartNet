@@ -37,6 +37,8 @@ export class ImageProcessor {
 
     // Load image
     const img = await this.loadImage(file)
+    // Validate dimensions (will throw if invalid)
+    this.validateImageDimensions(img.width, img.height)
     
     // Auto-crop to square (largest centered square)
     const cropArea = this.calculateSquareCrop(img.width, img.height)
@@ -82,6 +84,9 @@ export class ImageProcessor {
    * Load image from file
    */
   private static loadImage(file: File): Promise<HTMLImageElement> {
+    if (typeof window === 'undefined') {
+      return Promise.reject(new Error('Image processing not available in this environment'))
+    }
     return new Promise((resolve, reject) => {
       const img = new Image()
       const url = URL.createObjectURL(file)
@@ -104,6 +109,9 @@ export class ImageProcessor {
    * Load image from data URL
    */
   private static loadImageFromDataUrl(dataUrl: string): Promise<HTMLImageElement> {
+    if (typeof window === 'undefined') {
+      return Promise.reject(new Error('Image processing not available in this environment'))
+    }
     return new Promise((resolve, reject) => {
       const img = new Image()
       
@@ -133,6 +141,9 @@ export class ImageProcessor {
     cropArea: CropArea, 
     targetSize: number
   ): Promise<ProcessedImage> {
+    if (typeof document === 'undefined') {
+      throw new Error('Canvas not available in this environment')
+    }
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')
     
@@ -273,26 +284,36 @@ export async function processAndStoreImage(file: File, _type: 'post-image' | 'av
     console.warn(`File is not an image: ${file.name}`);
     return null;
   }
-
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const data = e.target?.result as string;
-      if (data) {
-        resolve({
-          id: `${file.name}-${file.lastModified}`,
-          data,
-          filename: file.name,
-          size: file.size,
-          mimeType: file.type,
-        });
-      } else {
-        reject(new Error('Failed to read file data.'));
-      }
-    };
-    reader.onerror = (error) => {
-      reject(error);
-    };
-    reader.readAsDataURL(file);
-  });
+  // Use ImageProcessor pipeline for validation & normalization to JPEG
+  try {
+    const processed = await ImageProcessor.processProfilePicture(file)
+    return {
+      id: `${file.name}-${file.lastModified}`,
+      data: processed.dataUrl, // already data URL
+      filename: file.name.replace(/\.[^.]+$/, '.jpg'),
+      size: processed.size,
+      mimeType: processed.format,
+    }
+  } catch (e) {
+    console.warn('processAndStoreImage fallback to raw base64 due to processing error', e)
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const data = ev.target?.result as string;
+        if (data) {
+          resolve({
+            id: `${file.name}-${file.lastModified}`,
+            data,
+            filename: file.name,
+            size: file.size,
+            mimeType: file.type,
+          });
+        } else {
+          reject(new Error('Failed to read file data.'));
+        }
+      };
+      reader.onerror = (error) => reject(error);
+      reader.readAsDataURL(file);
+    })
+  }
 }

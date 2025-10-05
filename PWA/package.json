@@ -22,6 +22,8 @@
     "@libp2p/webtransport": "^6.0.3",
     "@tailwindcss/vite": "^4.1.13",
     "@types/qrcode": "^1.5.5",
+    "@zenfs/core": "^2.4.1",
+    "@zenfs/dom": "^1.2.5",
     "buffer": "^6.0.3",
     "crypto-browserify": "^3.12.1",
     "events": "^3.3.0",

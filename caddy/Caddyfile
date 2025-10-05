@@ -1,0 +1,12 @@
+{
+  auto_https off
+}
+
+:8843 {
+  tls internal
+  handle_path /net/* {
+    root * /home/lars/src/SnartNet/PWA/dist
+    file_server
+  }
+}
+
