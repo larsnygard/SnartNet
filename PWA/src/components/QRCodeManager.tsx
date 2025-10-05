@@ -12,8 +12,11 @@ interface QRCodeManagerProps {
 export const QRCodeManager: React.FC<QRCodeManagerProps> = ({ onContactAdded }) => {
   const [showQR, setShowQR] = useState(false)
   const [showScanner, setShowScanner] = useState(false)
+  const [showMagnet, setShowMagnet] = useState(false)
   const [qrDataURL, setQrDataURL] = useState<string>('')
   const [scanResult, setScanResult] = useState<string>('')
+  const [magnetUri, setMagnetUri] = useState<string>('')
+  const [copied, setCopied] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
   const scannerRef = useRef<QrScanner | null>(null)
 
@@ -61,6 +64,26 @@ export const QRCodeManager: React.FC<QRCodeManagerProps> = ({ onContactAdded }) 
     generateQRCode()
   }, [showQR, currentProfile])
 
+  // Prepare magnet link when requested
+  useEffect(() => {
+    const ensureMagnet = async () => {
+      if (showMagnet && currentProfile) {
+        let uri = currentProfile.magnetUri
+        if (!uri && currentProfile.username) {
+          try {
+            const core = await getCore()
+            uri = await core.seedCurrentProfile()
+            console.log('[QRCodeManager] Generated magnet URI for Show Magnet:', uri)
+          } catch (e) {
+            console.warn('[QRCodeManager] Failed to generate magnet for Show Magnet modal', e)
+          }
+        }
+        if (uri) setMagnetUri(uri)
+      }
+    }
+    ensureMagnet()
+  }, [showMagnet, currentProfile])
+
   // Initialize QR scanner
   useEffect(() => {
     if (showScanner && videoRef.current) {
@@ -93,24 +116,24 @@ export const QRCodeManager: React.FC<QRCodeManagerProps> = ({ onContactAdded }) 
       // Try to parse as SnartNet profile JSON
       const profileData = JSON.parse(data)
       if (profileData.type === 'snartnet-profile' && profileData.magnetUri) {
-        const contact = await addContactFromMagnet(profileData.magnetUri, 'friend')
-        if (contact) {
+        try {
+          const contact = await addContactFromMagnet(profileData.magnetUri, 'friend')
           setScanResult(`Added ${profileData.username} as a friend!`)
           onContactAdded?.(contact)
           setShowScanner(false)
-        } else {
-          setScanResult('Failed to add contact - profile may be invalid')
+        } catch (e:any) {
+          setScanResult('Failed to add contact: ' + (e?.message || 'profile may be invalid'))
         }
       } else {
         // Fallback: try as direct magnet URI
         if (data.startsWith('magnet:')) {
-          const contact = await addContactFromMagnet(data, 'friend')
-          if (contact) {
+          try {
+            const contact = await addContactFromMagnet(data, 'friend')
             setScanResult(`Added contact from magnet URI!`)
             onContactAdded?.(contact)
             setShowScanner(false)
-          } else {
-            setScanResult('Failed to add contact from magnet URI')
+          } catch (e:any) {
+            setScanResult('Failed to add contact: ' + (e?.message || 'invalid magnet'))
           }
         } else {
           setScanResult('Invalid QR code - not a SnartNet profile or magnet link')
@@ -119,13 +142,13 @@ export const QRCodeManager: React.FC<QRCodeManagerProps> = ({ onContactAdded }) 
     } catch (error) {
       // Not valid JSON, try as magnet URI
       if (data.startsWith('magnet:')) {
-        const contact = await addContactFromMagnet(data, 'friend')
-        if (contact) {
+        try {
+          const contact = await addContactFromMagnet(data, 'friend')
           setScanResult(`Added contact from magnet URI!`)
           onContactAdded?.(contact)
           setShowScanner(false)
-        } else {
-          setScanResult('Failed to add contact from magnet URI')
+        } catch (e:any) {
+          setScanResult('Failed to add contact: ' + (e?.message || 'invalid magnet'))
         }
       } else {
         setScanResult('Invalid QR code format')
@@ -157,6 +180,13 @@ export const QRCodeManager: React.FC<QRCodeManagerProps> = ({ onContactAdded }) 
           className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white rounded-lg transition-colors flex items-center gap-2"
         >
           📱 Show My QR Code
+        </button>
+        <button
+          onClick={() => setShowMagnet(true)}
+          disabled={!currentProfile?.username}
+          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-400 text-white rounded-lg transition-colors flex items-center gap-2"
+        >
+          🧲 Show Magnet Link
         </button>
         
         <button
@@ -240,6 +270,59 @@ export const QRCodeManager: React.FC<QRCodeManagerProps> = ({ onContactAdded }) 
                 Point your camera at a SnartNet profile QR code or magnet link QR code
               </p>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Magnet URI Modal */}
+      {showMagnet && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-gray-800 p-6 rounded-lg max-w-lg w-full mx-4">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">My Magnet Link</h3>
+              <button
+                onClick={() => { setShowMagnet(false); setCopied(false) }}
+                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+              >
+                ✕
+              </button>
+            </div>
+            {!magnetUri && (
+              <div className="py-6 text-center">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto mb-3"></div>
+                <p className="text-sm text-gray-500 dark:text-gray-400">Preparing magnet link…</p>
+              </div>
+            )}
+            {magnetUri && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Magnet URI</label>
+                  <div className="relative">
+                    <textarea
+                      readOnly
+                      className="w-full text-xs p-2 pr-24 font-mono rounded border dark:bg-gray-900 dark:border-gray-700 resize-none h-24"
+                      value={magnetUri}
+                      aria-label="Magnet URI"
+                    />
+                    <div className="absolute top-2 right-2 flex gap-2">
+                      <button
+                        onClick={async () => { try { await navigator.clipboard.writeText(magnetUri); setCopied(true); setTimeout(()=>setCopied(false), 1500) } catch {} }}
+                        className="px-2 py-1 text-xs rounded bg-indigo-600 hover:bg-indigo-700 text-white"
+                      >
+                        {copied ? 'Copied!' : 'Copy'}
+                      </button>
+                      <button
+                        onClick={() => { try { const shareData: any = { text: magnetUri }; if ((navigator as any).share) (navigator as any).share(shareData); else navigator.clipboard.writeText(magnetUri); setCopied(true); setTimeout(()=>setCopied(false), 1500) } catch {} }}
+                        className="px-2 py-1 text-xs rounded bg-indigo-500 hover:bg-indigo-600 text-white"
+                      >
+                        Share
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <p className="text-xs text-gray-500 dark:text-gray-400">Anyone with this magnet link can download your public profile (and post index if present). Share only with people you trust.</p>
+              </div>
+            )}
           </div>
         </div>
       )}

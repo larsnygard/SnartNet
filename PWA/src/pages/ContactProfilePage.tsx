@@ -20,12 +20,23 @@ const ContactProfilePage: React.FC = () => {
   const contactPosts = useMemo(() => {
     if (!contact) return []
     return posts
-      .filter(p => p.author === contact.username)
+      .filter(p => {
+        if (p.author === contact.username) return true
+        if (contact.publicKey && p.authorPublicKey === contact.publicKey) return true
+        if (contact.fingerprint && p.fingerprint === contact.fingerprint) return true
+        return false
+      })
       .sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .slice(0, 50)
   }, [posts, contact])
 
   if (!contact) {
+    // If no contacts loaded yet, show a transient loading state instead of not found.
+    if (contacts.length === 0) {
+      return (
+        <div className="flex items-center justify-center min-h-64 text-sm text-gray-500 dark:text-gray-400">Loading contact…</div>
+      )
+    }
     return (
       <div className="max-w-4xl mx-auto p-6">
         <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-8 text-center">

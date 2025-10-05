@@ -2,7 +2,8 @@ import React, { useRef, useState } from 'react'
 import { useContactStore } from '@/stores/contactStore'
 import { useMessageStore } from '@/stores/messageStore'
 
-const ChatThread: React.FC<{ contactId: string }> = ({ contactId }) => {
+interface ChatThreadProps { contactId: string; onBackMobile?: () => void }
+const ChatThread: React.FC<ChatThreadProps> = ({ contactId, onBackMobile }) => {
   const { contacts } = useContactStore()
   const thread = useMessageStore(state => state.threads[contactId])
   const sendMessage = useMessageStore(state => state.sendMessage)
@@ -21,8 +22,18 @@ const ChatThread: React.FC<{ contactId: string }> = ({ contactId }) => {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center border-b px-4 py-2 bg-gray-100 dark:bg-gray-800">
-        <span className="font-semibold text-lg text-gray-800 dark:text-gray-100">{contact?.displayName || contact?.username}</span>
+      <div className="flex items-center gap-3 border-b px-4 py-2 bg-gray-100 dark:bg-gray-800">
+        {onBackMobile && (
+          <button
+            type="button"
+            onClick={onBackMobile}
+            className="md:hidden inline-flex items-center justify-center h-8 w-8 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
+            aria-label="Back to contacts"
+          >
+            ←
+          </button>
+        )}
+        <span className="font-semibold text-lg text-gray-800 dark:text-gray-100 truncate">{contact?.displayName || contact?.username}</span>
       </div>
       <div className="flex-1 overflow-y-auto p-4 space-y-2 bg-white dark:bg-gray-900">
         {thread?.messages.map(msg => (

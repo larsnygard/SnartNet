@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { nanoid } from 'nanoid'
-import { publishMessage, onMessage } from '@/lib/push/messages'
+import { publishEncryptedMessage, onMessage } from '@/lib/push/messages'
+import { writeMessageThread } from '@/lib/persistence'
 
 export interface Message {
   id: string
@@ -30,42 +31,34 @@ export const useMessageStore = create<MessageState>((set) => ({
   threads: {},
 
   async sendMessage(contactId, content) {
-    // TODO: Encrypt, sign, and send via push or torrent
-    const msg: Message = {
-      id: nanoid(),
-      sender: 'me', // TODO: use real sender id
-      recipient: contactId,
-      content,
-      timestamp: new Date().toISOString(),
-      status: 'pending',
-    }
-    set(state => ({
-      threads: {
-        ...state.threads,
-        [contactId]: {
-          contactId,
-          messages: [...(state.threads[contactId]?.messages || []), msg]
-        }
-      }
-    }))
     try {
-      await publishMessage(msg)
+      const localMsg = await publishEncryptedMessage(contactId, content)
+      // Stored via onMessage callback as well, but we insert optimistic now
       set(state => ({
         threads: {
           ...state.threads,
           [contactId]: {
             contactId,
-            messages: state.threads[contactId].messages.map(m => m.id === msg.id ? { ...m, status: 'sent' } : m)
+            messages: [...(state.threads[contactId]?.messages || []), localMsg]
           }
         }
       }))
+      writeMessageThread(contactId, useMessageStore.getState().threads[contactId].messages).catch(()=>{})
     } catch (e) {
+      const failed: Message = {
+        id: nanoid(),
+        sender: 'me',
+        recipient: contactId,
+        content,
+        timestamp: new Date().toISOString(),
+        status: 'failed'
+      }
       set(state => ({
         threads: {
           ...state.threads,
           [contactId]: {
             contactId,
-            messages: state.threads[contactId].messages.map(m => m.id === msg.id ? { ...m, status: 'failed' } : m)
+            messages: [...(state.threads[contactId]?.messages || []), failed]
           }
         }
       }))
@@ -74,15 +67,23 @@ export const useMessageStore = create<MessageState>((set) => ({
 
 
   receiveMessage(contactId, message) {
-    set(state => ({
-      threads: {
-        ...state.threads,
-        [contactId]: {
-          contactId,
-          messages: [...(state.threads[contactId]?.messages || []), message]
+    set(state => {
+      const thread = state.threads[contactId]
+      const updated = {
+        threads: {
+          ...state.threads,
+          [contactId]: {
+            contactId,
+            messages: [...(thread?.messages || []), message]
+          }
         }
       }
-    }))
+      // Persist after state mutation (async fire & forget)
+      setTimeout(() => {
+        try { writeMessageThread(contactId, updated.threads[contactId].messages).catch(()=>{}) } catch {}
+      }, 0)
+      return updated
+    })
   },
 
   loadMessages() {
@@ -104,5 +105,7 @@ export const useMessageStore = create<MessageState>((set) => ({
 
 // Listen for incoming messages via push transport (must be outside the store definition)
 onMessage((msg) => {
-  useMessageStore.getState().receiveMessage(msg.sender, msg)
+  // Determine thread key: if current user is sender, thread is recipient; else sender.
+  const threadId = msg.sender === 'me' ? msg.recipient : msg.sender
+  useMessageStore.getState().receiveMessage(threadId, msg)
 })

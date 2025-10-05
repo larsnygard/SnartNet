@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { getCore } from '@/lib/core'
+import { writeProfileJson } from '@/lib/persistence'
 
 interface ProfilePost {
   id: string;
@@ -56,7 +57,7 @@ export const useProfileStore = create<ProfileState>((set) => ({
     return stored === 'true'
   })(),
 
-  setCurrentProfile: (profile) => set({ currentProfile: profile }),
+  setCurrentProfile: (profile) => set(() => { writeProfileJson(profile).catch(()=>{}); return { currentProfile: profile } }),
   
   addProfile: (profile) => set((state) => {
     const newProfiles = new Map(state.profiles)
@@ -77,10 +78,12 @@ export const useProfileStore = create<ProfileState>((set) => ({
       newCurrentProfile = { ...state.currentProfile, ...updates }
     }
     
-    return { 
+    const nextState = { 
       profiles: newProfiles,
       currentProfile: newCurrentProfile
     }
+    writeProfileJson(nextState.currentProfile).catch(()=>{})
+    return nextState
   }),
   
   updateProfilePicture: (username, profilePicture, thumbnail) => set((state) => {
@@ -114,10 +117,12 @@ export const useProfileStore = create<ProfileState>((set) => ({
         core.seedCurrentProfile().catch(e => console.warn('Reseed after picture update failed', e))
       }).catch(()=>{})
     }
-    return { 
+    const nextState = { 
       profiles: newProfiles,
       currentProfile: newCurrentProfile
     }
+    writeProfileJson(nextState.currentProfile).catch(()=>{})
+    return nextState
   }),
   
   setSeedProfileEnabled: (enabled) => set(() => {

@@ -56,13 +56,12 @@ const NetworkPage: React.FC = () => {
     if (!magnetInput.trim()) return
     setAdding(true)
     try {
-      const added = await addContactFromMagnet(magnetInput.trim(), relationship)
-      if (!added) {
-        setError('Failed to load profile from magnet (no peers or invalid data)')
-      } else {
+      try {
+  await addContactFromMagnet(magnetInput.trim(), relationship)
         setMagnetInput('')
-        // Trigger post sync for the newly added contact
         setTimeout(() => loadPostsFromContacts(), 100)
+      } catch (err:any) {
+        setError(err?.message || 'Failed to load profile from magnet')
       }
     } catch (e:any) {
       setError(e?.message || 'Failed to add contact')

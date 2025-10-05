@@ -10,10 +10,19 @@ const PostTimeline: React.FC = () => {
   const { currentProfile } = useProfileStore()
 
   useEffect(() => {
-    // Load contacts and their posts
+    // Initial load
     loadContacts()
     loadPostsFromContacts()
   }, [loadContacts, loadPostsFromContacts])
+
+  useEffect(() => {
+    // If we have contacts with postIndexMagnetUri but no posts yet, trigger sync again
+    const hasIndexed = contacts.some(c => !!c.postIndexMagnetUri)
+    if (hasIndexed && posts.length === 0 && !loading) {
+      console.debug('[Timeline] Retrying post sync (contacts present but no posts loaded)')
+      loadPostsFromContacts()
+    }
+  }, [contacts, posts.length, loading, loadPostsFromContacts])
 
 
 
@@ -21,22 +30,29 @@ const PostTimeline: React.FC = () => {
   const allowedAuthors = useMemo(() => {
     const set = new Set<string>()
     if (currentProfile) {
-      if (currentProfile.publicKey) set.add(currentProfile.publicKey)
+      if ((currentProfile as any).publicKey) set.add((currentProfile as any).publicKey)
+      if ((currentProfile as any).fingerprint) set.add((currentProfile as any).fingerprint)
       set.add(currentProfile.username)
     }
     contacts.forEach(c => {
       if (c.relationship === 'friend' || c.relationship === 'ring-of-trust') {
         set.add(c.username)
-        // In future we may map to public key fingerprint
+        if (c.publicKey) set.add(c.publicKey)
+        if (c.fingerprint) set.add(c.fingerprint)
       }
     })
     return set
   }, [contacts, currentProfile])
 
   const filteredPosts = useMemo(() => {
-    // If no contacts yet, show all local posts (author = current profile) so user sees own posts
     if (allowedAuthors.size === 0) return posts
-    return posts.filter(p => allowedAuthors.has(p.author) || (p.authorDisplayName && allowedAuthors.has(p.authorDisplayName)))
+    return posts.filter(p => {
+      if (allowedAuthors.has(p.author)) return true
+      if (p.authorDisplayName && allowedAuthors.has(p.authorDisplayName)) return true
+      if (p.fingerprint && allowedAuthors.has(p.fingerprint)) return true
+      if (p.authorPublicKey && allowedAuthors.has(p.authorPublicKey)) return true
+      return false
+    })
   }, [posts, allowedAuthors])
 
   if (loading) {

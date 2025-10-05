@@ -254,6 +254,9 @@ interface PfsApi {
 ### Migration Notes
 Existing code that previously imported `getPfs()` can migrate to ZenFS gradually. A unified facade (planned) will expose a superset so application code rarely needs to distinguish the active backend.
 
+### File Manager Page
+The developer-oriented file manager at route `/files` uses a unified facade (`src/lib/fs.ts`) to inspect, create, edit, and delete files across either ZenFS or fallback PFS. This is primarily a debugging & inspection tool and not intended for end users in production builds.
+
 ### Troubleshooting
 | Symptom | Likely Cause | Action |
 |---------|-------------|--------|

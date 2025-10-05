@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { loadPersistedPosts, appendOrUpdatePost } from '@/lib/postPersistence'
 import { getTorrentService } from '@/lib/torrent'
 import { verifyPostSignature, deriveFingerprint, signPost } from '@/lib/crypto/ed25519'
 import { useContactStore } from './contactStore'
@@ -95,6 +96,7 @@ interface PostState {
   editPost: (postId: string, newContent: string) => Promise<void>
   regenerateAuthorIndex: (author: string) => Promise<void>
   deletePost: (postId: string) => Promise<void>
+  loadPersisted: () => Promise<void>
 }
 
 const LOCAL_STORAGE_KEY = 'snartnet:posts';
@@ -150,6 +152,7 @@ export const usePostStore = create<PostState>((set) => ({
       localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
       return { posts }
     })
+    appendOrUpdatePost(newPost).catch(()=>{})
 
     try {
       const torrentService = getTorrentService()
@@ -161,6 +164,7 @@ export const usePostStore = create<PostState>((set) => ({
           p.id === newPost.id ? { ...p, magnetUri, seedProgress: 100, isSeeding: false } : p
         )
         localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+        appendOrUpdatePost(posts.find(p=>p.id===newPost.id)).catch(()=>{})
         return { posts }
       })
     } catch (error) {
@@ -170,6 +174,7 @@ export const usePostStore = create<PostState>((set) => ({
           p.id === newPost.id ? { ...p, isSeeding: false, seedProgress: 0, seedError: (error instanceof Error ? error.message : 'Failed to seed') } : p
         )
         localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+        appendOrUpdatePost(posts.find(p=>p.id===newPost.id)).catch(()=>{})
         return { posts }
       })
     }
@@ -189,6 +194,7 @@ export const usePostStore = create<PostState>((set) => ({
         post.id === postId ? { ...post, ...updates } : post
       )
       localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+      const updated = posts.find(p=>p.id===postId); if (updated) appendOrUpdatePost(updated).catch(()=>{})
       return { posts }
     })
   },
@@ -204,9 +210,11 @@ export const usePostStore = create<PostState>((set) => ({
   },
 
   loadPostsFromContacts: async () => {
+    console.debug('[PostStore] loadPostsFromContacts invoked')
     const contactStore = useContactStore.getState()
     const contacts = contactStore.contacts.filter(c => !!c.postIndexMagnetUri)
     if (contacts.length === 0) {
+      console.debug('[PostStore] No contacts with postIndexMagnetUri; skipping sync')
       set({ loading: false })
       return
     }
@@ -219,6 +227,7 @@ export const usePostStore = create<PostState>((set) => ({
     const runNext = () => {
       if (queue.length === 0) return
       const contact = queue.shift()!
+      console.debug('[PostStore] Sync starting for contact', contact.id)
       startedIds.add(contact.id)
       const p = (async () => {
         try {
@@ -226,6 +235,7 @@ export const usePostStore = create<PostState>((set) => ({
             maxPosts: contact.syncMaxPosts,
             monthsLookback: contact.syncMonthsLookback
           })
+          console.debug('[PostStore] Sync complete for', contact.id)
         } catch (e) {
           console.warn('Sync failed for contact', contact.id, e)
         }
@@ -252,6 +262,7 @@ export const usePostStore = create<PostState>((set) => ({
   clearError: () => set({ error: null }),
 
   syncPostsForContact: async (contactId, options) => {
+    console.debug('[PostStore] syncPostsForContact', contactId, options)
     const contactStore = useContactStore.getState()
     const contact = contactStore.contacts.find(c => c.id === contactId)
     if (!contact || !contact.postIndexMagnetUri) return
@@ -262,9 +273,11 @@ export const usePostStore = create<PostState>((set) => ({
         maxPosts: options?.maxPosts ?? contact.syncMaxPosts ?? 100,
         monthsLookback: options?.monthsLookback ?? contact.syncMonthsLookback,
       })
+      console.debug('[PostStore] downloadPostIndexChain result entries', result?.entries?.length)
       // Download post torrents for new entries (limited concurrency)
       const existingIds = new Set(usePostStore.getState().posts.map(p => p.id))
       const targets = result.entries.filter((e: any) => e.magnetUri && !existingIds.has(e.id))
+      console.debug('[PostStore] New post targets', targets.length)
       const limit = 3
       const queue = [...targets]
       const downloaded: TorrentPost[] = []
@@ -307,6 +320,7 @@ export const usePostStore = create<PostState>((set) => ({
               })
             }
           } catch (err) {
+            console.warn('[PostStore] Failed to download post', e)
             downloaded.push({
               id: e.id,
               author: e.author,
@@ -319,12 +333,14 @@ export const usePostStore = create<PostState>((set) => ({
         }))
       }
       if (downloaded.length) {
+        console.debug('[PostStore] Downloaded posts count', downloaded.length)
         set((state) => {
           const posts = [...state.posts, ...downloaded].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
           localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
           return { posts, loading: false }
         })
       } else {
+        console.debug('[PostStore] No new posts downloaded')
         set({ loading: false })
       }
     } catch (e) {
@@ -397,17 +413,20 @@ export const usePostStore = create<PostState>((set) => ({
     set((s) => ({
       posts: s.posts.map(p => p.id === postId ? { ...p, content: newContent, updatedAt, signature, authorPublicKey, signatureVerified: !!signature, isSeeding: true } : p)
     }))
+    const interim = usePostStore.getState().posts.find(p=>p.id===postId); if (interim) appendOrUpdatePost(interim).catch(()=>{})
     try {
       const torrentService = getTorrentService()
       const magnetUri = await torrentService.seedPost({ ...(post as any), content: newContent, updatedAt, signature, authorPublicKey })
       set((s) => ({
         posts: s.posts.map(p => p.id === postId ? { ...p, magnetUri, isSeeding: false, seedProgress: 100 } : p)
       }))
+      const final = usePostStore.getState().posts.find(p=>p.id===postId); if (final) appendOrUpdatePost(final).catch(()=>{})
     } catch (e) {
       console.error('Failed to reseed edited post', e)
       set((s) => ({
         posts: s.posts.map(p => p.id === postId ? { ...p, isSeeding: false, seedError: 'Edit reseed failed' } : p)
       }))
+      const failState = usePostStore.getState().posts.find(p=>p.id===postId); if (failState) appendOrUpdatePost(failState).catch(()=>{})
     }
     await usePostStore.getState().regenerateAuthorIndex(post.author)
   },
@@ -439,5 +458,19 @@ export const usePostStore = create<PostState>((set) => ({
     if (!target) return
     usePostStore.getState().removePost(postId)
     await usePostStore.getState().regenerateAuthorIndex(target.author)
+  },
+  loadPersisted: async () => {
+    try {
+      const existing = usePostStore.getState().posts
+      if (existing.length > 0) return
+      const persisted = await loadPersistedPosts()
+      if (persisted.length) {
+        set((s) => {
+          const posts = [...persisted, ...s.posts].sort((a,b)=> new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+          localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(posts))
+          return { posts }
+        })
+      }
+    } catch (e) { console.warn('[PostStore] loadPersisted failed', e) }
   }
 }))

@@ -3,6 +3,7 @@ import HomePage from '@/pages/HomePage'
 import ProfilePage from '@/pages/ProfilePage'
 import MessagesPage from '@/pages/MessagesPage'
 import NetworkPage from '@/pages/NetworkPage'
+import FilesPage from '@/pages/FilesPage'
 import ContactProfilePage from '@/pages/ContactProfilePage'
 import Layout from '@/components/Layout'
 import { useInitializeCore } from '@/hooks/useInitializeCore'
@@ -20,6 +21,7 @@ function App() {
           <Route path="/network" element={<NetworkPage />} />
           <Route path="/contact/:id" element={<ContactProfilePage />} />
           <Route path="/messages/:id?" element={<MessagesPage />} />
+          <Route path="/files/*" element={<FilesPage />} />
         </Routes>
       </Layout>
     </BrowserRouter>

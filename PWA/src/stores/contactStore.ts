@@ -89,6 +89,8 @@ export interface Contact {
   // Sync preferences
   syncMaxPosts?: number // e.g. 100
   syncMonthsLookback?: number // e.g. 5 (last 5 months)
+  publicKey?: string
+  fingerprint?: string
 }
 
 interface ContactState {
@@ -137,10 +139,10 @@ const getDefaultPermissions = (relationship: RelationshipType): ContactPermissio
 }
 
 // Generate contact ID from username and public key fingerprint
+const toBase64Url = (s: string) => btoa(s).replace(/=+$/,'').replace(/\+/g,'-').replace(/\//g,'_')
 const generateContactId = (username: string, magnetUri: string): string => {
-  // Extract some identifying info from magnet URI or use username
-  const hash = btoa(username + magnetUri).slice(0, 16)
-  return `contact_${hash}`
+  const hash = toBase64Url(username + '|' + magnetUri).slice(0, 22)
+  return `c_${hash}`
 }
 
 export const useContactStore = create<ContactState>((set, get) => ({
@@ -151,11 +153,17 @@ export const useContactStore = create<ContactState>((set, get) => ({
       const stored = localStorage.getItem('snartnet-contacts')
       if (stored) {
         let contacts = JSON.parse(stored)
-        // Ensure all contacts have a valid id
-        contacts = contacts.map((c: any) => ({
-          ...c,
-          id: c.id || generateContactId(c.username, c.magnetUri)
-        }))
+        let migrated = false
+        contacts = contacts.map((c: any) => {
+          const oldId = c.id
+          const desired = generateContactId(c.username, c.magnetUri)
+          if (!oldId || /contact_[A-Za-z0-9+/=]+/.test(oldId) || oldId.startsWith('pending_')) {
+            if (oldId !== desired) migrated = true
+            return { ...c, id: desired }
+          }
+          return c
+        })
+        if (migrated) console.info('[ContactStore] Migrated contact IDs to base64url form')
         set({ contacts })
         localStorage.setItem('snartnet-contacts', JSON.stringify(contacts))
       }
@@ -193,6 +201,11 @@ export const useContactStore = create<ContactState>((set, get) => ({
 
   addContactFromMagnet: async (magnetUri, relationship = 'friend') => {
     try {
+      if (!magnetUri || typeof magnetUri !== 'string') throw new Error('Empty magnet URI')
+      magnetUri = magnetUri.trim()
+      if (!magnetUri.startsWith('magnet:')) throw new Error('Not a magnet URI')
+      // Basic xt= presence check (very light validation)
+      if (!/magnet:\?xt=/.test(magnetUri)) throw new Error('Magnet missing xt parameter')
       // Optimistically create placeholder while we fetch
       const tempId = `pending_${Math.random().toString(36).slice(2)}`
       const placeholder: Contact = {
@@ -209,11 +222,17 @@ export const useContactStore = create<ContactState>((set, get) => ({
       set({ contacts: [...existing, placeholder] })
 
       const svc: any = getTorrentService()
-      const profile = await svc.downloadProfile(magnetUri)
+      let profile: any = null
+      try {
+        profile = await svc.downloadProfile(magnetUri)
+      } catch (err:any) {
+        console.warn('[ContactStore] downloadProfile failed', err)
+        throw new Error(err?.message || 'Profile download failed')
+      }
       if (!profile) {
         // Mark placeholder as failed
         set({ contacts: get().contacts.map(c => c.id === tempId ? { ...c, username: 'unknown', displayName: 'Profile unavailable' } : c) })
-        return null
+        throw new Error('No profile data in torrent')
       }
 
       const username = profile.username || 'unknown'
@@ -230,6 +249,8 @@ export const useContactStore = create<ContactState>((set, get) => ({
         postIndexMagnetUri: (profile as any).postIndexMagnetUri || (profile as any).post_index_magnet || undefined,
         syncMaxPosts: 100,
         syncMonthsLookback: 6,
+        publicKey: (profile as any).publicKey || (profile as any).authorPublicKey,
+        fingerprint: (profile as any).fingerprint,
       }
       // Remove placeholder then add real contact
       set({ contacts: get().contacts.filter(c => c.id !== tempId) })
@@ -250,12 +271,13 @@ export const useContactStore = create<ContactState>((set, get) => ({
         }
       }
       
-      return addedContact || null
+      if (!addedContact) throw new Error('Failed to finalize contact')
+      return addedContact
     } catch (e) {
       console.error('addContactFromMagnet failed', e)
-      // Remove placeholder if present
       set({ contacts: get().contacts.filter(c => !c.id.startsWith('pending_')) })
-      return null
+      // Surface error to caller by rethrowing so UI can show specific reason
+      throw e
     }
   },
 
