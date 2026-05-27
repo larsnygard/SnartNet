@@ -1,7 +1,9 @@
 # 🌐 SnartNet PWA
 
+> Legacy archive: this web client is no longer an active development target. It is preserved for migration reference while native clients are being implemented.
+
 SnartNet is a decentralized social media protocol and client, designed around torrent swarms, cryptographic identity, and trust-based recovery.  
-This repository contains the **Progressive Web App (PWA)** client implementation.
+This directory contains the archived **Progressive Web App (PWA)** client implementation.
 
 ---
 

@@ -2,6 +2,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
@@ -85,6 +86,7 @@ pub fn verify_signature(data: &str, signature: &str, public_key: &str) -> Result
 }
 
 // WASM exports
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn generate_keypair() -> Result<JsValue, JsValue> {
     let keypair = KeyPair::generate()
@@ -94,6 +96,7 @@ pub fn generate_keypair() -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn sign_data(keypair_json: &str, data: &str) -> Result<String, JsValue> {
     let keypair: KeyPair = serde_json::from_str(keypair_json)
@@ -103,6 +106,7 @@ pub fn sign_data(keypair_json: &str, data: &str) -> Result<String, JsValue> {
         .map_err(|e| JsValue::from_str(&e))
 }
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn verify_signature_wasm(data: &str, signature: &str, public_key: &str) -> Result<bool, JsValue> {
     verify_signature(data, signature, public_key)

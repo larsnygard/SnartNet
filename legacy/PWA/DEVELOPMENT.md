@@ -1,5 +1,7 @@
 # SnartNet PWA - Development Setup Complete! 🎉
 
+> Legacy archive note: active development has moved to native-first clients. This document is kept as historical reference only.
+
 The SnartNet Progressive Web App is now properly configured and ready for development.
 
 ## ✅ What's Working

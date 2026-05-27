@@ -10,7 +10,7 @@ This is a decentralized social + messaging protocol and application suite in the
 
 SnartNet is a revolutionary decentralized social media protocol that gives users complete control over their identity, data, and social connections. Built on BitTorrent-like swarm technology and modern cryptography, it enables truly peer-to-peer social networking without reliance on centralized servers or corporate platforms.
 
-> Current Focus (2025–2026): Ship a cross‑platform GUI experience (Web PWA + Mobile) early. The CLI is a developer tool; end‑user adoption hinges on a polished graphical client backed by a reusable Rust/WASM core.
+> Current Focus (2026): Native-first clients on desktop and mobile backed by a clean shared Rust core. The legacy web client has been archived to `legacy/PWA` and is no longer an active development target.
 
 ## 🌟 Key Features
 
@@ -133,7 +133,7 @@ ps message group send DEV123 "Meeting in 10 minutes"
 
 ## 🏗️ Development Status
 
-SnartNet is currently in **Phase 2 shift planning**: establishing a reusable core and delivering the first Web GUI while foundational cryptography & profile distribution stabilize.
+SnartNet is currently in **Phase 2 native implementation**: establishing a reusable, platform-neutral Rust core and bootstrapping native desktop/mobile hosts.
 
 ### ✅ Completed
 - Protocol specification and RFC
@@ -141,23 +141,26 @@ SnartNet is currently in **Phase 2 shift planning**: establishing a reusable cor
 - Implementation roadmap
 - Project architecture design
 
-### 🔄 In Progress (Core + Early GUI)
+### 🔄 In Progress (Core + Native GUI)
 - [ ] Rust core crate (profiles, key mgmt, DHT hooks)
-- [ ] WASM bindings for web client
-- [ ] MVP Web UI (profiles, feed, post composer, basic DM)
+- [ ] Storage backend abstraction (native + wasm compatibility)
+- [ ] Desktop GUI spike (Slint vs iced)
+- [ ] Native host adapters (Windows/macOS/Android/iOS)
 - [ ] Initial X3DH + Double Ratchet bootstrap
 - [ ] Attachment reference model (torrent infohash placeholder)
 
 ### 📋 Upcoming (Revised Roadmap Highlights)
 - Group messaging + ratcheting enhancements
 - Discovery & hashtag indexing UI
-- Mobile shell (React Native / Flutter decision)
+- Mobile shells over shared Rust contracts
 - Trust & verification UX (revocation, badges)
 - Performance & offline sync optimization
 
 See the **[complete roadmap](./docs/ROADMAP.md)** for detailed timelines and milestones.
 
 ## � DHT Push Updates (Experimental)
+
+This section currently documents the archived web client behavior and should be treated as legacy reference while native transports are being implemented.
 
 SnartNet includes an experimental real-time push notification system for head updates using libp2p gossipsub. This feature enables instant propagation of new posts without polling.
 
@@ -174,7 +177,7 @@ By default, SnartNet uses an in-memory transport for head updates (local testing
 
 **Option 1: Environment Variable (Recommended)**
 ```bash
-# In PWA/.env.development or PWA/.env.local
+# In legacy/PWA/.env.development or legacy/PWA/.env.local
 VITE_ENABLE_LIBP2P=true
 ```
 
@@ -184,7 +187,7 @@ VITE_ENABLE_LIBP2P=true
 window.SNARTNET_ENABLE_LIBP2P = true
 ```
 
-Then restart your development server (`npm run dev` in the PWA directory).
+Then restart your development server (`npm run dev` in the `legacy/PWA` directory).
 
 ### Debugging Push Network
 
@@ -228,10 +231,10 @@ The push system includes built-in protections:
 - **Serialization:** JSON, Protocol Buffers
 
 ### Client Applications
-- **Web (Primary First Target):** React + WASM core + Service Worker (PWA)
-- **Mobile:** React Native (bridging to Rust core via uniffi or napi-rs) *(evaluation in progress)*
+- **Desktop:** Native Rust GUI track (Slint-first, iced fallback)
+- **Mobile:** Thin native shells (Android/iOS) over shared Rust core contracts
 - **CLI (Developer Tool):** Rust (maintenance & diagnostics)
-- **Desktop (Future):** Tauri (shared web UI code)
+- **Web:** Archived legacy client in `legacy/PWA` (reference only)
 
 ### Shared Core Strategy
 - Single Rust core library compiled to native + WASM.

@@ -1,2 +1,12 @@
+/target/
+/node_modules/
+
 /PWA/dist/
 /PWA/node_modules/
+
+/legacy/PWA/dist/
+/legacy/PWA/node_modules/
+/legacy/PWA/.vite/
+/legacy/PWA/.pnpm-store/
+/legacy/PWA/.turbo/
+/legacy/PWA/.tsbuildinfo

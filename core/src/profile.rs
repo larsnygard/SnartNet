@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 // removed unused base64 import
 
@@ -92,6 +93,7 @@ impl SignedProfile {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
 #[derive(Serialize, Deserialize)]
 struct ProfileData {
     username: String,
@@ -100,6 +102,7 @@ struct ProfileData {
 }
 
 // WASM exports
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn create_profile(profile_data_json: &str) -> Result<JsValue, JsValue> {
     let profile_data: ProfileData = serde_json::from_str(profile_data_json)
@@ -117,12 +120,14 @@ pub fn create_profile(profile_data_json: &str) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+#[cfg(target_arch = "wasm32")]
 #[derive(Serialize, Deserialize)]
 struct ProfileUpdateData {
     display_name: Option<String>,
     bio: Option<String>,
 }
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn update_profile(profile_json: &str, update_data_json: &str) -> Result<JsValue, JsValue> {
     let mut profile: Profile = serde_json::from_str(profile_json)
@@ -137,6 +142,7 @@ pub fn update_profile(profile_json: &str, update_data_json: &str) -> Result<JsVa
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn sign_profile(profile_json: &str, keypair_json: &str) -> Result<JsValue, JsValue> {
     let profile: Profile = serde_json::from_str(profile_json)
@@ -152,6 +158,7 @@ pub fn sign_profile(profile_json: &str, keypair_json: &str) -> Result<JsValue, J
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn verify_profile(signed_profile_json: &str) -> Result<bool, JsValue> {
     let signed_profile: SignedProfile = serde_json::from_str(signed_profile_json)
@@ -161,6 +168,7 @@ pub fn verify_profile(signed_profile_json: &str) -> Result<bool, JsValue> {
         .map_err(|e| JsValue::from_str(&e))
 }
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn generate_profile_magnet_uri(profile_json: &str) -> Result<String, JsValue> {
     let profile: Profile = serde_json::from_str(profile_json)

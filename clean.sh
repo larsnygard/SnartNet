@@ -1,27 +1,17 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-echo "🧹 Cleaning SnartNet workspace..."
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT_DIR"
 
-# Remove frontend build artifacts
-echo "🧼 Removing PWA build output and cache..."
-rm -rf PWA/dist PWA/node_modules PWA/.vite PWA/.pnpm-store PWA/.turbo PWA/.tsbuildinfo
-
-# Remove Rust WASM output
-echo "🧼 Removing WASM bindings..."
-rm -rf PWA/wasm/*
-
-# Remove lockfiles and pnpm store
-echo "🧼 Removing lockfiles..."
-rm -f PWA/pnpm-lock.yaml PWA/package-lock.json PWA/yarn.lock
-
-# Optional: remove Rust target cache (can be large)
-echo "🧼 Removing Rust build cache..."
+echo "Cleaning SnartNet native workspace..."
 rm -rf target
-
-# Optional: remove core build artifacts
-echo "🧼 Removing core WASM artifacts..."
 rm -rf core/pkg core/.wasm-pack
 
-echo "✅ Clean complete. You can now run ./build.sh to rebuild everything from scratch."
+echo "Cleaning legacy web artifacts (optional cache cleanup)..."
+rm -rf legacy/PWA/dist legacy/PWA/node_modules legacy/PWA/.vite
+rm -rf legacy/PWA/.pnpm-store legacy/PWA/.turbo legacy/PWA/.tsbuildinfo
+rm -rf legacy/PWA/wasm/*
+rm -f legacy/PWA/pnpm-lock.yaml legacy/PWA/package-lock.json legacy/PWA/yarn.lock
 
+echo "Clean complete."

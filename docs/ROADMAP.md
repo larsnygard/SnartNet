@@ -6,6 +6,8 @@ Renamed from PeerSocial (original working title). Historical references to PeerS
 
 This roadmap outlines the phased approach to implementing the SnartNet decentralized social media protocol. The project is divided into five major phases, each building upon the previous to create a complete, production-ready system.
 
+> Status update (May 2026): PWA development is paused and archived under `legacy/PWA`. Active implementation now targets native desktop and mobile clients over a shared Rust core.
+
 ## Phase 1: Core Infrastructure (Months 1-4)
 
 ### 1.1 Cryptographic Foundation
@@ -59,31 +61,31 @@ This roadmap outlines the phased approach to implementing the SnartNet decentral
 - DHT-based peer discovery
 - Profile torrent seeding/downloading
 
-## Phase 2: GUI Foundation & Core Messaging (Months 5-7)
+## Phase 2: Native Foundation & Core Messaging (Months 5-7)
 
-Shift focus to delivering an end‑user visible experience early. A minimal but functional Web GUI (PWA) and a shared core prepared for mobile clients are prioritized alongside essential messaging primitives.
+Shift focus to delivering a native-first experience early. A shared Rust core, desktop GUI foundation, and mobile host adapters are prioritized alongside essential messaging primitives.
 
 ### 2.1 Shared Core Runtime
 **Timeline:** Month 5 (overlaps with late Phase 1)
 - [ ] Extract protocol core into reusable Rust crate (`core`)
-- [ ] Compile core to WASM (wasm32-unknown-unknown) for web
-- [ ] Define FFI boundary / host adapter layer (Rust <-> TypeScript)
+- [ ] Separate target-specific adapters from platform-neutral core services
+- [ ] Define FFI boundary / host adapter layer (Rust <-> host platforms)
 - [ ] Implement async event bus (subscriptions: profiles, posts, messages)
 - [ ] Provide deterministic serialization (canon JSON + protobuf draft)
 
 **Deliverable:** Reusable core library usable by CLI and GUI.
 
-### 2.2 Minimal Web Client (MVP UI)
+### 2.2 Desktop Native Client (MVP UI)
 **Timeline:** Month 5-6
-- [ ] Tech stack selection (React + Vite + Tailwind + WASM bindings)
+- [ ] GUI stack spike and decision (Slint vs iced)
 - [ ] App shell: auth/key presence, session unlock flow
-- [ ] Global state store (Zustand or Redux Toolkit) fed by core events
+- [ ] Global state store/event handling fed by core events
 - [ ] Profile view (self + remote)
 - [ ] Timeline/feed (latest posts from followed profiles)
 - [ ] Post composer (text + tags + attachment placeholder)
 - [ ] Basic DM panel (list + open thread)
 - [ ] Notification indicators (new posts / DMs)
-- [ ] Build & packaging pipeline (CI artifact)
+- [ ] Build & packaging pipeline (native CI artifacts)
 
 ### 2.3 Messaging Primitives (Foundational)
 **Timeline:** Month 6
@@ -97,17 +99,17 @@ Shift focus to delivering an end‑user visible experience early. A minimal but 
 
 ### 2.4 Mobile Prototype Scaffolding
 **Timeline:** Month 7
-- [ ] Select mobile framework (React Native vs. Flutter – decision doc)
-- [ ] Create thin mobile shell consuming same core via FFI (uni-bridge)
+- [ ] Create thin Android shell consuming shared core via FFI
+- [ ] Create thin iOS shell consuming shared core via FFI
 - [ ] Implement key storage abstraction (secure enclave / keystore draft)
 - [ ] Background sync strategy draft (notification torrent polling window)
 - [ ] Offline bootstrap (cached profiles + pending actions queue)
 
 ### Phase 2 Deliverables
-- WASM-enabled protocol core
-- MVP Web client (profiles, feed, basic posting, basic DMs)
+- Platform-neutral protocol core with target adapters
+- MVP desktop native client (profiles, feed, basic posting, basic DMs)
 - Initial encrypted 1:1 messaging (alpha)
-- Mobile shell prototype (navigation + key mgmt stub)
+- Mobile shell prototypes (Android + iOS)
 - Unified event & storage abstractions
 
 ### 2.1 Direct Messaging
@@ -258,16 +260,16 @@ Shift focus to delivering an end‑user visible experience early. A minimal but 
 
 **Dependencies:** Complete protocol implementation, mobile development frameworks
 
-### 5.2 Web Client Polishing & Accessibility
+### 5.2 Native Client Polishing & Accessibility
 **Timeline:** Month 16-17
-- [ ] Implement WebRTC-based communication
-- [ ] Create WebTorrent integration
-- [ ] Implement Progressive Web App (PWA)
-- [ ] Create browser extension support
-- [ ] Implement web-based key management
-- [ ] Create responsive web interface
+- [ ] Harden desktop networking transports
+- [ ] Improve native accessibility and keyboard navigation
+- [ ] Optimize startup, memory, and background sync behavior
+- [ ] Improve native key management UX
+- [ ] Add installer/update strategy per OS
+- [ ] Add crash reporting and diagnostics surfaces
 
-**Dependencies:** WebRTC, WebTorrent libraries
+**Dependencies:** Platform SDKs, native packaging/signing, transport libraries
 
 ### 5.3 Performance, Observability & Scalability
 **Timeline:** Month 17-18
@@ -293,7 +295,7 @@ Shift focus to delivering an end‑user visible experience early. A minimal but 
 
 ### Phase 5 Deliverables
 - Production-ready mobile applications
-- Web-based client applications
+- Production-ready native desktop application
 - Optimized performance and scalability
 - Developer ecosystem and integrations
 - Complete documentation and standards
@@ -302,16 +304,16 @@ Shift focus to delivering an end‑user visible experience early. A minimal but 
 
 ### Core Technologies
 - **Cryptography:** libsodium, Ed25519, Curve25519, AES-256, ChaCha20
-- **Networking:** libtorrent-rasterbar, DHT, WebRTC (web clients)
+- **Networking:** libtorrent-rasterbar, DHT, native transports (relay + direct)
 - **Serialization:** JSON, Protocol Buffers, MessagePack
 - **Storage:** SQLite, RocksDB for local data
-- **Mobile:** React Native, Flutter, or native development
-- **Web:** WebAssembly, WebRTC, WebTorrent
+- **Mobile:** Native host shells over shared Rust core
+- **Desktop GUI:** Slint or iced
 
 ### Language Recommendations
 - **Core Protocol:** Rust (performance, safety, cross-platform)
-- **Mobile Apps:** React Native or Flutter
-- **Web Client:** TypeScript/JavaScript with WebAssembly modules
+- **Mobile Apps:** Native host shells with Rust FFI bridge
+- **Desktop Client:** Rust GUI framework (Slint/iced)
 - **CLI Tools:** Rust or Go
 
 ### Infrastructure Requirements
@@ -332,7 +334,7 @@ Shift focus to delivering an end‑user visible experience early. A minimal but 
 
 3. **Mobile Platform Restrictions**
    - Risk: App store policies, background processing limitations
-   - Mitigation: Platform-specific optimizations, PWA alternatives
+   - Mitigation: Platform-specific optimizations, relay-first fallback strategy
 
 ### Ecosystem Risks
 1. **Adoption Challenges**

@@ -2,6 +2,7 @@ use crate::crypto::{KeyPair, verify_signature};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +86,7 @@ impl SignedMessage {
 }
 
 // WASM exports
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn create_direct_message(
     sender_fingerprint: &str,
@@ -101,6 +103,7 @@ pub fn create_direct_message(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn sign_message(message_json: &str, keypair_json: &str) -> Result<JsValue, JsValue> {
     let message: Message = serde_json::from_str(message_json)
@@ -116,6 +119,7 @@ pub fn sign_message(message_json: &str, keypair_json: &str) -> Result<JsValue, J
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn verify_message(signed_message_json: &str, public_key: &str) -> Result<bool, JsValue> {
     let signed_message: SignedMessage = serde_json::from_str(signed_message_json)
