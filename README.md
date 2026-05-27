@@ -4,7 +4,7 @@ This is a decentralized social + messaging protocol and application suite in the
 
 **Verified, signed, and decentralized social media and messaging.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Status: Experimental](https://img.shields.io/badge/Status-Experimental-red.svg)](#)
 [![Protocol Version](https://img.shields.io/badge/Protocol-Draft_0.1-blue.svg)](#)
 
@@ -311,7 +311,7 @@ We'll acknowledge receipt within 48 hours and provide updates on our investigati
 
 ## 📜 License
 
-SnartNet is released under the **MIT License**. See [LICENSE](./LICENSE) for details.
+SnartNet is released under the **GNU Affero General Public License v3.0 only (AGPL-3.0-only)**. See [LICENSE](./LICENSE) for details.
 
 The protocol specification is released under **Creative Commons Attribution 4.0** to encourage implementation by other projects and ensure broad compatibility.
 
