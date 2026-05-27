@@ -176,3 +176,50 @@ pub fn generate_profile_magnet_uri(profile_json: &str) -> Result<String, JsValue
     
     Ok(profile.generate_magnet_uri())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::KeyPair;
+
+    fn make_keypair() -> KeyPair {
+        KeyPair::generate().expect("keygen failed")
+    }
+
+    #[test]
+    fn create_profile_stores_key_info() {
+        let kp = make_keypair();
+        let info = kp.get_public_info();
+        let p = Profile::new("alice".to_string(), info.clone());
+        assert_eq!(p.username, "alice");
+        assert_eq!(p.public_key, info.public_key);
+        assert_eq!(p.fingerprint, info.fingerprint);
+        assert_eq!(p.version, 1);
+    }
+
+    #[test]
+    fn update_increments_version() {
+        let kp = make_keypair();
+        let mut p = Profile::new("bob".to_string(), kp.get_public_info());
+        p.update(Some("Bob Smith".to_string()), Some("A bio".to_string()));
+        assert_eq!(p.version, 2);
+        assert_eq!(p.display_name.as_deref(), Some("Bob Smith"));
+    }
+
+    #[test]
+    fn signed_profile_verifies() {
+        let kp = make_keypair();
+        let p = Profile::new("charlie".to_string(), kp.get_public_info());
+        let sp = SignedProfile::create(p, &kp).expect("signing failed");
+        assert!(sp.verify().expect("verify failed"));
+    }
+
+    #[test]
+    fn magnet_uri_contains_username() {
+        let kp = make_keypair();
+        let p = Profile::new("dave".to_string(), kp.get_public_info());
+        let uri = p.generate_magnet_uri();
+        assert!(uri.starts_with("magnet:?xt=urn:btih:"));
+        assert!(uri.contains("profile_dave"));
+    }
+}

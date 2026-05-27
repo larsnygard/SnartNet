@@ -112,3 +112,51 @@ pub fn verify_post(signed_post_json: &str, public_key: &str) -> Result<bool, JsV
     signed_post.verify(public_key)
         .map_err(|e| JsValue::from_str(&e))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::KeyPair;
+
+    fn make_keypair() -> KeyPair {
+        KeyPair::generate().expect("keygen failed")
+    }
+
+    #[test]
+    fn create_post_sets_fields() {
+        let p = Post::new(
+            "fp123".to_string(),
+            "Hello world".to_string(),
+            Some(vec!["rust".to_string()]),
+            None,
+        );
+        assert_eq!(p.author_fingerprint, "fp123");
+        assert_eq!(p.content, "Hello world");
+        assert_eq!(p.tags, vec!["rust"]);
+        assert!(p.reply_to.is_none());
+    }
+
+    #[test]
+    fn signed_post_verifies() {
+        let kp = make_keypair();
+        let p = Post::new("fp".to_string(), "Content".to_string(), None, None);
+        let sp = SignedPost::create(p, &kp).expect("signing failed");
+        assert!(sp.verify(&kp.public_key).expect("verify failed"));
+    }
+
+    #[test]
+    fn signed_post_rejects_wrong_key() {
+        let kp1 = make_keypair();
+        let kp2 = make_keypair();
+        let p = Post::new("fp".to_string(), "Content".to_string(), None, None);
+        let sp = SignedPost::create(p, &kp1).expect("signing failed");
+        assert!(!sp.verify(&kp2.public_key).expect("verify failed"));
+    }
+
+    #[test]
+    fn add_attachment_appends_hash() {
+        let mut p = Post::new("fp".to_string(), "Post".to_string(), None, None);
+        p.add_attachment("abc123".to_string());
+        assert_eq!(p.attachment_hashes, vec!["abc123"]);
+    }
+}

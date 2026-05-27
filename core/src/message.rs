@@ -128,3 +128,50 @@ pub fn verify_message(signed_message_json: &str, public_key: &str) -> Result<boo
     signed_message.verify(public_key)
         .map_err(|e| JsValue::from_str(&e))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::KeyPair;
+
+    fn make_keypair() -> KeyPair {
+        KeyPair::generate().expect("keygen failed")
+    }
+
+    #[test]
+    fn direct_message_sets_fields() {
+        let m = Message::new_direct("alice".to_string(), "bob".to_string(), "Hi!".to_string());
+        assert_eq!(m.sender_fingerprint, "alice");
+        assert_eq!(m.recipient_fingerprint, "bob");
+        assert_eq!(m.content, "Hi!");
+        assert!(matches!(m.message_type, MessageType::Direct));
+    }
+
+    #[test]
+    fn group_message_sets_group_id() {
+        let m = Message::new_group(
+            "alice".to_string(),
+            "group1".to_string(),
+            "grp-42".to_string(),
+            "Hello group!".to_string(),
+        );
+        assert!(matches!(m.message_type, MessageType::Group { ref group_id } if group_id == "grp-42"));
+    }
+
+    #[test]
+    fn signed_message_verifies() {
+        let kp = make_keypair();
+        let m = Message::new_direct("a".to_string(), "b".to_string(), "test".to_string());
+        let sm = SignedMessage::create(m, &kp).expect("signing failed");
+        assert!(sm.verify(&kp.public_key).expect("verify failed"));
+    }
+
+    #[test]
+    fn signed_message_rejects_wrong_key() {
+        let kp1 = make_keypair();
+        let kp2 = make_keypair();
+        let m = Message::new_direct("a".to_string(), "b".to_string(), "test".to_string());
+        let sm = SignedMessage::create(m, &kp1).expect("signing failed");
+        assert!(!sm.verify(&kp2.public_key).expect("verify failed"));
+    }
+}
