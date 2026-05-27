@@ -112,3 +112,50 @@ pub fn verify_signature_wasm(data: &str, signature: &str, public_key: &str) -> R
     verify_signature(data, signature, public_key)
         .map_err(|e| JsValue::from_str(&e))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keypair_generate_produces_unique_keys() {
+        let kp1 = KeyPair::generate().expect("first keygen failed");
+        let kp2 = KeyPair::generate().expect("second keygen failed");
+        assert_ne!(kp1.public_key, kp2.public_key);
+        assert_ne!(kp1.fingerprint, kp2.fingerprint);
+    }
+
+    #[test]
+    fn sign_and_verify_roundtrip() {
+        let kp = KeyPair::generate().expect("keygen failed");
+        let data = "hello snartnet";
+        let sig = kp.sign(data).expect("sign failed");
+        let valid = verify_signature(data, &sig, &kp.public_key).expect("verify failed");
+        assert!(valid, "signature should be valid");
+    }
+
+    #[test]
+    fn verify_rejects_tampered_data() {
+        let kp = KeyPair::generate().expect("keygen failed");
+        let sig = kp.sign("original").expect("sign failed");
+        let valid = verify_signature("tampered", &sig, &kp.public_key).expect("verify failed");
+        assert!(!valid, "signature should be invalid for tampered data");
+    }
+
+    #[test]
+    fn verify_rejects_wrong_key() {
+        let kp1 = KeyPair::generate().expect("keygen failed");
+        let kp2 = KeyPair::generate().expect("keygen failed");
+        let sig = kp1.sign("data").expect("sign failed");
+        let valid = verify_signature("data", &sig, &kp2.public_key).expect("verify failed");
+        assert!(!valid, "signature should be invalid for wrong key");
+    }
+
+    #[test]
+    fn get_public_info_hides_secret_key() {
+        let kp = KeyPair::generate().expect("keygen failed");
+        let info = kp.get_public_info();
+        assert_eq!(info.public_key, kp.public_key);
+        assert_eq!(info.fingerprint, kp.fingerprint);
+    }
+}

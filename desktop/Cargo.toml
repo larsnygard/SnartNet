@@ -2,7 +2,7 @@
 name = "snartnet-desktop"
 version = "0.1.0"
 edition = "2021"
-description = "Desktop host for SnartNet – wires CoreService to a native SQLite backend."
+description = "SnartNet desktop GUI (iced)"
 
 [[bin]]
 name = "snartnet-desktop"
@@ -10,5 +10,5 @@ path = "src/main.rs"
 
 [dependencies]
 snartnet-core = { path = "../core" }
-rusqlite = { workspace = true }
+iced = { version = "0.13", features = ["tokio"] }
 serde_json = { workspace = true }
