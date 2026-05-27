@@ -17,4 +17,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Compile workspace
-        run: cargo build --workspace --locked
+        run: cargo build --workspace --locked --release
+
+      - name: Upload Windows executables
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-executables
+          if-no-files-found: error
+          path: |
+            target/release/snartnet.exe
+            target/release/snartnet-desktop.exe
