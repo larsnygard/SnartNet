@@ -1,5 +1,5 @@
 [workspace]
-members = ["core"]
+members = ["core", "cli", "desktop"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -12,6 +12,7 @@ rand = "0.8"
 sha2 = "0.10"
 blake3 = "1.0"
 base64 = "0.21"
+clap = { version = "4", features = ["derive", "env"] }
 
 [workspace.dependencies.wasm-bindgen]
 version = "0.2"

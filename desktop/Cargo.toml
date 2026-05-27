@@ -1,0 +1,14 @@
+[package]
+name = "snartnet-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "SnartNet desktop GUI (iced)"
+
+[[bin]]
+name = "snartnet-desktop"
+path = "src/main.rs"
+
+[dependencies]
+snartnet-core = { path = "../core" }
+iced = { version = "0.13", features = ["tokio"] }
+serde_json = { workspace = true }

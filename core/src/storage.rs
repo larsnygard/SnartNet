@@ -133,6 +133,7 @@ mod browser {
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::{HashMap, Mutex, OnceLock, StorageBackend, StorageError};
+    use std::path::{Path, PathBuf};
 
     fn store() -> &'static Mutex<HashMap<String, String>> {
         static STORE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
@@ -166,10 +167,156 @@ mod native {
         }
     }
 
+    /// File-backed storage that persists data in a directory on disk.
+    /// Each key maps to a file named `<key>.json` inside the storage directory.
+    pub struct FileStorage {
+        dir: PathBuf,
+    }
+
+    impl FileStorage {
+        pub fn new(dir: impl AsRef<Path>) -> Result<Self, StorageError> {
+            let dir = dir.as_ref().to_path_buf();
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| StorageError::Backend(format!("failed to create storage dir: {e}")))?;
+            Ok(Self { dir })
+        }
+
+        /// Default storage directory: `~/.snartnet/data/`
+        pub fn default_dir() -> Result<PathBuf, StorageError> {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .map_err(|_| StorageError::Unavailable("Cannot determine home directory".to_string()))?;
+            Ok(PathBuf::from(home).join(".snartnet").join("data"))
+        }
+
+        /// Open the default storage directory, creating it if necessary.
+        pub fn open_default() -> Result<Self, StorageError> {
+            Self::new(Self::default_dir()?)
+        }
+
+        fn key_path(&self, key: &str) -> PathBuf {
+            // Percent-encode characters that are unsafe in filenames.
+            // Using percent-encoding (e.g. '/' → "%2F") rather than replacing with '_'
+            // ensures that distinct keys always map to distinct filenames (no collisions).
+            const UNSAFE: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|', '%'];
+            let mut safe_key = String::with_capacity(key.len());
+            for ch in key.chars() {
+                if UNSAFE.contains(&ch) || ch.is_control() {
+                    for byte in ch.to_string().as_bytes() {
+                        safe_key.push_str(&format!("%{byte:02X}"));
+                    }
+                } else {
+                    safe_key.push(ch);
+                }
+            }
+            self.dir.join(format!("{safe_key}.json"))
+        }
+
+        pub fn set_item(&self, key: &str, value: &str) -> Result<(), StorageError> {
+            std::fs::write(self.key_path(key), value)
+                .map_err(|e| StorageError::Backend(format!("write failed for {key}: {e}")))
+        }
+
+        pub fn get_item(&self, key: &str) -> Result<Option<String>, StorageError> {
+            let path = self.key_path(key);
+            if !path.exists() {
+                return Ok(None);
+            }
+            let value = std::fs::read_to_string(&path)
+                .map_err(|e| StorageError::Backend(format!("read failed for {key}: {e}")))?;
+            Ok(Some(value))
+        }
+
+        pub fn remove_item(&self, key: &str) -> Result<(), StorageError> {
+            let path = self.key_path(key);
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .map_err(|e| StorageError::Backend(format!("remove failed for {key}: {e}")))?;
+            }
+            Ok(())
+        }
+
+        pub fn set_json<T: serde::Serialize>(&self, key: &str, value: &T) -> Result<(), StorageError> {
+            let json = serde_json::to_string_pretty(value)
+                .map_err(|e| StorageError::Serialization(e.to_string()))?;
+            self.set_item(key, &json)
+        }
+
+        pub fn get_json<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<T>, StorageError> {
+            match self.get_item(key)? {
+                Some(json) => {
+                    let value = serde_json::from_str(&json)
+                        .map_err(|e| StorageError::Serialization(e.to_string()))?;
+                    Ok(Some(value))
+                }
+                None => Ok(None),
+            }
+        }
+    }
+
     pub type LocalStorage = NativeMemoryStorage;
 }
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::{LocalStorage, storage_get_item, storage_remove_item, storage_set_item};
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::LocalStorage;
+pub use native::{FileStorage, LocalStorage};
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn native_memory_storage_roundtrip() {
+        // NativeMemoryStorage uses a global static — use unique keys per test.
+        LocalStorage::set_item("test_mem_key", "hello").expect("set failed");
+        let val = LocalStorage::get_item("test_mem_key").expect("get failed");
+        assert_eq!(val.as_deref(), Some("hello"));
+        LocalStorage::remove_item("test_mem_key").expect("remove failed");
+        let val = LocalStorage::get_item("test_mem_key").expect("get after remove failed");
+        assert!(val.is_none());
+    }
+
+    #[test]
+    fn native_memory_storage_json_roundtrip() {
+        let map: HashMap<String, u32> = [("a".to_string(), 1u32)].into_iter().collect();
+        LocalStorage::set_json("test_mem_json", &map).expect("set_json failed");
+        let loaded: Option<HashMap<String, u32>> = LocalStorage::get_json("test_mem_json").expect("get_json failed");
+        assert_eq!(loaded.as_ref().and_then(|m| m.get("a")).copied(), Some(1));
+        LocalStorage::remove_item("test_mem_json").ok();
+    }
+
+    #[test]
+    fn file_storage_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir failed");
+        let fs = FileStorage::new(dir.path()).expect("FileStorage::new failed");
+        fs.set_item("mykey", "myvalue").expect("set failed");
+        let v = fs.get_item("mykey").expect("get failed");
+        assert_eq!(v.as_deref(), Some("myvalue"));
+        fs.remove_item("mykey").expect("remove failed");
+        let v2 = fs.get_item("mykey").expect("get after remove failed");
+        assert!(v2.is_none());
+    }
+
+    #[test]
+    fn file_storage_missing_key_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir failed");
+        let fs = FileStorage::new(dir.path()).expect("FileStorage::new failed");
+        let v = fs.get_item("nonexistent").expect("get failed");
+        assert!(v.is_none());
+    }
+
+    #[test]
+    fn file_storage_key_encoding_avoids_collision() {
+        // "foo/bar" and "foo_bar" must map to different files after encoding.
+        let dir = tempfile::tempdir().expect("tempdir failed");
+        let fs = FileStorage::new(dir.path()).expect("FileStorage::new failed");
+        fs.set_item("foo/bar", "slash").expect("set failed");
+        fs.set_item("foo_bar", "underscore").expect("set failed");
+        let v1 = fs.get_item("foo/bar").expect("get failed");
+        let v2 = fs.get_item("foo_bar").expect("get failed");
+        assert_eq!(v1.as_deref(), Some("slash"));
+        assert_eq!(v2.as_deref(), Some("underscore"));
+    }
+}
