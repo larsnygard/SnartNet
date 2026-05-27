@@ -1,0 +1,14 @@
+[package]
+name = "snartnet-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop host for SnartNet – wires CoreService to a native SQLite backend."
+
+[[bin]]
+name = "snartnet-desktop"
+path = "src/main.rs"
+
+[dependencies]
+snartnet-core = { path = "../core" }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }

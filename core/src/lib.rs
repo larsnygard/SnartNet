@@ -6,6 +6,7 @@ mod profile;
 mod post;
 mod message;
 mod storage;
+pub mod service;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
@@ -14,6 +15,7 @@ pub use profile::*;
 pub use post::*;
 pub use message::*;
 pub use storage::*;
+pub use service::{CoreService, ProfileEnvelope, CapabilityDescriptor, CreateProfileRequest, UpdateProfileRequest};
 #[cfg(target_arch = "wasm32")]
 pub use wasm::*;
 

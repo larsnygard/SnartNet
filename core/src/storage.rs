@@ -46,7 +46,7 @@ pub trait StorageBackend {
 }
 
 #[cfg(target_arch = "wasm32")]
-mod browser {
+pub mod browser {
     use super::{StorageBackend, StorageError};
     use wasm_bindgen::prelude::*;
     use web_sys::{Storage, Window};
@@ -134,42 +134,144 @@ mod browser {
 mod native {
     use super::{HashMap, Mutex, OnceLock, StorageBackend, StorageError};
 
-    fn store() -> &'static Mutex<HashMap<String, String>> {
-        static STORE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-        STORE.get_or_init(|| Mutex::new(HashMap::new()))
+    // ---- In-memory backend (used by tests and as a fallback) ----
+
+    use std::cell::RefCell;
+
+    thread_local! {
+        static STORE: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     }
 
     pub struct NativeMemoryStorage;
 
     impl StorageBackend for NativeMemoryStorage {
         fn set_item(key: &str, value: &str) -> Result<(), StorageError> {
-            let mut guard = store()
-                .lock()
-                .map_err(|e| StorageError::Backend(format!("lock poisoned: {e}")))?;
-            guard.insert(key.to_string(), value.to_string());
+            STORE.with(|s| s.borrow_mut().insert(key.to_string(), value.to_string()));
             Ok(())
         }
 
         fn get_item(key: &str) -> Result<Option<String>, StorageError> {
-            let guard = store()
-                .lock()
-                .map_err(|e| StorageError::Backend(format!("lock poisoned: {e}")))?;
-            Ok(guard.get(key).cloned())
+            Ok(STORE.with(|s| s.borrow().get(key).cloned()))
         }
 
         fn remove_item(key: &str) -> Result<(), StorageError> {
-            let mut guard = store()
-                .lock()
-                .map_err(|e| StorageError::Backend(format!("lock poisoned: {e}")))?;
-            guard.remove(key);
+            STORE.with(|s| s.borrow_mut().remove(key));
             Ok(())
         }
     }
 
     pub type LocalStorage = NativeMemoryStorage;
+
+    // ---- SQLite backend ----
+
+    use rusqlite::{Connection, params};
+
+    /// Returns the configured database path (default: `"snartnet.db"`).
+    /// Call `SqliteStorage::open` before the first storage operation to override it.
+    fn configured_path() -> &'static Mutex<String> {
+        static PATH: OnceLock<Mutex<String>> = OnceLock::new();
+        PATH.get_or_init(|| Mutex::new("snartnet.db".to_string()))
+    }
+
+    fn db() -> &'static Mutex<Connection> {
+        static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
+        DB.get_or_init(|| {
+            let path = configured_path()
+                .lock()
+                .expect("path lock poisoned")
+                .clone();
+            let conn = Connection::open(&path)
+                .expect("failed to open SQLite database");
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS kv_store (
+                     key   TEXT PRIMARY KEY,
+                     value TEXT NOT NULL
+                 );",
+            )
+            .expect("failed to create kv_store table");
+            Mutex::new(conn)
+        })
+    }
+
+    pub struct SqliteStorage;
+
+    impl SqliteStorage {
+        /// Configure the database path and initialise the schema.
+        ///
+        /// **Must be called before any `StorageBackend` methods** – once the
+        /// first storage operation runs, the path is locked in and subsequent
+        /// `open` calls have no effect.
+        pub fn open(path: &str) -> Result<(), StorageError> {
+            // Store the desired path so that `db()` picks it up on first use.
+            {
+                let mut guard = configured_path()
+                    .lock()
+                    .map_err(|e| StorageError::Backend(format!("path lock poisoned: {e}")))?;
+                *guard = path.to_string();
+            }
+            // Force initialisation now, using the path we just set.
+            let _ = db();
+            Ok(())
+        }
+    }
+
+    impl StorageBackend for SqliteStorage {
+        fn set_item(key: &str, value: &str) -> Result<(), StorageError> {
+            let guard = db()
+                .lock()
+                .map_err(|e| StorageError::Backend(format!("db lock poisoned: {e}")))?;
+            guard
+                .execute(
+                    "INSERT INTO kv_store (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![key, value],
+                )
+                .map_err(|e| StorageError::Backend(format!("SQLite set_item failed: {e}")))?;
+            Ok(())
+        }
+
+        fn get_item(key: &str) -> Result<Option<String>, StorageError> {
+            let guard = db()
+                .lock()
+                .map_err(|e| StorageError::Backend(format!("db lock poisoned: {e}")))?;
+            let mut stmt = guard
+                .prepare("SELECT value FROM kv_store WHERE key = ?1")
+                .map_err(|e| StorageError::Backend(format!("SQLite prepare failed: {e}")))?;
+            let mut rows = stmt
+                .query(params![key])
+                .map_err(|e| StorageError::Backend(format!("SQLite query failed: {e}")))?;
+            match rows
+                .next()
+                .map_err(|e| StorageError::Backend(format!("SQLite row failed: {e}")))?
+            {
+                Some(row) => {
+                    let val: String = row
+                        .get(0)
+                        .map_err(|e| StorageError::Backend(format!("SQLite get col failed: {e}")))?;
+                    Ok(Some(val))
+                }
+                None => Ok(None),
+            }
+        }
+
+        fn remove_item(key: &str) -> Result<(), StorageError> {
+            let guard = db()
+                .lock()
+                .map_err(|e| StorageError::Backend(format!("db lock poisoned: {e}")))?;
+            guard
+                .execute("DELETE FROM kv_store WHERE key = ?1", params![key])
+                .map_err(|e| StorageError::Backend(format!("SQLite remove_item failed: {e}")))?;
+            Ok(())
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::{LocalStorage, storage_get_item, storage_remove_item, storage_set_item};
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::LocalStorage;
+pub use native::{LocalStorage, SqliteStorage};
+
+/// Public alias so that `service.rs` tests can name a concrete backend without
+/// caring about the platform.
+#[cfg(not(target_arch = "wasm32"))]
+pub type MemoryStorage = native::NativeMemoryStorage;
