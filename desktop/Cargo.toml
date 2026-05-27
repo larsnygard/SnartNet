@@ -3,6 +3,7 @@ name = "snartnet-desktop"
 version = "0.1.0"
 edition = "2021"
 description = "SnartNet desktop GUI (iced)"
+license = "AGPL-3.0-only"
 
 [[bin]]
 name = "snartnet-desktop"
