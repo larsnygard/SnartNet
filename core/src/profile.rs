@@ -88,7 +88,11 @@ impl SignedProfile {
     }
     
     pub fn verify(&self) -> Result<bool, String> {
-        let profile_json = self.profile.to_canonical_json()?;
+        // `magnet_uri` is a derived field appended after signing – strip it so
+        // the JSON matches the bytes that were originally signed.
+        let mut p = self.profile.clone();
+        p.magnet_uri = None;
+        let profile_json = p.to_canonical_json()?;
         verify_signature(&profile_json, &self.signature, &self.profile.public_key)
     }
 }
