@@ -3,6 +3,9 @@ name: Compile iPhone
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   compile-iphone:
     runs-on: macos-latest

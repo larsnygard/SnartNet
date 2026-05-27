@@ -3,6 +3,9 @@ name: Compile Linux
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   compile-linux:
     runs-on: ubuntu-latest

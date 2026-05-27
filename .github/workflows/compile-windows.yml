@@ -3,6 +3,9 @@ name: Compile Windows
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   compile-windows:
     runs-on: windows-latest
