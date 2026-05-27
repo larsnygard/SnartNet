@@ -1,0 +1,17 @@
+name: Compile Windows
+
+on:
+  workflow_dispatch:
+
+jobs:
+  compile-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compile workspace
+        run: cargo build --workspace --locked

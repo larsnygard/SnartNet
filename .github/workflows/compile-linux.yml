@@ -1,0 +1,17 @@
+name: Compile Linux
+
+on:
+  workflow_dispatch:
+
+jobs:
+  compile-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compile workspace
+        run: cargo build --workspace --locked

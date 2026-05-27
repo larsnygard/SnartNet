@@ -1,0 +1,19 @@
+name: Compile iPhone
+
+on:
+  workflow_dispatch:
+
+jobs:
+  compile-iphone:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Compile core for iPhone
+        run: cargo build -p snartnet-core --target aarch64-apple-ios --locked
