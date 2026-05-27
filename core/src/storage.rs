@@ -195,8 +195,20 @@ mod native {
         }
 
         fn key_path(&self, key: &str) -> PathBuf {
-            // Sanitise key so it is safe as a filename.
-            let safe_key = key.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            // Percent-encode characters that are unsafe in filenames.
+            // Using percent-encoding (e.g. '/' → "%2F") rather than replacing with '_'
+            // ensures that distinct keys always map to distinct filenames (no collisions).
+            const UNSAFE: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|', '%'];
+            let mut safe_key = String::with_capacity(key.len());
+            for ch in key.chars() {
+                if UNSAFE.contains(&ch) || ch.is_control() {
+                    for byte in ch.to_string().as_bytes() {
+                        safe_key.push_str(&format!("%{byte:02X}"));
+                    }
+                } else {
+                    safe_key.push(ch);
+                }
+            }
             self.dir.join(format!("{safe_key}.json"))
         }
 
@@ -296,12 +308,15 @@ mod tests {
     }
 
     #[test]
-    fn file_storage_json_roundtrip() {
+    fn file_storage_key_encoding_avoids_collision() {
+        // "foo/bar" and "foo_bar" must map to different files after encoding.
         let dir = tempfile::tempdir().expect("tempdir failed");
         let fs = FileStorage::new(dir.path()).expect("FileStorage::new failed");
-        let data: Vec<String> = vec!["one".to_string(), "two".to_string()];
-        fs.set_json("list", &data).expect("set_json failed");
-        let loaded: Option<Vec<String>> = fs.get_json("list").expect("get_json failed");
-        assert_eq!(loaded, Some(data));
+        fs.set_item("foo/bar", "slash").expect("set failed");
+        fs.set_item("foo_bar", "underscore").expect("set failed");
+        let v1 = fs.get_item("foo/bar").expect("get failed");
+        let v2 = fs.get_item("foo_bar").expect("get failed");
+        assert_eq!(v1.as_deref(), Some("slash"));
+        assert_eq!(v2.as_deref(), Some("underscore"));
     }
 }
