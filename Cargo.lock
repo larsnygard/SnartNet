@@ -3470,6 +3470,7 @@ name = "snartnet-desktop"
 version = "0.1.0"
 dependencies = [
  "iced",
+ "serde",
  "serde_json",
  "snartnet-core",
 ]
