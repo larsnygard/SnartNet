@@ -275,6 +275,24 @@ cargo test
 cargo run -- --help
 ```
 
+### Android Shell (JNI host)
+
+SnartNet now includes a minimal Android shell project in `android/` wired to the shared Rust core via JNI (`android-bridge` crate).
+
+Build (Linux/macOS):
+
+```bash
+./build-android.sh
+```
+
+Build (Windows PowerShell):
+
+```powershell
+./build-android.ps1
+```
+
+See `android/README.md` for prerequisites and details.
+
 ### Contribution Guidelines
 
 - Follow the [Rust style guide](https://doc.rust-lang.org/1.0.0/style/README.html)

@@ -15,3 +15,4 @@ cargo build --workspace
 
 echo "Build complete."
 echo "Legacy web client has been archived at legacy/PWA and is no longer part of the default build."
+echo "For Android shell/APK build, run ./build-android.sh (or ./build-android.ps1 on Windows)."

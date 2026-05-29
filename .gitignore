@@ -10,3 +10,9 @@
 /legacy/PWA/.pnpm-store/
 /legacy/PWA/.turbo/
 /legacy/PWA/.tsbuildinfo
+
+/android/.gradle/
+/android/local.properties
+/android/app/build/
+/android/build/
+/android/.idea/

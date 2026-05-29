@@ -23,10 +23,11 @@ jobs:
         with:
           ndk-version: r26d
 
-      - name: Compile core for Android
+      - name: Compile core and Android bridge for Android
         run: |
           TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-android24-clang"
           export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android24-clang"
           export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
           cargo build -p snartnet-core --target aarch64-linux-android --locked
+          cargo build -p snartnet-android-bridge --target aarch64-linux-android --locked

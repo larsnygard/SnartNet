@@ -1,0 +1,14 @@
+[package]
+name = "snartnet-android-bridge"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+snartnet-core = { path = "../core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jni = "0.21"

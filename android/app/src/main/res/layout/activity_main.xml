@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="SnartNet Android Shell"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/usernameInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Username" />
+
+        <EditText
+            android:id="@+id/recipientInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Recipient fingerprint" />
+
+        <Button
+            android:id="@+id/btnInit"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Init Core" />
+
+        <Button
+            android:id="@+id/btnCreateProfile"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Create Profile" />
+
+        <Button
+            android:id="@+id/btnGetProfile"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Get Profile" />
+
+        <Button
+            android:id="@+id/btnCreatePost"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Create Post" />
+
+        <Button
+            android:id="@+id/btnCreateMessage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Create Message" />
+
+        <TextView
+            android:id="@+id/output"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Output will appear here"
+            android:textIsSelectable="true" />
+
+    </LinearLayout>
+</ScrollView>
