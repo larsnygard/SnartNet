@@ -2,6 +2,7 @@
 use wasm_bindgen::prelude::*;
 
 mod crypto;
+mod invite;
 mod profile;
 mod post;
 mod message;
@@ -11,6 +12,7 @@ pub mod service;
 mod wasm;
 
 pub use crypto::*;
+pub use invite::*;
 pub use profile::*;
 pub use post::*;
 pub use message::*;

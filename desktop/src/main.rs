@@ -13,17 +13,17 @@ mod transport;
 use iced::{
     time,
     widget::{button, column, container, row, scrollable, text, text_input},
-    Alignment, Element, Length, Subscription, Task,
+    Alignment, Element, Font, Length, Subscription, Task,
 };
 use serde::{Deserialize, Serialize};
 use snartnet_core::{
-    FileStorage, KeyPair, Message as CoreMessage, Post, Profile, SignedMessage, SignedPost,
-    SignedProfile,
+    ContactInvite, FileStorage, KeyPair, Message as CoreMessage, Post, Profile, SignedMessage,
+    SignedPost, SignedProfile,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use transport::{
-    dedupe_inbox, NetworkTransport, SwarmPostsBlob, SwarmProfileBlob,
-    TcpSwarmTransport,
+    dedupe_inbox, DiscoveredPeer, LanAnnounce, LanDiscovery, NetworkTransport, SwarmPostsBlob,
+    SwarmProfileBlob, TcpSwarmTransport,
 };
 
 const STORAGE_KEYPAIR: &str = "keypair";
@@ -31,6 +31,9 @@ const STORAGE_PROFILE: &str = "profile";
 const STORAGE_POSTS: &str = "local_posts";
 const STORAGE_CONTACTS: &str = "contacts";
 const STORAGE_THREADS: &str = "threads";
+
+/// Number of characters shown in the truncated invite-code preview.
+const INVITE_CODE_PREVIEW_LENGTH: usize = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Panel {
@@ -40,6 +43,18 @@ enum Panel {
     Contacts,
     Messages,
     Network,
+}
+
+/// Which path is active in the "Add contact" section of the Contacts panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AddContactMode {
+    /// Enter a fingerprint and alias manually (existing flow).
+    #[default]
+    Manual,
+    /// Paste a base64 invite code copied from another user's profile panel.
+    Invite,
+    /// Pick a peer that was discovered via LAN broadcast.
+    LanPeer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -132,6 +147,8 @@ struct NetworkState {
     last_push_status: String,
     last_poll_label: String,
     poll_interval_secs: u64,
+    lan_discovery_active: bool,
+    discovered_peer_count: usize,
 }
 
 impl Default for NetworkState {
@@ -143,6 +160,8 @@ impl Default for NetworkState {
             last_push_status: "No pushes yet".to_string(),
             last_poll_label: "never".to_string(),
             poll_interval_secs: 4,
+            lan_discovery_active: false,
+            discovered_peer_count: 0,
         }
     }
 }
@@ -157,6 +176,12 @@ struct FormState {
     compose_post_input: String,
     compose_message_input: String,
     selected_contact_for_chat: Option<String>,
+    /// Add-contact mode selector in the Contacts panel.
+    add_contact_mode: AddContactMode,
+    /// Invite code string pasted by the user.
+    invite_code_input: String,
+    /// Whether to show the QR code in the Profile panel.
+    show_profile_qr: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -180,10 +205,17 @@ enum Message {
     BioChanged(String),
     SaveProfile,
     ProfileSaved(Result<(KeyPair, SignedProfile), String>),
+    ToggleProfileQr,
+    CopyInviteCode,
 
     ContactFingerprintChanged(String),
     ContactAliasChanged(String),
+    AddContactModeChanged(AddContactMode),
+    InviteCodeChanged(String),
     AddContact,
+    ImportFromInvite,
+    InviteImported(Result<Contact, String>),
+    AddDiscoveredPeer(String),
     ContactAdded(Result<Contact, String>),
     SelectChatContact(String),
 
@@ -196,6 +228,7 @@ enum Message {
     MessageSent(Result<SignedMessage, String>),
 
     ToggleBittorrent,
+    LanDiscoveryToggle,
 }
 
 struct App {
@@ -209,6 +242,9 @@ struct App {
     forms: FormState,
     storage: FileStorage,
     transport: TcpSwarmTransport,
+    lan_discovery: LanDiscovery,
+    /// Snapshot of LAN-discovered peers, refreshed on every tick.
+    discovered_peers: Vec<DiscoveredPeer>,
     status_line: String,
 }
 
@@ -233,6 +269,8 @@ impl App {
             forms: FormState::default(),
             storage,
             transport,
+            lan_discovery: LanDiscovery::new(),
+            discovered_peers: Vec::new(),
             status_line: "Loading local state...".to_string(),
         };
 
@@ -259,6 +297,7 @@ impl App {
                     );
                     self.publish_local_profile_to_swarm();
                     self.publish_local_posts_to_swarm();
+                    self.start_lan_discovery();
                 }
 
                 self.recalculate_network();
@@ -267,6 +306,9 @@ impl App {
             }
             Message::Tick(_instant) => {
                 self.run_peer_sync();
+                // Refresh the LAN peer snapshot so the UI stays current.
+                self.discovered_peers = self.lan_discovery.get_discovered();
+                self.network.discovered_peer_count = self.discovered_peers.len();
                 Task::none()
             }
             Message::RunSyncNow => {
@@ -318,9 +360,26 @@ impl App {
 
                         self.publish_local_profile_to_swarm();
                         self.recalculate_network();
+                        // (Re)start LAN discovery with the updated profile.
+                        self.lan_discovery.stop();
+                        self.start_lan_discovery();
                     }
                     Err(e) => {
                         self.status_line = format!("Profile error: {e}");
+                    }
+                }
+                Task::none()
+            }
+
+            Message::ToggleProfileQr => {
+                self.forms.show_profile_qr = !self.forms.show_profile_qr;
+                Task::none()
+            }
+            Message::CopyInviteCode => {
+                if let Some(sp) = &self.profile {
+                    let invite = ContactInvite::from_signed_profile(sp, None);
+                    if let Ok(code) = invite.to_base64() {
+                        return iced::clipboard::write::<Message>(code);
                     }
                 }
                 Task::none()
@@ -334,10 +393,46 @@ impl App {
                 self.forms.contact_alias_input = v;
                 Task::none()
             }
+            Message::AddContactModeChanged(mode) => {
+                self.forms.add_contact_mode = mode;
+                Task::none()
+            }
+            Message::InviteCodeChanged(v) => {
+                self.forms.invite_code_input = v;
+                Task::none()
+            }
             Message::AddContact => {
                 let fp = self.forms.contact_fingerprint_input.clone();
                 let alias = self.forms.contact_alias_input.clone();
                 Task::perform(add_contact_async(fp, alias), Message::ContactAdded)
+            }
+            Message::ImportFromInvite => {
+                let code = self.forms.invite_code_input.clone();
+                Task::perform(import_invite_async(code), Message::InviteImported)
+            }
+            Message::InviteImported(result) => {
+                match result {
+                    Ok(contact) => {
+                        self.forms.invite_code_input.clear();
+                        return self.update(Message::ContactAdded(Ok(contact)));
+                    }
+                    Err(e) => {
+                        self.status_line = format!("Import failed: {e}");
+                    }
+                }
+                Task::none()
+            }
+            Message::AddDiscoveredPeer(fp) => {
+                let peer = self.discovered_peers.iter().find(|p| p.fingerprint == fp).cloned();
+                if let Some(peer) = peer {
+                    let alias = peer
+                        .display_name
+                        .filter(|d| !d.is_empty())
+                        .unwrap_or_else(|| peer.username.clone());
+                    Task::perform(add_contact_async(peer.fingerprint, alias), Message::ContactAdded)
+                } else {
+                    Task::none()
+                }
             }
             Message::ContactAdded(result) => {
                 match result {
@@ -487,6 +582,23 @@ impl App {
                 self.recalculate_network();
                 Task::none()
             }
+            Message::LanDiscoveryToggle => {
+                if self.lan_discovery.is_active() {
+                    self.lan_discovery.stop();
+                    self.discovered_peers.clear();
+                    self.network.lan_discovery_active = false;
+                    self.network.discovered_peer_count = 0;
+                    self.status_line = "LAN discovery stopped".to_string();
+                } else {
+                    self.start_lan_discovery();
+                    self.status_line = if self.network.lan_discovery_active {
+                        "LAN discovery started".to_string()
+                    } else {
+                        "LAN discovery unavailable (port in use or firewall)".to_string()
+                    };
+                }
+                Task::none()
+            }
         }
     }
 
@@ -555,7 +667,7 @@ impl App {
             "No profile yet".to_string()
         };
 
-        let form = column![
+        let mut form = column![
             text("Profile management").size(28),
             text(existing).size(14),
             text_input("Username", &self.forms.username_input).on_input(Message::UsernameChanged),
@@ -567,19 +679,142 @@ impl App {
         .spacing(10)
         .max_width(620);
 
+        // ── Invite code + QR ──────────────────────────────────────────────
+        if let Some(sp) = &self.profile {
+            let invite = ContactInvite::from_signed_profile(sp, None);
+            if let Ok(code) = invite.to_base64() {
+                let truncated = if code.len() > INVITE_CODE_PREVIEW_LENGTH {
+                    format!("{}…", &code[..INVITE_CODE_PREVIEW_LENGTH])
+                } else {
+                    code.clone()
+                };
+
+                form = form
+                    .push(text("── Share your profile ──────────────────").size(13))
+                    .push(
+                        row![
+                            text(format!("Invite code: {truncated}")).size(12),
+                            button("Copy").on_press(Message::CopyInviteCode),
+                            button(if self.forms.show_profile_qr {
+                                "Hide QR"
+                            } else {
+                                "Show QR"
+                            })
+                            .on_press(Message::ToggleProfileQr),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    );
+
+                if self.forms.show_profile_qr {
+                    let qr = generate_qr_text(&code);
+                    form = form.push(
+                        container(text(qr).font(Font::MONOSPACE).size(9))
+                            .padding(8),
+                    );
+                }
+            }
+        }
+
         container(form).padding(16).into()
     }
 
     fn view_contacts(&self) -> Element<'_, Message> {
-        let add_form = column![
-            text("Friends and contacts").size(28),
-            text_input("Contact fingerprint", &self.forms.contact_fingerprint_input)
-                .on_input(Message::ContactFingerprintChanged),
-            text_input("Alias", &self.forms.contact_alias_input).on_input(Message::ContactAliasChanged),
-            button("Add contact and subscribe").on_press(Message::AddContact),
+        // ── Mode selector ─────────────────────────────────────────────────
+        let mode_row = row![
+            button(if self.forms.add_contact_mode == AddContactMode::Manual {
+                "▶ Manual"
+            } else {
+                "  Manual"
+            })
+            .on_press(Message::AddContactModeChanged(AddContactMode::Manual)),
+            button(if self.forms.add_contact_mode == AddContactMode::Invite {
+                "▶ Invite code"
+            } else {
+                "  Invite code"
+            })
+            .on_press(Message::AddContactModeChanged(AddContactMode::Invite)),
+            button(if self.forms.add_contact_mode == AddContactMode::LanPeer {
+                "▶ LAN peers"
+            } else {
+                "  LAN peers"
+            })
+            .on_press(Message::AddContactModeChanged(AddContactMode::LanPeer)),
         ]
-        .spacing(10)
-        .max_width(620);
+        .spacing(6);
+
+        // ── Add form ──────────────────────────────────────────────────────
+        let add_form: Element<'_, Message> = match self.forms.add_contact_mode {
+            AddContactMode::Manual => column![
+                text("Friends and contacts").size(28),
+                mode_row,
+                text_input("Contact fingerprint", &self.forms.contact_fingerprint_input)
+                    .on_input(Message::ContactFingerprintChanged),
+                text_input("Alias", &self.forms.contact_alias_input)
+                    .on_input(Message::ContactAliasChanged),
+                button("Add contact and subscribe").on_press(Message::AddContact),
+            ]
+            .spacing(10)
+            .max_width(620)
+            .into(),
+
+            AddContactMode::Invite => column![
+                text("Friends and contacts").size(28),
+                mode_row,
+                text("Paste an invite code shared by another SnartNet user.").size(13),
+                text_input("Invite code (base64)", &self.forms.invite_code_input)
+                    .on_input(Message::InviteCodeChanged),
+                button("Import invite and subscribe").on_press(Message::ImportFromInvite),
+            ]
+            .spacing(10)
+            .max_width(620)
+            .into(),
+
+            AddContactMode::LanPeer => {
+                let mut col = column![
+                    text("Friends and contacts").size(28),
+                    mode_row,
+                    text(format!(
+                        "Nearby SnartNet peers on your LAN ({}{})",
+                        self.discovered_peers.len(),
+                        if self.network.lan_discovery_active {
+                            ""
+                        } else {
+                            " — discovery inactive"
+                        }
+                    ))
+                    .size(13),
+                ]
+                .spacing(10)
+                .max_width(620);
+
+                if self.discovered_peers.is_empty() {
+                    col = col.push(text("No peers discovered yet. Make sure LAN discovery is active in the Network panel.").size(12));
+                } else {
+                    for peer in &self.discovered_peers {
+                        let label = format!(
+                            "@{}{} — {}",
+                            peer.username,
+                            peer.display_name
+                                .as_ref()
+                                .map(|d| format!(" ({})", d))
+                                .unwrap_or_default(),
+                            short_fp(&peer.fingerprint),
+                        );
+                        col = col.push(
+                            row![
+                                text(label).size(13),
+                                button("Add contact")
+                                    .on_press(Message::AddDiscoveredPeer(peer.fingerprint.clone())),
+                            ]
+                            .spacing(8)
+                            .align_y(Alignment::Center),
+                        );
+                    }
+                }
+                col.into()
+            }
+        };
 
         let list: Element<'_, Message> = if self.contacts.is_empty() {
             text("No contacts yet").size(14).into()
@@ -704,6 +939,12 @@ impl App {
             "Stopped"
         };
 
+        let lan_state = if self.network.lan_discovery_active {
+            "Active"
+        } else {
+            "Inactive"
+        };
+
         column![
             text("Network status").size(28),
             text(format!("BitTorrent transport: {state}")),
@@ -712,13 +953,28 @@ impl App {
             text(format!("Last push: {}", self.network.last_push_status)),
             text(format!("Last poll: {}", self.network.last_poll_label)),
             text(format!("Poll interval: {}s", self.network.poll_interval_secs)),
-            button("Run sync now").on_press(Message::RunSyncNow),
-            button(if self.network.bittorrent_running {
-                "Stop BitTorrent"
-            } else {
-                "Start BitTorrent"
-            })
-            .on_press(Message::ToggleBittorrent),
+            text("── LAN Discovery ──────────────────────────────────────────").size(13),
+            text(format!("LAN discovery: {lan_state}")),
+            text(format!(
+                "Nearby peers visible: {}",
+                self.network.discovered_peer_count
+            )),
+            row![
+                button("Run sync now").on_press(Message::RunSyncNow),
+                button(if self.network.bittorrent_running {
+                    "Stop BitTorrent"
+                } else {
+                    "Start BitTorrent"
+                })
+                .on_press(Message::ToggleBittorrent),
+                button(if self.network.lan_discovery_active {
+                    "Stop LAN discovery"
+                } else {
+                    "Start LAN discovery"
+                })
+                .on_press(Message::LanDiscoveryToggle),
+            ]
+            .spacing(8),
         ]
         .spacing(10)
         .padding(16)
@@ -1049,6 +1305,25 @@ impl App {
         let inbox_swarms = self.contacts.len() as u32;
         self.network.active_swarms = profile_swarms + contact_swarms + post_swarms + inbox_swarms;
     }
+
+    /// Attempt to start LAN discovery for the current profile.
+    /// Sets `network.lan_discovery_active` to reflect the outcome.
+    fn start_lan_discovery(&mut self) {
+        let Some(sp) = &self.profile else { return };
+        // Use the actual LAN IP of this host rather than 0.0.0.0 so that
+        // peers receiving the broadcast can actually connect back.
+        let tcp_addr = transport::local_lan_ip().map(|ip| {
+            format!("{}:{}", ip, transport::LAN_DISCOVERY_PORT - 1)
+        });
+        let announce = LanAnnounce {
+            fingerprint: sp.profile.fingerprint.clone(),
+            username: sp.profile.username.clone(),
+            display_name: sp.profile.display_name.clone(),
+            tcp_addr,
+        };
+        let started = self.lan_discovery.start(announce);
+        self.network.lan_discovery_active = started;
+    }
 }
 
 async fn load_startup_async() -> StartupData {
@@ -1188,6 +1463,49 @@ fn unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Render `data` as a monospace Unicode QR code string suitable for display
+/// in an iced `text()` widget with `Font::MONOSPACE`.
+///
+/// Returns a placeholder string on error (e.g. data too large for any QR
+/// version).
+fn generate_qr_text(data: &str) -> String {
+    use qrcode::render::unicode;
+    use qrcode::{EcLevel, QrCode};
+
+    let code = match QrCode::with_error_correction_level(data.as_bytes(), EcLevel::L) {
+        Ok(c) => c,
+        Err(_) => return "[QR generation failed – data too large]".to_string(),
+    };
+    code.render::<unicode::Dense1x2>()
+        .quiet_zone(true)
+        .build()
+}
+
+/// Decode a base64 invite code and construct a pending `Contact` from it.
+async fn import_invite_async(code: String) -> Result<Contact, String> {
+    let invite = ContactInvite::from_base64(&code)?;
+    let alias = invite
+        .display_name
+        .as_ref()
+        .filter(|d| !d.is_empty())
+        .cloned()
+        .unwrap_or_else(|| invite.username.clone());
+    Ok(Contact {
+        fingerprint: invite.fingerprint,
+        alias,
+        magnet_uri: invite.magnet_uri,
+        auto_synced: false,
+        last_sync_label: "pending".to_string(),
+        profile_summary: "Awaiting peer profile sync".to_string(),
+        latest_post_preview: "Awaiting peer post sync".to_string(),
+        verification: VerificationState::Unknown,
+        trust_score: default_trust(),
+        synced_post_count: 0,
+        known_public_key: None,
+        last_sync_error: None,
+    })
 }
 
 fn main() -> iced::Result {
