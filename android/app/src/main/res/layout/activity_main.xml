@@ -12,7 +12,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="SnartNet Android Shell"
+            android:text="SnartNet Android Client"
             android:textSize="20sp"
             android:textStyle="bold" />
 
@@ -23,10 +23,41 @@
             android:hint="Username" />
 
         <EditText
+            android:id="@+id/displayNameInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Display name" />
+
+        <EditText
+            android:id="@+id/bioInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Bio"
+            android:minLines="2" />
+
+        <EditText
             android:id="@+id/recipientInput"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:hint="Recipient fingerprint" />
+
+        <EditText
+            android:id="@+id/postInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Post content" />
+
+        <EditText
+            android:id="@+id/messageInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Message content" />
+
+        <EditText
+            android:id="@+id/inviteInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Invite code" />
 
         <Button
             android:id="@+id/btnInit"
@@ -41,10 +72,34 @@
             android:text="Create Profile" />
 
         <Button
+            android:id="@+id/btnUpdateProfile"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Update Profile" />
+
+        <Button
             android:id="@+id/btnGetProfile"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Get Profile" />
+
+        <Button
+            android:id="@+id/btnGetFingerprint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Get Fingerprint" />
+
+        <Button
+            android:id="@+id/btnGetPublicKey"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Get Public Key" />
+
+        <Button
+            android:id="@+id/btnGetCapabilities"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Get Capabilities" />
 
         <Button
             android:id="@+id/btnCreatePost"
@@ -58,13 +113,56 @@
             android:layout_height="wrap_content"
             android:text="Create Message" />
 
+        <Button
+            android:id="@+id/btnExportInvite"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Export Invite" />
+
+        <Button
+            android:id="@+id/btnImportInvite"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Import Invite" />
+
+        <Button
+            android:id="@+id/btnGenerateQr"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Generate Invite QR" />
+
+        <Button
+            android:id="@+id/btnStartLan"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Start LAN Discovery" />
+
+        <Button
+            android:id="@+id/btnStopLan"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Stop LAN Discovery" />
+
+        <Button
+            android:id="@+id/btnLanStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="LAN Discovery Status" />
+
+        <Button
+            android:id="@+id/btnLanPeers"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Get LAN Peers" />
+
         <TextView
             android:id="@+id/output"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
             android:text="Output will appear here"
-            android:textIsSelectable="true" />
+            android:textIsSelectable="true"
+            android:textSize="12sp" />
 
     </LinearLayout>
 </ScrollView>

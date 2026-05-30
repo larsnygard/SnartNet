@@ -1,4 +1,4 @@
-use crate::crypto::{KeyPair, verify_signature};
+use crate::crypto::{verify_signature, KeyPair};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -44,7 +44,7 @@ impl Message {
             message_type: MessageType::Direct,
         }
     }
-    
+
     pub fn new_group(
         sender_fingerprint: String,
         recipient_fingerprint: String,
@@ -61,10 +61,9 @@ impl Message {
             message_type: MessageType::Group { group_id },
         }
     }
-    
+
     pub fn to_canonical_json(&self) -> Result<String, String> {
-        serde_json::to_string(self)
-            .map_err(|e| format!("Failed to serialize message: {}", e))
+        serde_json::to_string(self).map_err(|e| format!("Failed to serialize message: {}", e))
     }
 }
 
@@ -72,13 +71,10 @@ impl SignedMessage {
     pub fn create(message: Message, keypair: &KeyPair) -> Result<Self, String> {
         let message_json = message.to_canonical_json()?;
         let signature = keypair.sign(&message_json)?;
-        
-        Ok(SignedMessage {
-            message,
-            signature,
-        })
+
+        Ok(SignedMessage { message, signature })
     }
-    
+
     pub fn verify(&self, public_key: &str) -> Result<bool, String> {
         let message_json = self.message.to_canonical_json()?;
         verify_signature(&message_json, &self.signature, public_key)
@@ -98,7 +94,7 @@ pub fn create_direct_message(
         recipient_fingerprint.to_string(),
         content.to_string(),
     );
-    
+
     serde_wasm_bindgen::to_value(&message)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
@@ -108,13 +104,13 @@ pub fn create_direct_message(
 pub fn sign_message(message_json: &str, keypair_json: &str) -> Result<JsValue, JsValue> {
     let message: Message = serde_json::from_str(message_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid message JSON: {}", e)))?;
-    
+
     let keypair: KeyPair = serde_json::from_str(keypair_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid keypair JSON: {}", e)))?;
-    
-    let signed_message = SignedMessage::create(message, &keypair)
-        .map_err(|e| JsValue::from_str(&e))?;
-    
+
+    let signed_message =
+        SignedMessage::create(message, &keypair).map_err(|e| JsValue::from_str(&e))?;
+
     serde_wasm_bindgen::to_value(&signed_message)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
@@ -124,8 +120,9 @@ pub fn sign_message(message_json: &str, keypair_json: &str) -> Result<JsValue, J
 pub fn verify_message(signed_message_json: &str, public_key: &str) -> Result<bool, JsValue> {
     let signed_message: SignedMessage = serde_json::from_str(signed_message_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid signed message JSON: {}", e)))?;
-    
-    signed_message.verify(public_key)
+
+    signed_message
+        .verify(public_key)
         .map_err(|e| JsValue::from_str(&e))
 }
 
@@ -155,7 +152,9 @@ mod tests {
             "grp-42".to_string(),
             "Hello group!".to_string(),
         );
-        assert!(matches!(m.message_type, MessageType::Group { ref group_id } if group_id == "grp-42"));
+        assert!(
+            matches!(m.message_type, MessageType::Group { ref group_id } if group_id == "grp-42")
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::crypto::{KeyPair, KeyInfo, verify_signature};
+use crate::crypto::{verify_signature, KeyInfo, KeyPair};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -32,7 +32,7 @@ impl Profile {
     pub fn new(username: String, key_info: KeyInfo) -> Self {
         let now = Utc::now();
         let id = Uuid::new_v4().to_string();
-        
+
         Self {
             id,
             username,
@@ -47,7 +47,7 @@ impl Profile {
             magnet_uri: None,
         }
     }
-    
+
     pub fn update(&mut self, display_name: Option<String>, bio: Option<String>) {
         if let Some(name) = display_name {
             self.display_name = Some(name);
@@ -58,12 +58,11 @@ impl Profile {
         self.updated_at = Utc::now();
         self.version += 1;
     }
-    
+
     pub fn to_canonical_json(&self) -> Result<String, String> {
-        serde_json::to_string(self)
-            .map_err(|e| format!("Failed to serialize profile: {}", e))
+        serde_json::to_string(self).map_err(|e| format!("Failed to serialize profile: {}", e))
     }
-    
+
     pub fn generate_magnet_uri(&self) -> String {
         // Generate a deterministic hash for the profile
         let json = self.to_canonical_json().unwrap_or_default();
@@ -71,8 +70,11 @@ impl Profile {
         hasher.update(json.as_bytes());
         let hash = hasher.finalize();
         let hash_hex = hex::encode(hash);
-        
-        format!("magnet:?xt=urn:btih:{}&dn=profile_{}", hash_hex, self.username)
+
+        format!(
+            "magnet:?xt=urn:btih:{}&dn=profile_{}",
+            hash_hex, self.username
+        )
     }
 }
 
@@ -80,13 +82,10 @@ impl SignedProfile {
     pub fn create(profile: Profile, keypair: &KeyPair) -> Result<Self, String> {
         let profile_json = profile.to_canonical_json()?;
         let signature = keypair.sign(&profile_json)?;
-        
-        Ok(SignedProfile {
-            profile,
-            signature,
-        })
+
+        Ok(SignedProfile { profile, signature })
     }
-    
+
     pub fn verify(&self) -> Result<bool, String> {
         // `magnet_uri` is a derived field appended after signing – strip it so
         // the JSON matches the bytes that were originally signed.
@@ -115,11 +114,11 @@ pub fn create_profile(profile_data_json: &str) -> Result<JsValue, JsValue> {
     let keypair = KeyPair::generate()
         .map_err(|e| JsValue::from_str(&format!("Failed to create keypair: {}", e)))?;
     let key_info = keypair.get_public_info();
-    
+
     let mut profile = Profile::new(profile_data.username, key_info);
     profile.display_name = profile_data.display_name;
     profile.bio = profile_data.bio;
-    
+
     serde_wasm_bindgen::to_value(&profile)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
@@ -136,12 +135,12 @@ struct ProfileUpdateData {
 pub fn update_profile(profile_json: &str, update_data_json: &str) -> Result<JsValue, JsValue> {
     let mut profile: Profile = serde_json::from_str(profile_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid profile JSON: {}", e)))?;
-    
+
     let update_data: ProfileUpdateData = serde_json::from_str(update_data_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid update data: {}", e)))?;
 
     profile.update(update_data.display_name, update_data.bio);
-    
+
     serde_wasm_bindgen::to_value(&profile)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
@@ -151,13 +150,13 @@ pub fn update_profile(profile_json: &str, update_data_json: &str) -> Result<JsVa
 pub fn sign_profile(profile_json: &str, keypair_json: &str) -> Result<JsValue, JsValue> {
     let profile: Profile = serde_json::from_str(profile_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid profile JSON: {}", e)))?;
-    
+
     let keypair: KeyPair = serde_json::from_str(keypair_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid keypair JSON: {}", e)))?;
-    
-    let signed_profile = SignedProfile::create(profile, &keypair)
-        .map_err(|e| JsValue::from_str(&e))?;
-    
+
+    let signed_profile =
+        SignedProfile::create(profile, &keypair).map_err(|e| JsValue::from_str(&e))?;
+
     serde_wasm_bindgen::to_value(&signed_profile)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
@@ -167,9 +166,8 @@ pub fn sign_profile(profile_json: &str, keypair_json: &str) -> Result<JsValue, J
 pub fn verify_profile(signed_profile_json: &str) -> Result<bool, JsValue> {
     let signed_profile: SignedProfile = serde_json::from_str(signed_profile_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid signed profile JSON: {}", e)))?;
-    
-    signed_profile.verify()
-        .map_err(|e| JsValue::from_str(&e))
+
+    signed_profile.verify().map_err(|e| JsValue::from_str(&e))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -177,7 +175,7 @@ pub fn verify_profile(signed_profile_json: &str) -> Result<bool, JsValue> {
 pub fn generate_profile_magnet_uri(profile_json: &str) -> Result<String, JsValue> {
     let profile: Profile = serde_json::from_str(profile_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid profile JSON: {}", e)))?;
-    
+
     Ok(profile.generate_magnet_uri())
 }
 

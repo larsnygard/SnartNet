@@ -39,12 +39,27 @@ pub trait NetworkTransport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum TransportRequest {
-    GetProfile { fingerprint: String },
-    PutProfile { fingerprint: String, blob: SwarmProfileBlob },
-    GetPosts { fingerprint: String },
-    PutPosts { fingerprint: String, blob: SwarmPostsBlob },
-    GetInbox { recipient_fingerprint: String },
-    PutInbox { recipient_fingerprint: String, blob: SwarmInboxBlob },
+    GetProfile {
+        fingerprint: String,
+    },
+    PutProfile {
+        fingerprint: String,
+        blob: SwarmProfileBlob,
+    },
+    GetPosts {
+        fingerprint: String,
+    },
+    PutPosts {
+        fingerprint: String,
+        blob: SwarmPostsBlob,
+    },
+    GetInbox {
+        recipient_fingerprint: String,
+    },
+    PutInbox {
+        recipient_fingerprint: String,
+        blob: SwarmInboxBlob,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,8 +136,9 @@ impl TcpSwarmTransport {
                     Err(e) => TransportResponse::Err { message: e },
                 };
 
-                let payload = serde_json::to_vec(&resp)
-                    .unwrap_or_else(|_| b"{\"kind\":\"err\",\"message\":\"serialization failed\"}".to_vec());
+                let payload = serde_json::to_vec(&resp).unwrap_or_else(|_| {
+                    b"{\"kind\":\"err\",\"message\":\"serialization failed\"}".to_vec()
+                });
                 let _ = stream.write_all(&payload);
                 let _ = stream.flush();
                 let _ = stream.shutdown(Shutdown::Both);
@@ -150,7 +166,9 @@ impl TcpSwarmTransport {
                     Err(e) => TransportResponse::Err { message: e },
                 }
             }
-            TransportRequest::GetInbox { recipient_fingerprint } => TransportResponse::Inbox {
+            TransportRequest::GetInbox {
+                recipient_fingerprint,
+            } => TransportResponse::Inbox {
                 blob: self.load_inbox_local(&recipient_fingerprint),
             },
             TransportRequest::PutInbox {
@@ -200,13 +218,16 @@ impl TcpSwarmTransport {
     }
 
     fn inbox_path(&self, recipient_fingerprint: &str) -> PathBuf {
-        self.inner
-            .swarm_dir
-            .join(format!("inbox_{}.json", sanitize_component(recipient_fingerprint)))
+        self.inner.swarm_dir.join(format!(
+            "inbox_{}.json",
+            sanitize_component(recipient_fingerprint)
+        ))
     }
 
     fn load_profile_local(&self, fingerprint: &str) -> Option<SwarmProfileBlob> {
-        load_json_file(&self.profile_path(fingerprint)).ok().flatten()
+        load_json_file(&self.profile_path(fingerprint))
+            .ok()
+            .flatten()
     }
 
     fn save_profile_local(&self, fingerprint: &str, blob: &SwarmProfileBlob) -> Result<(), String> {
@@ -222,10 +243,16 @@ impl TcpSwarmTransport {
     }
 
     fn load_inbox_local(&self, recipient_fingerprint: &str) -> Option<SwarmInboxBlob> {
-        load_json_file(&self.inbox_path(recipient_fingerprint)).ok().flatten()
+        load_json_file(&self.inbox_path(recipient_fingerprint))
+            .ok()
+            .flatten()
     }
 
-    fn save_inbox_local(&self, recipient_fingerprint: &str, blob: &SwarmInboxBlob) -> Result<(), String> {
+    fn save_inbox_local(
+        &self,
+        recipient_fingerprint: &str,
+        blob: &SwarmInboxBlob,
+    ) -> Result<(), String> {
         save_json_file(&self.inbox_path(recipient_fingerprint), blob)
     }
 }
@@ -240,7 +267,9 @@ impl NetworkTransport for TcpSwarmTransport {
             let req = TransportRequest::GetProfile {
                 fingerprint: fingerprint.to_string(),
             };
-            if let Some(TransportResponse::Profile { blob: Some(blob) }) = self.request_peer(*peer, &req) {
+            if let Some(TransportResponse::Profile { blob: Some(blob) }) =
+                self.request_peer(*peer, &req)
+            {
                 let _ = self.save_profile_local(fingerprint, &blob);
                 return Some(blob);
             }
@@ -267,7 +296,9 @@ impl NetworkTransport for TcpSwarmTransport {
             let req = TransportRequest::GetPosts {
                 fingerprint: fingerprint.to_string(),
             };
-            if let Some(TransportResponse::Posts { blob: Some(blob) }) = self.request_peer(*peer, &req) {
+            if let Some(TransportResponse::Posts { blob: Some(blob) }) =
+                self.request_peer(*peer, &req)
+            {
                 let _ = self.save_posts_local(fingerprint, &blob);
                 return Some(blob);
             }
@@ -286,14 +317,19 @@ impl NetworkTransport for TcpSwarmTransport {
     }
 
     fn load_inbox(&self, recipient_fingerprint: &str) -> Option<SwarmInboxBlob> {
-        let mut local = self.load_inbox_local(recipient_fingerprint).unwrap_or_default();
+        let mut local = self
+            .load_inbox_local(recipient_fingerprint)
+            .unwrap_or_default();
         let mut changed = false;
 
         for peer in &self.inner.peers {
             let req = TransportRequest::GetInbox {
                 recipient_fingerprint: recipient_fingerprint.to_string(),
             };
-            if let Some(TransportResponse::Inbox { blob: Some(mut remote) }) = self.request_peer(*peer, &req) {
+            if let Some(TransportResponse::Inbox {
+                blob: Some(mut remote),
+            }) = self.request_peer(*peer, &req)
+            {
                 let before = local.messages.len();
                 local.messages.append(&mut remote.messages);
                 dedupe_inbox(&mut local);
@@ -358,7 +394,8 @@ fn load_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>
 }
 
 fn save_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(value).map_err(|e| format!("json write failed: {e}"))?;
+    let text =
+        serde_json::to_string_pretty(value).map_err(|e| format!("json write failed: {e}"))?;
     std::fs::write(path, text).map_err(|e| format!("write failed: {e}"))
 }
 
@@ -490,8 +527,9 @@ impl LanDiscovery {
                 Err(_) => return,
             };
             let _ = sender.set_broadcast(true);
-            let broadcast_addr: SocketAddr =
-                format!("255.255.255.255:{LAN_DISCOVERY_PORT}").parse().unwrap();
+            let broadcast_addr: SocketAddr = format!("255.255.255.255:{LAN_DISCOVERY_PORT}")
+                .parse()
+                .unwrap();
             while active_sender.load(Ordering::Relaxed) {
                 if let Ok(payload) = serde_json::to_vec(&announce) {
                     let _ = sender.send_to(&payload, broadcast_addr);

@@ -1,4 +1,4 @@
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
@@ -28,8 +28,8 @@ pub trait StorageBackend {
     fn remove_item(key: &str) -> Result<(), StorageError>;
 
     fn set_json<T: Serialize>(key: &str, value: &T) -> Result<(), StorageError> {
-        let json = serde_json::to_string(value)
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        let json =
+            serde_json::to_string(value).map_err(|e| StorageError::Serialization(e.to_string()))?;
         Self::set_item(key, &json)
     }
 
@@ -179,7 +179,9 @@ mod native {
         pub fn default_dir() -> Result<PathBuf, StorageError> {
             let home = std::env::var("HOME")
                 .or_else(|_| std::env::var("USERPROFILE"))
-                .map_err(|_| StorageError::Unavailable("Cannot determine home directory".to_string()))?;
+                .map_err(|_| {
+                    StorageError::Unavailable("Cannot determine home directory".to_string())
+                })?;
             Ok(PathBuf::from(home).join(".snartnet").join("data"))
         }
 
@@ -230,13 +232,20 @@ mod native {
             Ok(())
         }
 
-        pub fn set_json<T: serde::Serialize>(&self, key: &str, value: &T) -> Result<(), StorageError> {
+        pub fn set_json<T: serde::Serialize>(
+            &self,
+            key: &str,
+            value: &T,
+        ) -> Result<(), StorageError> {
             let json = serde_json::to_string_pretty(value)
                 .map_err(|e| StorageError::Serialization(e.to_string()))?;
             self.set_item(key, &json)
         }
 
-        pub fn get_json<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<T>, StorageError> {
+        pub fn get_json<T: serde::de::DeserializeOwned>(
+            &self,
+            key: &str,
+        ) -> Result<Option<T>, StorageError> {
             match self.get_item(key)? {
                 Some(json) => {
                     let value = serde_json::from_str(&json)
@@ -252,7 +261,7 @@ mod native {
 
     // ---- SQLite backend ----
 
-    use rusqlite::{Connection, params};
+    use rusqlite::{params, Connection};
 
     /// Returns the configured database path (default: `"snartnet.db"`).
     /// Call `SqliteStorage::open` before the first storage operation to override it.
@@ -268,8 +277,7 @@ mod native {
                 .lock()
                 .expect("path lock poisoned")
                 .clone();
-            let conn = Connection::open(&path)
-                .expect("failed to open SQLite database");
+            let conn = Connection::open(&path).expect("failed to open SQLite database");
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS kv_store (
                      key   TEXT PRIMARY KEY,
@@ -333,9 +341,9 @@ mod native {
                 .map_err(|e| StorageError::Backend(format!("SQLite row failed: {e}")))?
             {
                 Some(row) => {
-                    let val: String = row
-                        .get(0)
-                        .map_err(|e| StorageError::Backend(format!("SQLite get col failed: {e}")))?;
+                    let val: String = row.get(0).map_err(|e| {
+                        StorageError::Backend(format!("SQLite get col failed: {e}"))
+                    })?;
                     Ok(Some(val))
                 }
                 None => Ok(None),
@@ -355,7 +363,7 @@ mod native {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use browser::{LocalStorage, storage_get_item, storage_remove_item, storage_set_item};
+pub use browser::{storage_get_item, storage_remove_item, storage_set_item, LocalStorage};
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{FileStorage, LocalStorage, SqliteStorage};
 
@@ -383,7 +391,8 @@ mod tests {
     fn native_memory_storage_json_roundtrip() {
         let map: HashMap<String, u32> = [("a".to_string(), 1u32)].into_iter().collect();
         LocalStorage::set_json("test_mem_json", &map).expect("set_json failed");
-        let loaded: Option<HashMap<String, u32>> = LocalStorage::get_json("test_mem_json").expect("get_json failed");
+        let loaded: Option<HashMap<String, u32>> =
+            LocalStorage::get_json("test_mem_json").expect("get_json failed");
         assert_eq!(loaded.as_ref().and_then(|m| m.get("a")).copied(), Some(1));
         LocalStorage::remove_item("test_mem_json").ok();
     }

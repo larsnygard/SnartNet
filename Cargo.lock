@@ -3500,6 +3500,7 @@ name = "snartnet-android-bridge"
 version = "0.1.0"
 dependencies = [
  "jni 0.21.1",
+ "qrcode",
  "serde",
  "serde_json",
  "snartnet-core",

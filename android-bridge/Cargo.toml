@@ -12,3 +12,4 @@ snartnet-core = { path = "../core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 jni = "0.21"
+qrcode = "0.14"

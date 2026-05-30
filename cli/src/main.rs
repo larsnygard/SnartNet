@@ -1,12 +1,5 @@
 use clap::{Parser, Subcommand};
-use snartnet_core::{
-    KeyPair,
-    Post,
-    SignedPost,
-    Profile,
-    SignedProfile,
-    FileStorage,
-};
+use snartnet_core::{FileStorage, KeyPair, Post, Profile, SignedPost, SignedProfile};
 
 // ---------------------------------------------------------------------------
 // CLI top-level
@@ -107,15 +100,21 @@ fn main() {
     let storage = open_storage(cli.data_dir.as_deref());
 
     let result = match cli.command {
-        Commands::Init { username, name, bio } => cmd_init(&storage, &username, name, bio),
+        Commands::Init {
+            username,
+            name,
+            bio,
+        } => cmd_init(&storage, &username, name, bio),
         Commands::Profile { action } => match action {
             ProfileAction::Show => cmd_profile_show(&storage),
             ProfileAction::Edit { name, bio } => cmd_profile_edit(&storage, name, bio),
         },
         Commands::Post { action } => match action {
-            PostAction::Create { content, tags, reply_to } => {
-                cmd_post_create(&storage, &content, tags, reply_to)
-            }
+            PostAction::Create {
+                content,
+                tags,
+                reply_to,
+            } => cmd_post_create(&storage, &content, tags, reply_to),
         },
         Commands::Keys { action } => match action {
             KeysAction::Show => cmd_keys_show(&storage),
@@ -175,8 +174,14 @@ fn cmd_init(
     display_name: Option<String>,
     bio: Option<String>,
 ) -> Result<(), String> {
-    if storage.get_item("keypair").map_err(|e| e.to_string())?.is_some() {
-        return Err("An identity already exists. To start fresh, remove ~/.snartnet/data/".to_string());
+    if storage
+        .get_item("keypair")
+        .map_err(|e| e.to_string())?
+        .is_some()
+    {
+        return Err(
+            "An identity already exists. To start fresh, remove ~/.snartnet/data/".to_string(),
+        );
     }
 
     validate_username(username)?;
@@ -214,8 +219,14 @@ fn cmd_profile_show(storage: &FileStorage) -> Result<(), String> {
     }
     println!("Fingerprint : {}", p.fingerprint);
     println!("Version     : {}", p.version);
-    println!("Created     : {}", p.created_at.format("%Y-%m-%d %H:%M UTC"));
-    println!("Updated     : {}", p.updated_at.format("%Y-%m-%d %H:%M UTC"));
+    println!(
+        "Created     : {}",
+        p.created_at.format("%Y-%m-%d %H:%M UTC")
+    );
+    println!(
+        "Updated     : {}",
+        p.updated_at.format("%Y-%m-%d %H:%M UTC")
+    );
     if let Some(ref uri) = p.magnet_uri {
         println!("Magnet URI  : {uri}");
     }
@@ -302,10 +313,7 @@ fn validate_username(username: &str) -> Result<(), String> {
             username.len()
         ));
     }
-    if !username
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_')
-    {
+    if !username.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err("Username may only contain letters, digits and underscores".to_string());
     }
     Ok(())

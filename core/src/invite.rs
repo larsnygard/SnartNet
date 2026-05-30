@@ -1,4 +1,4 @@
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 
 use crate::profile::SignedProfile;
@@ -61,8 +61,7 @@ impl ContactInvite {
         let bytes = general_purpose::URL_SAFE_NO_PAD
             .decode(s.trim())
             .map_err(|e| format!("base64 decode failed: {e}"))?;
-        let json =
-            std::str::from_utf8(&bytes).map_err(|e| format!("utf8 decode failed: {e}"))?;
+        let json = std::str::from_utf8(&bytes).map_err(|e| format!("utf8 decode failed: {e}"))?;
         Self::from_json(json)
     }
 }
@@ -95,16 +94,14 @@ mod tests {
     #[test]
     fn invite_with_transport_addr() {
         let sp = make_signed_profile("bob");
-        let invite =
-            ContactInvite::from_signed_profile(&sp, Some("192.168.1.5:47470".to_string()));
+        let invite = ContactInvite::from_signed_profile(&sp, Some("192.168.1.5:47470".to_string()));
         assert_eq!(invite.transport_addr.as_deref(), Some("192.168.1.5:47470"));
     }
 
     #[test]
     fn invite_json_roundtrip() {
         let sp = make_signed_profile("carol");
-        let invite =
-            ContactInvite::from_signed_profile(&sp, Some("10.0.0.1:47470".to_string()));
+        let invite = ContactInvite::from_signed_profile(&sp, Some("10.0.0.1:47470".to_string()));
         let json = invite.to_json().expect("to_json");
         let restored = ContactInvite::from_json(&json).expect("from_json");
         assert_eq!(restored, invite);
@@ -116,10 +113,15 @@ mod tests {
         let invite = ContactInvite::from_signed_profile(&sp, None);
         let encoded = invite.to_base64().expect("to_base64");
         // URL_SAFE_NO_PAD must not contain '=' padding
-        assert!(!encoded.contains('='), "URL_SAFE_NO_PAD should have no padding");
+        assert!(
+            !encoded.contains('='),
+            "URL_SAFE_NO_PAD should have no padding"
+        );
         // Only URL-safe characters
         assert!(
-            encoded.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            encoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "encoded string must be URL-safe"
         );
         let restored = ContactInvite::from_base64(&encoded).expect("from_base64");

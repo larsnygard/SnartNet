@@ -3,21 +3,23 @@ use wasm_bindgen::prelude::*;
 
 mod crypto;
 mod invite;
-mod profile;
-mod post;
 mod message;
-mod storage;
+mod post;
+mod profile;
 pub mod service;
+mod storage;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
 pub use crypto::*;
 pub use invite::*;
-pub use profile::*;
-pub use post::*;
 pub use message::*;
+pub use post::*;
+pub use profile::*;
+pub use service::{
+    CapabilityDescriptor, CoreService, CreateProfileRequest, ProfileEnvelope, UpdateProfileRequest,
+};
 pub use storage::*;
-pub use service::{CoreService, ProfileEnvelope, CapabilityDescriptor, CreateProfileRequest, UpdateProfileRequest};
 #[cfg(target_arch = "wasm32")]
 pub use wasm::*;
 

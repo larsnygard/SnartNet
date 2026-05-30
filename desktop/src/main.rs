@@ -254,8 +254,7 @@ impl App {
             eprintln!("Warning: could not open default storage: {e}");
             FileStorage::new(std::env::temp_dir().join("snartnet")).expect("temp storage")
         });
-        let transport = TcpSwarmTransport::from_env()
-            .expect("transport init failed");
+        let transport = TcpSwarmTransport::from_env().expect("transport init failed");
         transport.start_server();
 
         let app = Self {
@@ -274,7 +273,10 @@ impl App {
             status_line: "Loading local state...".to_string(),
         };
 
-        (app, Task::perform(load_startup_async(), Message::StartupLoaded))
+        (
+            app,
+            Task::perform(load_startup_async(), Message::StartupLoaded),
+        )
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -340,7 +342,10 @@ impl App {
                 let display = non_empty(self.forms.display_name_input.clone());
                 let bio = non_empty(self.forms.bio_input.clone());
 
-                Task::perform(create_profile_async(username, display, bio), Message::ProfileSaved)
+                Task::perform(
+                    create_profile_async(username, display, bio),
+                    Message::ProfileSaved,
+                )
             }
             Message::ProfileSaved(result) => {
                 match result {
@@ -349,10 +354,12 @@ impl App {
                         self.profile = Some(sp.clone());
 
                         if let Err(e) = self.storage.set_json(STORAGE_KEYPAIR, &kp) {
-                            self.status_line = format!("Profile saved, keypair persist failed: {e}");
+                            self.status_line =
+                                format!("Profile saved, keypair persist failed: {e}");
                         }
                         if let Err(e) = self.storage.set_json(STORAGE_PROFILE, &sp) {
-                            self.status_line = format!("Profile saved, profile persist failed: {e}");
+                            self.status_line =
+                                format!("Profile saved, profile persist failed: {e}");
                         } else {
                             self.status_line = "Profile saved".to_string();
                             self.panel = Panel::Feed;
@@ -423,13 +430,20 @@ impl App {
                 Task::none()
             }
             Message::AddDiscoveredPeer(fp) => {
-                let peer = self.discovered_peers.iter().find(|p| p.fingerprint == fp).cloned();
+                let peer = self
+                    .discovered_peers
+                    .iter()
+                    .find(|p| p.fingerprint == fp)
+                    .cloned();
                 if let Some(peer) = peer {
                     let alias = peer
                         .display_name
                         .filter(|d| !d.is_empty())
                         .unwrap_or_else(|| peer.username.clone());
-                    Task::perform(add_contact_async(peer.fingerprint, alias), Message::ContactAdded)
+                    Task::perform(
+                        add_contact_async(peer.fingerprint, alias),
+                        Message::ContactAdded,
+                    )
                 } else {
                     Task::none()
                 }
@@ -437,13 +451,18 @@ impl App {
             Message::ContactAdded(result) => {
                 match result {
                     Ok(contact) => {
-                        if !self.contacts.iter().any(|c| c.fingerprint == contact.fingerprint) {
+                        if !self
+                            .contacts
+                            .iter()
+                            .any(|c| c.fingerprint == contact.fingerprint)
+                        {
                             self.contacts.push(contact.clone());
                             self.forms.contact_fingerprint_input.clear();
                             self.forms.contact_alias_input.clear();
 
                             if self.forms.selected_contact_for_chat.is_none() {
-                                self.forms.selected_contact_for_chat = Some(contact.fingerprint.clone());
+                                self.forms.selected_contact_for_chat =
+                                    Some(contact.fingerprint.clone());
                             }
 
                             self.ensure_thread(&contact.fingerprint);
@@ -553,10 +572,8 @@ impl App {
                         self.publish_outgoing_message_to_swarm(&signed);
 
                         if self.network.bittorrent_running {
-                            self.network.last_push_status = format!(
-                                "Pushed message {} to recipient inbox",
-                                signed.message.id
-                            );
+                            self.network.last_push_status =
+                                format!("Pushed message {} to recipient inbox", signed.message.id);
                             self.status_line = "Message sent via BitTorrent push".to_string();
                         } else {
                             self.network.last_push_status =
@@ -660,8 +677,7 @@ impl App {
         let existing = if let Some(sp) = &self.profile {
             format!(
                 "Current profile: @{} ({})",
-                sp.profile.username,
-                sp.profile.fingerprint
+                sp.profile.username, sp.profile.fingerprint
             )
         } else {
             "No profile yet".to_string()
@@ -708,10 +724,7 @@ impl App {
 
                 if self.forms.show_profile_qr {
                     let qr = generate_qr_text(&code);
-                    form = form.push(
-                        container(text(qr).font(Font::MONOSPACE).size(9))
-                            .padding(8),
-                    );
+                    form = form.push(container(text(qr).font(Font::MONOSPACE).size(9)).padding(8));
                 }
             }
         }
@@ -840,9 +853,7 @@ impl App {
                     );
                     let sync = format!(
                         "{} | posts {} | {}",
-                        c.last_sync_label,
-                        c.synced_post_count,
-                        c.profile_summary
+                        c.last_sync_label, c.synced_post_count, c.profile_summary
                     );
                     let err = c
                         .last_sync_error
@@ -897,8 +908,16 @@ impl App {
                     .iter()
                     .map(|m| {
                         let direction = if m.incoming { "IN" } else { "OUT" };
-                        let push = if m.pushed_via_bittorrent { "push" } else { "queued" };
-                        let verified = if m.verified_sender { "verified" } else { "unverified" };
+                        let push = if m.pushed_via_bittorrent {
+                            "push"
+                        } else {
+                            "queued"
+                        };
+                        let verified = if m.verified_sender {
+                            "verified"
+                        } else {
+                            "unverified"
+                        };
                         container(
                             text(format!(
                                 "[{direction}] {} ({push}, {verified}) - {}",
@@ -952,7 +971,10 @@ impl App {
             text(format!("Active swarms: {}", self.network.active_swarms)),
             text(format!("Last push: {}", self.network.last_push_status)),
             text(format!("Last poll: {}", self.network.last_poll_label)),
-            text(format!("Poll interval: {}s", self.network.poll_interval_secs)),
+            text(format!(
+                "Poll interval: {}s",
+                self.network.poll_interval_secs
+            )),
             text("── LAN Discovery ──────────────────────────────────────────").size(13),
             text(format!("LAN discovery: {lan_state}")),
             text(format!(
@@ -1044,8 +1066,11 @@ impl App {
         let mut any_change = false;
         let mut incoming_count = 0u32;
 
-        let contact_fingerprints: Vec<String> =
-            self.contacts.iter().map(|c| c.fingerprint.clone()).collect();
+        let contact_fingerprints: Vec<String> = self
+            .contacts
+            .iter()
+            .map(|c| c.fingerprint.clone())
+            .collect();
         for fp in contact_fingerprints {
             self.ensure_thread(&fp);
         }
@@ -1058,12 +1083,12 @@ impl App {
                     if peer_profile.profile.profile.fingerprint != contact.fingerprint {
                         contact.verification = VerificationState::FingerprintMismatch;
                         contact.trust_score = contact.trust_score.saturating_sub(12);
-                        contact.last_sync_error = Some(
-                            "profile fingerprint does not match contact".to_string(),
-                        );
+                        contact.last_sync_error =
+                            Some("profile fingerprint does not match contact".to_string());
                     } else if peer_profile.profile.verify().unwrap_or(false) {
                         contact.verification = VerificationState::Verified;
-                        contact.known_public_key = Some(peer_profile.profile.profile.public_key.clone());
+                        contact.known_public_key =
+                            Some(peer_profile.profile.profile.public_key.clone());
                         contact.magnet_uri = peer_profile.profile.profile.magnet_uri.clone();
                         contact.profile_summary = format!(
                             "@{} {}",
@@ -1092,19 +1117,20 @@ impl App {
                 }
             }
 
-            let verified_posts = if let Some(peer_posts) = self.transport.load_posts(&contact.fingerprint) {
-                if let Some(pk) = &contact.known_public_key {
-                    peer_posts
-                        .posts
-                        .into_iter()
-                        .filter(|sp| sp.verify(pk).unwrap_or(false))
-                        .collect::<Vec<_>>()
+            let verified_posts =
+                if let Some(peer_posts) = self.transport.load_posts(&contact.fingerprint) {
+                    if let Some(pk) = &contact.known_public_key {
+                        peer_posts
+                            .posts
+                            .into_iter()
+                            .filter(|sp| sp.verify(pk).unwrap_or(false))
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    }
                 } else {
                     Vec::new()
-                }
-            } else {
-                Vec::new()
-            };
+                };
 
             contact.synced_post_count = verified_posts.len();
             contact.latest_post_preview = verified_posts
@@ -1176,7 +1202,8 @@ impl App {
 
         if incoming_count > 0 {
             self.status_line = format!("Synced {} new incoming message(s)", incoming_count);
-            self.network.last_push_status = format!("received {} inbound push message(s)", incoming_count);
+            self.network.last_push_status =
+                format!("received {} inbound push message(s)", incoming_count);
         }
 
         self.network.last_poll_label = ts_label();
@@ -1242,7 +1269,10 @@ impl App {
                 profile: profile.clone(),
                 updated_at: unix_secs(),
             };
-            if let Err(e) = self.transport.save_profile(&profile.profile.fingerprint, &blob) {
+            if let Err(e) = self
+                .transport
+                .save_profile(&profile.profile.fingerprint, &blob)
+            {
                 self.status_line = format!("Profile publish failed: {e}");
             }
         }
@@ -1254,7 +1284,10 @@ impl App {
                 posts: self.local_posts.clone(),
                 updated_at: unix_secs(),
             };
-            if let Err(e) = self.transport.save_posts(&profile.profile.fingerprint, &blob) {
+            if let Err(e) = self
+                .transport
+                .save_posts(&profile.profile.fingerprint, &blob)
+            {
                 self.status_line = format!("Post publish failed: {e}");
             }
         }
@@ -1312,9 +1345,8 @@ impl App {
         let Some(sp) = &self.profile else { return };
         // Use the actual LAN IP of this host rather than 0.0.0.0 so that
         // peers receiving the broadcast can actually connect back.
-        let tcp_addr = transport::local_lan_ip().map(|ip| {
-            format!("{}:{}", ip, transport::LAN_DISCOVERY_PORT - 1)
-        });
+        let tcp_addr = transport::local_lan_ip()
+            .map(|ip| format!("{}:{}", ip, transport::LAN_DISCOVERY_PORT - 1));
         let announce = LanAnnounce {
             fingerprint: sp.profile.fingerprint.clone(),
             username: sp.profile.username.clone(),
@@ -1478,9 +1510,7 @@ fn generate_qr_text(data: &str) -> String {
         Ok(c) => c,
         Err(_) => return "[QR generation failed – data too large]".to_string(),
     };
-    code.render::<unicode::Dense1x2>()
-        .quiet_zone(true)
-        .build()
+    code.render::<unicode::Dense1x2>().quiet_zone(true).build()
 }
 
 /// Decode a base64 invite code and construct a pending `Contact` from it.

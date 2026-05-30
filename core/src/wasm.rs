@@ -1,9 +1,9 @@
-use wasm_bindgen::prelude::*;
-use crate::storage::browser::BrowserStorage;
 use crate::service::{
-    CoreService, CreateProfileRequest, UpdateProfileRequest, ProfileEnvelope, CapabilityDescriptor,
+    CapabilityDescriptor, CoreService, CreateProfileRequest, ProfileEnvelope, UpdateProfileRequest,
 };
+use crate::storage::browser::BrowserStorage;
 use crate::storage::StorageError;
+use wasm_bindgen::prelude::*;
 
 fn storage_err(e: StorageError) -> JsValue {
     JsValue::from_str(&e.to_string())
@@ -59,7 +59,9 @@ impl SnartNetCore {
         display_name: Option<String>,
         bio: Option<String>,
     ) -> Result<(), JsValue> {
-        self.inner.update_profile(display_name, bio).map_err(storage_err)
+        self.inner
+            .update_profile(display_name, bio)
+            .map_err(storage_err)
     }
 
     // ---- Additive JSON-based API (forward-compatible) ----
@@ -116,7 +118,10 @@ impl SnartNetCore {
         tags: Option<Vec<String>>,
         reply_to: Option<String>,
     ) -> Result<JsValue, JsValue> {
-        let signed_post = self.inner.create_post(content, tags, reply_to).map_err(storage_err)?;
+        let signed_post = self
+            .inner
+            .create_post(content, tags, reply_to)
+            .map_err(storage_err)?;
         serde_wasm_bindgen::to_value(&signed_post)
             .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
     }

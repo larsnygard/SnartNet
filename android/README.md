@@ -1,6 +1,13 @@
 # SnartNet Android Shell
 
-This is a minimal Android host app that loads the shared Rust core through JNI.
+This is an Android host app that loads the shared Rust core through JNI.
+It now exposes desktop-parity shell actions for:
+
+- profile create/update/read
+- post and direct-message creation
+- invite export/import
+- QR text generation for invite sharing
+- LAN discovery start/stop/status/peer listing
 
 ## Prerequisites
 
