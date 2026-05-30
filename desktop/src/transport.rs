@@ -377,6 +377,9 @@ pub const LAN_DISCOVERY_PORT: u16 = 47471;
 /// How often (seconds) the local node re-broadcasts its presence.
 const BROADCAST_INTERVAL_SECS: u64 = 30;
 
+/// Milliseconds between shutdown-check iterations inside the sender sleep loop.
+const SHUTDOWN_CHECK_INTERVAL_MS: u64 = 500;
+
 /// Seconds after last-seen before a peer is considered gone.
 const PEER_EXPIRY_SECS: u64 = 120;
 
@@ -461,6 +464,7 @@ impl LanDiscovery {
                             guard.iter_mut().find(|p| p.fingerprint == msg.fingerprint)
                         {
                             existing.last_seen = now;
+                            existing.username.clone_from(&msg.username);
                             existing.tcp_addr.clone_from(&msg.tcp_addr);
                             existing.display_name.clone_from(&msg.display_name);
                         } else {
@@ -472,9 +476,7 @@ impl LanDiscovery {
                                 last_seen: now,
                             });
                         }
-                        guard.retain(|p| {
-                            lan_unix_secs().saturating_sub(p.last_seen) < PEER_EXPIRY_SECS
-                        });
+                        guard.retain(|p| is_peer_fresh(p.last_seen));
                     }
                     Err(_) => {} // read-timeout or error; just loop
                 }
@@ -495,11 +497,12 @@ impl LanDiscovery {
                     let _ = sender.send_to(&payload, broadcast_addr);
                 }
                 // Sleep in short increments so the thread can exit promptly.
-                for _ in 0..(BROADCAST_INTERVAL_SECS * 2) {
+                let checks = BROADCAST_INTERVAL_SECS * 1000 / SHUTDOWN_CHECK_INTERVAL_MS;
+                for _ in 0..checks {
                     if !active_sender.load(Ordering::Relaxed) {
                         return;
                     }
-                    std::thread::sleep(Duration::from_millis(500));
+                    std::thread::sleep(Duration::from_millis(SHUTDOWN_CHECK_INTERVAL_MS));
                 }
             }
         });
@@ -520,9 +523,8 @@ impl LanDiscovery {
 
     /// Return a snapshot of currently-visible peers, evicting stale entries first.
     pub fn get_discovered(&self) -> Vec<DiscoveredPeer> {
-        let now = lan_unix_secs();
         let mut guard = self.peers.lock().unwrap();
-        guard.retain(|p| now.saturating_sub(p.last_seen) < PEER_EXPIRY_SECS);
+        guard.retain(|p| is_peer_fresh(p.last_seen));
         guard.clone()
     }
 }
@@ -533,9 +535,27 @@ impl Default for LanDiscovery {
     }
 }
 
+/// Returns `true` if a peer with the given `last_seen` timestamp is still
+/// within the liveness window (i.e. has not yet expired).
+#[inline]
+fn is_peer_fresh(last_seen: u64) -> bool {
+    lan_unix_secs().saturating_sub(last_seen) < PEER_EXPIRY_SECS
+}
+
 fn lan_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Best-effort attempt to find this host's primary LAN IP address.
+///
+/// Opens a UDP socket, "connects" it to a public address (no packets are
+/// actually sent), then reads the local address the OS assigned.  Returns
+/// `None` on any error so callers can fall back gracefully.
+pub fn local_lan_ip() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    socket.local_addr().ok().map(|a| a.ip())
 }

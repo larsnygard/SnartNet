@@ -32,6 +32,9 @@ const STORAGE_POSTS: &str = "local_posts";
 const STORAGE_CONTACTS: &str = "contacts";
 const STORAGE_THREADS: &str = "threads";
 
+/// Number of characters shown in the truncated invite-code preview.
+const INVITE_CODE_PREVIEW_LENGTH: usize = 60;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Panel {
     #[default]
@@ -680,8 +683,8 @@ impl App {
         if let Some(sp) = &self.profile {
             let invite = ContactInvite::from_signed_profile(sp, None);
             if let Ok(code) = invite.to_base64() {
-                let truncated = if code.len() > 60 {
-                    format!("{}…", &code[..60])
+                let truncated = if code.len() > INVITE_CODE_PREVIEW_LENGTH {
+                    format!("{}…", &code[..INVITE_CODE_PREVIEW_LENGTH])
                 } else {
                     code.clone()
                 };
@@ -1307,7 +1310,11 @@ impl App {
     /// Sets `network.lan_discovery_active` to reflect the outcome.
     fn start_lan_discovery(&mut self) {
         let Some(sp) = &self.profile else { return };
-        let tcp_addr = Some(format!("0.0.0.0:{}", transport::LAN_DISCOVERY_PORT - 1));
+        // Use the actual LAN IP of this host rather than 0.0.0.0 so that
+        // peers receiving the broadcast can actually connect back.
+        let tcp_addr = transport::local_lan_ip().map(|ip| {
+            format!("{}:{}", ip, transport::LAN_DISCOVERY_PORT - 1)
+        });
         let announce = LanAnnounce {
             fingerprint: sp.profile.fingerprint.clone(),
             username: sp.profile.username.clone(),
