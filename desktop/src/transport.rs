@@ -3,7 +3,8 @@ use snartnet_core::{SignedMessage, SignedPost, SignedProfile};
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -364,4 +365,177 @@ fn save_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
 pub fn dedupe_inbox(inbox: &mut SwarmInboxBlob) {
     let mut seen = std::collections::HashSet::new();
     inbox.messages.retain(|m| seen.insert(m.message.id.clone()));
+}
+
+// ---------------------------------------------------------------------------
+// LAN peer discovery (UDP broadcast)
+// ---------------------------------------------------------------------------
+
+/// UDP port used for LAN presence announcements.
+pub const LAN_DISCOVERY_PORT: u16 = 47471;
+
+/// How often (seconds) the local node re-broadcasts its presence.
+const BROADCAST_INTERVAL_SECS: u64 = 30;
+
+/// Seconds after last-seen before a peer is considered gone.
+const PEER_EXPIRY_SECS: u64 = 120;
+
+/// The payload broadcast over UDP so nearby SnartNet peers can discover us.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanAnnounce {
+    pub fingerprint: String,
+    pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// "ip:port" of our TCP sync server so a peer can add us directly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcp_addr: Option<String>,
+}
+
+/// A peer discovered on the local network via UDP broadcast.
+#[derive(Debug, Clone)]
+pub struct DiscoveredPeer {
+    pub fingerprint: String,
+    pub username: String,
+    pub display_name: Option<String>,
+    /// TCP sync address advertised by the peer, if provided.
+    pub tcp_addr: Option<String>,
+    /// Unix-epoch seconds of the most recent announcement.
+    pub last_seen: u64,
+}
+
+/// Manages LAN peer discovery: broadcasts our own presence and listens for
+/// announcements from nearby SnartNet peers.
+///
+/// Discovery state is kept in memory only; it is intentionally separate from
+/// the durable contact/trust data managed by `FileStorage`.
+pub struct LanDiscovery {
+    peers: Arc<Mutex<Vec<DiscoveredPeer>>>,
+    active: Arc<AtomicBool>,
+}
+
+impl LanDiscovery {
+    pub fn new() -> Self {
+        Self {
+            peers: Arc::new(Mutex::new(Vec::new())),
+            active: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Start broadcasting `announce` and listening for other peers.
+    ///
+    /// Returns `true` if both sockets were successfully created.  Returns
+    /// `false` if the listener socket could not be bound (firewall, port
+    /// already in use, etc.) – callers should degrade gracefully.
+    pub fn start(&self, announce: LanAnnounce) -> bool {
+        // Try to bind the listener socket first; bail if this fails so we
+        // don't start a sender without a corresponding receiver.
+        let listener = match std::net::UdpSocket::bind(format!("0.0.0.0:{LAN_DISCOVERY_PORT}")) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let _ = listener.set_read_timeout(Some(Duration::from_millis(500)));
+
+        self.active.store(true, Ordering::Relaxed);
+        let active_listener = self.active.clone();
+        let active_sender = self.active.clone();
+        let peers_listener = self.peers.clone();
+        let own_fp = announce.fingerprint.clone();
+
+        // Listener thread – receives UDP datagrams from peers.
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 2048];
+            while active_listener.load(Ordering::Relaxed) {
+                match listener.recv_from(&mut buf) {
+                    Ok((len, _src)) => {
+                        let Ok(msg) = serde_json::from_slice::<LanAnnounce>(&buf[..len]) else {
+                            continue;
+                        };
+                        // Skip our own broadcasts.
+                        if msg.fingerprint == own_fp {
+                            continue;
+                        }
+                        let now = lan_unix_secs();
+                        let mut guard = peers_listener.lock().unwrap();
+                        if let Some(existing) =
+                            guard.iter_mut().find(|p| p.fingerprint == msg.fingerprint)
+                        {
+                            existing.last_seen = now;
+                            existing.tcp_addr.clone_from(&msg.tcp_addr);
+                            existing.display_name.clone_from(&msg.display_name);
+                        } else {
+                            guard.push(DiscoveredPeer {
+                                fingerprint: msg.fingerprint,
+                                username: msg.username,
+                                display_name: msg.display_name,
+                                tcp_addr: msg.tcp_addr,
+                                last_seen: now,
+                            });
+                        }
+                        guard.retain(|p| {
+                            lan_unix_secs().saturating_sub(p.last_seen) < PEER_EXPIRY_SECS
+                        });
+                    }
+                    Err(_) => {} // read-timeout or error; just loop
+                }
+            }
+        });
+
+        // Sender thread – periodically broadcasts our own presence.
+        std::thread::spawn(move || {
+            let sender = match std::net::UdpSocket::bind("0.0.0.0:0") {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let _ = sender.set_broadcast(true);
+            let broadcast_addr: SocketAddr =
+                format!("255.255.255.255:{LAN_DISCOVERY_PORT}").parse().unwrap();
+            while active_sender.load(Ordering::Relaxed) {
+                if let Ok(payload) = serde_json::to_vec(&announce) {
+                    let _ = sender.send_to(&payload, broadcast_addr);
+                }
+                // Sleep in short increments so the thread can exit promptly.
+                for _ in 0..(BROADCAST_INTERVAL_SECS * 2) {
+                    if !active_sender.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+        });
+
+        true
+    }
+
+    /// Stop broadcasting and listening.  Any already-discovered peers are cleared.
+    pub fn stop(&self) {
+        self.active.store(false, Ordering::Relaxed);
+        self.peers.lock().unwrap().clear();
+    }
+
+    /// Whether discovery threads are currently running.
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::Relaxed)
+    }
+
+    /// Return a snapshot of currently-visible peers, evicting stale entries first.
+    pub fn get_discovered(&self) -> Vec<DiscoveredPeer> {
+        let now = lan_unix_secs();
+        let mut guard = self.peers.lock().unwrap();
+        guard.retain(|p| now.saturating_sub(p.last_seen) < PEER_EXPIRY_SECS);
+        guard.clone()
+    }
+}
+
+impl Default for LanDiscovery {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn lan_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
