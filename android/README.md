@@ -27,6 +27,13 @@ rustup target add aarch64-linux-android
 
 Set `ANDROID_NDK_HOME` if it is not already configured in your environment.
 
+If your environment cannot resolve `dl.google.com`, configure a Google Maven mirror:
+
+- env var: `SNARTNET_GOOGLE_MIRROR_URLS=https://maven.aliyun.com/repository/google`
+- or Gradle property: `-PsnartnetGoogleMirrorUrls=https://maven.aliyun.com/repository/google`
+
+Multiple mirrors are supported as a comma-separated list.
+
 Output APK (debug):
 
 - `android/app/build/outputs/apk/debug/app-debug.apk`
