@@ -17,4 +17,4 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Compile workspace
-        run: cargo build --workspace --locked
+        run: cargo build --workspace

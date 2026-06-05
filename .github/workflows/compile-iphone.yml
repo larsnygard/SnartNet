@@ -19,4 +19,4 @@ jobs:
           targets: aarch64-apple-ios
 
       - name: Compile core for iPhone
-        run: cargo build -p snartnet-core --target aarch64-apple-ios --locked
+        run: cargo build -p snartnet-core --target aarch64-apple-ios
