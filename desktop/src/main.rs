@@ -12,15 +12,21 @@ mod transport;
 
 use iced::{
     time,
-    widget::{button, column, container, row, scrollable, text, text_input},
-    Alignment, Element, Font, Length, Subscription, Task,
+    widget::{button, column, container, image, row, scrollable, svg, text, text_input},
+    Alignment, Element, Length, Subscription, Task,
 };
+use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 use snartnet_core::{
     ContactInvite, FileStorage, KeyPair, Message as CoreMessage, Post, Profile, SignedMessage,
     SignedPost, SignedProfile,
 };
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashSet,
+    io::Cursor,
+    path::PathBuf,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 use transport::{
     dedupe_inbox, DiscoveredPeer, LanAnnounce, LanDiscovery, NetworkTransport, SwarmPostsBlob,
     SwarmProfileBlob, TcpSwarmTransport,
@@ -31,6 +37,8 @@ const STORAGE_PROFILE: &str = "profile";
 const STORAGE_POSTS: &str = "local_posts";
 const STORAGE_CONTACTS: &str = "contacts";
 const STORAGE_THREADS: &str = "threads";
+const AVATAR_PREVIEW_SIZE: f32 = 72.0;
+const LOCAL_SWARM_FILE_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// Number of characters shown in the truncated invite-code preview.
 const INVITE_CODE_PREVIEW_LENGTH: usize = 60;
@@ -85,6 +93,8 @@ struct Contact {
     fingerprint: String,
     alias: String,
     magnet_uri: Option<String>,
+    #[serde(default)]
+    avatar_data_url: Option<String>,
     auto_synced: bool,
     last_sync_label: String,
     profile_summary: String,
@@ -98,6 +108,8 @@ struct Contact {
     #[serde(default)]
     known_public_key: Option<String>,
     #[serde(default)]
+    known_encryption_public_key: Option<String>,
+    #[serde(default)]
     last_sync_error: Option<String>,
 }
 
@@ -107,6 +119,7 @@ impl Default for Contact {
             fingerprint: String::new(),
             alias: String::new(),
             magnet_uri: None,
+            avatar_data_url: None,
             auto_synced: false,
             last_sync_label: String::new(),
             profile_summary: String::new(),
@@ -115,6 +128,7 @@ impl Default for Contact {
             trust_score: default_trust(),
             synced_post_count: 0,
             known_public_key: None,
+            known_encryption_public_key: None,
             last_sync_error: None,
         }
     }
@@ -124,7 +138,14 @@ impl Default for Contact {
 struct ChatItem {
     id: String,
     incoming: bool,
+    /// Stored payload; ciphertext for encrypted messages.
     content: String,
+    #[serde(default)]
+    encrypted: bool,
+    #[serde(default)]
+    encryption_alg: Option<String>,
+    #[serde(default)]
+    nonce_b64: Option<String>,
     pushed_via_bittorrent: bool,
     created_label: String,
     #[serde(default)]
@@ -151,6 +172,16 @@ struct NetworkState {
     discovered_peer_count: usize,
 }
 
+#[derive(Debug, Clone)]
+struct SwarmFileStatus {
+    file_name: String,
+    mode: &'static str,
+    records: usize,
+    connected_peers: usize,
+    seeders: usize,
+    leechers: usize,
+}
+
 impl Default for NetworkState {
     fn default() -> Self {
         Self {
@@ -171,6 +202,8 @@ struct FormState {
     username_input: String,
     display_name_input: String,
     bio_input: String,
+    avatar_path_input: String,
+    avatar_data_url: Option<String>,
     contact_fingerprint_input: String,
     contact_alias_input: String,
     compose_post_input: String,
@@ -203,10 +236,16 @@ enum Message {
     UsernameChanged(String),
     DisplayNameChanged(String),
     BioChanged(String),
+    AvatarPathChanged(String),
+    LoadAvatarFromPath,
+    ClearAvatar,
     SaveProfile,
     ProfileSaved(Result<(KeyPair, SignedProfile), String>),
     ToggleProfileQr,
     CopyInviteCode,
+    SaveQrSvg,
+    SaveQrPng,
+    SaveQrJpg,
 
     ContactFingerprintChanged(String),
     ContactAliasChanged(String),
@@ -224,11 +263,13 @@ enum Message {
     PostCreated(Result<SignedPost, String>),
 
     ComposeMessageChanged(String),
+    ToggleMessageView(String),
     SendMessage,
     MessageSent(Result<SignedMessage, String>),
 
     ToggleBittorrent,
     LanDiscoveryToggle,
+    CleanupLocalFiles,
 }
 
 struct App {
@@ -245,6 +286,8 @@ struct App {
     lan_discovery: LanDiscovery,
     /// Snapshot of LAN-discovered peers, refreshed on every tick.
     discovered_peers: Vec<DiscoveredPeer>,
+    /// Message IDs currently shown as decrypted; runtime only, never persisted.
+    revealed_message_ids: HashSet<String>,
     status_line: String,
 }
 
@@ -271,6 +314,7 @@ impl App {
             transport,
             lan_discovery: LanDiscovery::new(),
             discovered_peers: Vec::new(),
+            revealed_message_ids: HashSet::new(),
             status_line: "Loading local state...".to_string(),
         };
 
@@ -281,10 +325,24 @@ impl App {
         match message {
             Message::StartupLoaded(data) => {
                 self.keypair = data.keypair;
+                if let Some(kp) = &mut self.keypair {
+                    let had_keys = kp.enc_public_key.is_some() && kp.enc_secret_key.is_some();
+                    kp.ensure_encryption_keys();
+                    if !had_keys {
+                        let _ = self.storage.set_json(STORAGE_KEYPAIR, kp);
+                    }
+                }
                 self.profile = data.profile;
                 self.local_posts = data.local_posts;
                 self.contacts = data.contacts;
                 self.threads = data.threads;
+
+                if let Some(sp) = &self.profile {
+                    self.forms.username_input = sp.profile.username.clone();
+                    self.forms.display_name_input = sp.profile.display_name.clone().unwrap_or_default();
+                    self.forms.bio_input = sp.profile.bio.clone().unwrap_or_default();
+                    self.forms.avatar_data_url = sp.profile.avatar_data_url.clone();
+                }
 
                 if self.profile.is_none() {
                     self.panel = Panel::Profile;
@@ -335,17 +393,52 @@ impl App {
                 self.forms.bio_input = v;
                 Task::none()
             }
+            Message::AvatarPathChanged(v) => {
+                self.forms.avatar_path_input = v;
+                Task::none()
+            }
+            Message::LoadAvatarFromPath => {
+                match load_avatar_data_url_from_path(&self.forms.avatar_path_input) {
+                    Ok(data_url) => {
+                        self.forms.avatar_data_url = Some(data_url);
+                        self.status_line = "Profile picture loaded".to_string();
+                    }
+                    Err(e) => {
+                        self.status_line = format!("Profile picture load failed: {e}");
+                    }
+                }
+                Task::none()
+            }
+            Message::ClearAvatar => {
+                self.forms.avatar_data_url = None;
+                self.status_line = "Profile picture cleared".to_string();
+                Task::none()
+            }
             Message::SaveProfile => {
                 let username = self.forms.username_input.clone();
                 let display = non_empty(self.forms.display_name_input.clone());
                 let bio = non_empty(self.forms.bio_input.clone());
+                let avatar_data_url = self.forms.avatar_data_url.clone();
+                let keypair = self.keypair.clone();
+                let existing_profile = self.profile.clone();
 
-                Task::perform(create_profile_async(username, display, bio), Message::ProfileSaved)
+                Task::perform(
+                    create_profile_async(
+                        username,
+                        display,
+                        bio,
+                        avatar_data_url,
+                        keypair,
+                        existing_profile,
+                    ),
+                    Message::ProfileSaved,
+                )
             }
             Message::ProfileSaved(result) => {
                 match result {
                     Ok((kp, sp)) => {
                         self.keypair = Some(kp.clone());
+                        self.forms.avatar_data_url = sp.profile.avatar_data_url.clone();
                         self.profile = Some(sp.clone());
 
                         if let Err(e) = self.storage.set_json(STORAGE_KEYPAIR, &kp) {
@@ -380,6 +473,65 @@ impl App {
                     let invite = ContactInvite::from_signed_profile(sp, None);
                     if let Ok(code) = invite.to_base64() {
                         return iced::clipboard::write::<Message>(code);
+                    }
+                }
+                Task::none()
+            }
+            Message::SaveQrSvg => {
+                if let Some(sp) = &self.profile {
+                    let invite = ContactInvite::from_signed_profile(sp, None);
+                    match invite.to_base64() {
+                        Ok(code) => {
+                            match save_qr_svg(&code) {
+                                Ok(path) => {
+                                    self.status_line = format!("QR saved: {}", path.display());
+                                }
+                                Err(e) => {
+                                    self.status_line = format!("QR save failed: {e}");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.status_line = format!("Invite encode failed: {e}");
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::SaveQrPng => {
+                if let Some(sp) = &self.profile {
+                    let invite = ContactInvite::from_signed_profile(sp, None);
+                    match invite.to_base64() {
+                        Ok(code) => match save_qr_png(&code) {
+                            Ok(path) => {
+                                self.status_line = format!("QR saved: {}", path.display());
+                            }
+                            Err(e) => {
+                                self.status_line = format!("QR save failed: {e}");
+                            }
+                        },
+                        Err(e) => {
+                            self.status_line = format!("Invite encode failed: {e}");
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::SaveQrJpg => {
+                if let Some(sp) = &self.profile {
+                    let invite = ContactInvite::from_signed_profile(sp, None);
+                    match invite.to_base64() {
+                        Ok(code) => match save_qr_jpg(&code) {
+                            Ok(path) => {
+                                self.status_line = format!("QR saved: {}", path.display());
+                            }
+                            Err(e) => {
+                                self.status_line = format!("QR save failed: {e}");
+                            }
+                        },
+                        Err(e) => {
+                            self.status_line = format!("Invite encode failed: {e}");
+                        }
                     }
                 }
                 Task::none()
@@ -504,6 +656,12 @@ impl App {
                 self.forms.compose_message_input = v;
                 Task::none()
             }
+            Message::ToggleMessageView(message_id) => {
+                if !self.revealed_message_ids.remove(&message_id) {
+                    self.revealed_message_ids.insert(message_id);
+                }
+                Task::none()
+            }
             Message::SendMessage => {
                 let recipient = self.forms.selected_contact_for_chat.clone();
                 let content = self.forms.compose_message_input.clone();
@@ -519,8 +677,27 @@ impl App {
                     return Task::none();
                 }
 
+                let recipient = recipient.unwrap_or_default();
+                let recipient_enc_public = self
+                    .contacts
+                    .iter()
+                    .find(|c| c.fingerprint == recipient)
+                    .and_then(|c| c.known_encryption_public_key.clone());
+
+                if recipient_enc_public.is_none() {
+                    self.status_line =
+                        "Recipient profile missing encryption key. Run sync and try again.".to_string();
+                    return Task::none();
+                }
+
                 Task::perform(
-                    create_message_async(sender, recipient.unwrap_or_default(), content, kp),
+                    create_message_async(
+                        sender,
+                        recipient,
+                        content,
+                        kp,
+                        recipient_enc_public.unwrap_or_default(),
+                    ),
                     Message::MessageSent,
                 )
             }
@@ -540,6 +717,9 @@ impl App {
                                     id: signed.message.id.clone(),
                                     incoming: false,
                                     content: signed.message.content.clone(),
+                                    encrypted: signed.message.encrypted,
+                                    encryption_alg: signed.message.body_enc.clone(),
+                                    nonce_b64: signed.message.nonce_b64.clone(),
                                     pushed_via_bittorrent: self.network.bittorrent_running,
                                     created_label: ts_label(),
                                     verified_sender: true,
@@ -597,6 +777,10 @@ impl App {
                         "LAN discovery unavailable (port in use or firewall)".to_string()
                     };
                 }
+                Task::none()
+            }
+            Message::CleanupLocalFiles => {
+                self.cleanup_local_swarm_files();
                 Task::none()
             }
         }
@@ -674,10 +858,37 @@ impl App {
             text_input("Display name", &self.forms.display_name_input)
                 .on_input(Message::DisplayNameChanged),
             text_input("Bio", &self.forms.bio_input).on_input(Message::BioChanged),
+            text_input("Profile picture path (png/jpg/jpeg)", &self.forms.avatar_path_input)
+                .on_input(Message::AvatarPathChanged),
+            row![
+                button("Load picture").on_press(Message::LoadAvatarFromPath),
+                button("Clear picture").on_press(Message::ClearAvatar),
+            ]
+            .spacing(8),
             button("Save profile").on_press(Message::SaveProfile),
         ]
         .spacing(10)
         .max_width(620);
+
+        let profile_avatar = self
+            .forms
+            .avatar_data_url
+            .as_deref()
+            .or_else(|| self.profile.as_ref().and_then(|sp| sp.profile.avatar_data_url.as_deref()));
+        if let Some(data_url) = profile_avatar {
+            if let Some(handle) = image_handle_from_data_url(data_url) {
+                form = form.push(
+                    row![
+                        text("Profile picture:").size(13),
+                        image(handle)
+                            .width(AVATAR_PREVIEW_SIZE)
+                            .height(AVATAR_PREVIEW_SIZE),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+            }
+        }
 
         // ── Invite code + QR ──────────────────────────────────────────────
         if let Some(sp) = &self.profile {
@@ -695,6 +906,9 @@ impl App {
                         row![
                             text(format!("Invite code: {truncated}")).size(12),
                             button("Copy").on_press(Message::CopyInviteCode),
+                            button("Save SVG").on_press(Message::SaveQrSvg),
+                            button("Save PNG").on_press(Message::SaveQrPng),
+                            button("Save JPG").on_press(Message::SaveQrJpg),
                             button(if self.forms.show_profile_qr {
                                 "Hide QR"
                             } else {
@@ -707,11 +921,8 @@ impl App {
                     );
 
                 if self.forms.show_profile_qr {
-                    let qr = generate_qr_text(&code);
-                    form = form.push(
-                        container(text(qr).font(Font::MONOSPACE).size(9))
-                            .padding(8),
-                    );
+                    let qr = generate_qr_svg_handle(&code);
+                    form = form.push(container(svg(qr).width(280).height(280)).padding(8));
                 }
             }
         }
@@ -860,6 +1071,19 @@ impl App {
                     ]
                     .spacing(4);
 
+                    if let Some(data_url) = &c.avatar_data_url {
+                        if let Some(handle) = image_handle_from_data_url(data_url) {
+                            body = body.push(
+                                row![
+                                    text("Picture:").size(12),
+                                    image(handle).width(44).height(44),
+                                ]
+                                .spacing(8)
+                                .align_y(Alignment::Center),
+                            );
+                        }
+                    }
+
                     if !err.is_empty() {
                         body = body.push(text(err).size(12));
                     }
@@ -876,6 +1100,9 @@ impl App {
     fn view_messages(&self) -> Element<'_, Message> {
         let selected = self.forms.selected_contact_for_chat.as_ref();
         let contact = selected.and_then(|fp| self.contacts.iter().find(|c| &c.fingerprint == fp));
+        let recipient_has_encryption_key = contact
+            .and_then(|c| c.known_encryption_public_key.as_ref())
+            .is_some();
 
         let contact_line = if let Some(c) = contact {
             format!(
@@ -892,6 +1119,7 @@ impl App {
         let thread_messages: Vec<Element<Message>> = selected
             .and_then(|fp| self.threads.iter().find(|t| &t.contact_fingerprint == fp))
             .map(|thread| {
+                let peer_enc_public = contact.and_then(|c| c.known_encryption_public_key.as_deref());
                 thread
                     .messages
                     .iter()
@@ -899,15 +1127,58 @@ impl App {
                         let direction = if m.incoming { "IN" } else { "OUT" };
                         let push = if m.pushed_via_bittorrent { "push" } else { "queued" };
                         let verified = if m.verified_sender { "verified" } else { "unverified" };
-                        container(
+
+                        let show_decrypted = self.revealed_message_ids.contains(&m.id);
+                        let body = if m.encrypted {
+                            if show_decrypted {
+                                decrypt_for_display(m, self.keypair.as_ref(), peer_enc_public)
+                                    .unwrap_or_else(|e| {
+                                    format!("[decrypt failed: {e}]")
+                                })
+                            } else {
+                                format!("[ciphertext] {}", short_payload(&m.content))
+                            }
+                        } else {
+                            m.content.clone()
+                        };
+
+                        let enc_meta = if m.encrypted {
+                            format!(
+                                ", enc={}{}",
+                                m.encryption_alg
+                                    .as_deref()
+                                    .unwrap_or("unknown"),
+                                m.nonce_b64
+                                    .as_ref()
+                                    .map(|n| format!(", nonce={}", short_payload(n)))
+                                    .unwrap_or_default()
+                            )
+                        } else {
+                            String::new()
+                        };
+
+                        let mut message_row = row![
                             text(format!(
-                                "[{direction}] {} ({push}, {verified}) - {}",
-                                m.content, m.created_label
+                                "[{direction}] {} ({push}, {verified}{enc_meta}) - {}",
+                                body, m.created_label
                             ))
-                            .size(14),
-                        )
-                        .padding(6)
-                        .into()
+                            .size(14)
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center);
+
+                        if m.encrypted {
+                            message_row = message_row.push(
+                                button(if show_decrypted {
+                                    "Show encrypted"
+                                } else {
+                                    "Show decrypted"
+                                })
+                                .on_press(Message::ToggleMessageView(m.id.clone())),
+                            );
+                        }
+
+                        container(message_row).padding(6).into()
                     })
                     .collect()
             })
@@ -919,13 +1190,28 @@ impl App {
             scrollable(column(thread_messages).spacing(6)).into()
         };
 
+        let send_status = if contact.is_none() {
+            "Select a contact to message".to_string()
+        } else if recipient_has_encryption_key {
+            "Recipient encryption key ready".to_string()
+        } else {
+            "Recipient encryption key missing: run sync before sending".to_string()
+        };
+
+        let send_button = if contact.is_some() && recipient_has_encryption_key {
+            button("Send (BitTorrent push)").on_press(Message::SendMessage)
+        } else {
+            button("Send (BitTorrent push)")
+        };
+
         column![
             text("Messaging").size(28),
             text(contact_line).size(14),
+            text(send_status).size(12),
             list,
             text_input("Type a message", &self.forms.compose_message_input)
                 .on_input(Message::ComposeMessageChanged),
-            button("Send (BitTorrent push)").on_press(Message::SendMessage),
+            send_button,
         ]
         .spacing(10)
         .padding(16)
@@ -945,14 +1231,56 @@ impl App {
             "Inactive"
         };
 
+        let configured_peers = configured_peer_count();
+        let connected_peers = self.network.peers as usize;
+        let swarm_rows = self.build_swarm_file_rows(connected_peers);
+        let swarm_list: Element<Message> = if swarm_rows.is_empty() {
+            text("No swarm files yet").size(12).into()
+        } else {
+            let items: Vec<Element<Message>> = swarm_rows
+                .into_iter()
+                .map(|row_data| {
+                    row![
+                        container(text(row_data.file_name).size(12)).width(Length::Fixed(220.0)),
+                        container(text(row_data.mode).size(12)).width(Length::Fixed(110.0)),
+                        container(text(row_data.records.to_string()).size(12))
+                            .width(Length::Fixed(90.0)),
+                        container(text(row_data.connected_peers.to_string()).size(12))
+                            .width(Length::Fixed(130.0)),
+                        container(text(row_data.seeders.to_string()).size(12))
+                            .width(Length::Fixed(90.0)),
+                        container(text(row_data.leechers.to_string()).size(12))
+                            .width(Length::Fixed(90.0)),
+                    ]
+                    .spacing(8)
+                    .into()
+                })
+                .collect();
+            scrollable(column(items).spacing(6).max_width(1000))
+                .height(220)
+                .into()
+        };
+
         column![
             text("Network status").size(28),
             text(format!("BitTorrent transport: {state}")),
             text(format!("Connected peers: {}", self.network.peers)),
+            text(format!("Configured peers: {configured_peers}")),
             text(format!("Active swarms: {}", self.network.active_swarms)),
             text(format!("Last push: {}", self.network.last_push_status)),
             text(format!("Last poll: {}", self.network.last_poll_label)),
             text(format!("Poll interval: {}s", self.network.poll_interval_secs)),
+            text("── Shared / Downloaded Swarm Files ───────────────────────").size(13),
+            row![
+                container(text("File").size(12)).width(Length::Fixed(220.0)),
+                container(text("Mode").size(12)).width(Length::Fixed(110.0)),
+                container(text("Records").size(12)).width(Length::Fixed(90.0)),
+                container(text("Connected").size(12)).width(Length::Fixed(130.0)),
+                container(text("Seeders").size(12)).width(Length::Fixed(90.0)),
+                container(text("Leechers").size(12)).width(Length::Fixed(90.0)),
+            ]
+            .spacing(8),
+            swarm_list,
             text("── LAN Discovery ──────────────────────────────────────────").size(13),
             text(format!("LAN discovery: {lan_state}")),
             text(format!(
@@ -973,12 +1301,184 @@ impl App {
                     "Start LAN discovery"
                 })
                 .on_press(Message::LanDiscoveryToggle),
+                button("Cleanup local files").on_press(Message::CleanupLocalFiles),
             ]
             .spacing(8),
         ]
         .spacing(10)
         .padding(16)
         .into()
+    }
+
+    fn build_swarm_file_rows(&self, connected_peers: usize) -> Vec<SwarmFileStatus> {
+        let mut rows = Vec::new();
+
+        if let Some(sp) = &self.profile {
+            let fp = &sp.profile.fingerprint;
+            rows.push(SwarmFileStatus {
+                file_name: format!("profile_{}.json", short_fp(fp)),
+                mode: "shared",
+                records: 1,
+                connected_peers,
+                seeders: connected_peers.saturating_add(1),
+                leechers: 0,
+            });
+
+            rows.push(SwarmFileStatus {
+                file_name: format!("posts_{}.json", short_fp(fp)),
+                mode: "shared",
+                records: self.local_posts.len(),
+                connected_peers,
+                seeders: connected_peers.saturating_add(1),
+                leechers: 0,
+            });
+
+            let inbox_count = self
+                .transport
+                .load_inbox(fp)
+                .map(|b| b.messages.len())
+                .unwrap_or(0);
+            rows.push(SwarmFileStatus {
+                file_name: format!("inbox_{}.json", short_fp(fp)),
+                mode: "downloaded",
+                records: inbox_count,
+                connected_peers,
+                seeders: connected_peers,
+                leechers: 1,
+            });
+        }
+
+        for c in &self.contacts {
+            rows.push(SwarmFileStatus {
+                file_name: format!("profile_{}.json", short_fp(&c.fingerprint)),
+                mode: "downloaded",
+                records: 1,
+                connected_peers,
+                seeders: connected_peers,
+                leechers: 1,
+            });
+            rows.push(SwarmFileStatus {
+                file_name: format!("posts_{}.json", short_fp(&c.fingerprint)),
+                mode: "downloaded",
+                records: c.synced_post_count,
+                connected_peers,
+                seeders: connected_peers,
+                leechers: 1,
+            });
+            let outbound_for_contact = self
+                .threads
+                .iter()
+                .find(|t| t.contact_fingerprint == c.fingerprint)
+                .map(|t| t.messages.iter().filter(|m| !m.incoming).count())
+                .unwrap_or(0);
+            rows.push(SwarmFileStatus {
+                file_name: format!("inbox_{}.json", short_fp(&c.fingerprint)),
+                mode: "shared",
+                records: outbound_for_contact,
+                connected_peers,
+                seeders: connected_peers.saturating_add(1),
+                leechers: 0,
+            });
+        }
+
+        rows
+    }
+
+    fn cleanup_local_swarm_files(&mut self) {
+        let swarm_dir = match local_swarm_dir() {
+            Ok(path) => path,
+            Err(e) => {
+                self.status_line = format!("Cleanup failed: {e}");
+                return;
+            }
+        };
+
+        let active_files = self.active_swarm_filenames();
+        let now = SystemTime::now();
+        let mut removed = 0usize;
+        let mut skipped_recent = 0usize;
+        let mut errors = 0usize;
+
+        let entries = match std::fs::read_dir(&swarm_dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                self.status_line = format!("Cleanup failed to read swarm dir: {e}");
+                return;
+            }
+        };
+
+        for entry in entries {
+            let Ok(entry) = entry else {
+                errors = errors.saturating_add(1);
+                continue;
+            };
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let Some(file_name) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+            else {
+                continue;
+            };
+
+            let is_swarm_json = (file_name.starts_with("profile_")
+                || file_name.starts_with("posts_")
+                || file_name.starts_with("inbox_"))
+                && file_name.ends_with(".json");
+            if !is_swarm_json || active_files.contains(&file_name) {
+                continue;
+            }
+
+            let modified = match entry.metadata().and_then(|m| m.modified()) {
+                Ok(modified) => modified,
+                Err(_) => {
+                    errors = errors.saturating_add(1);
+                    continue;
+                }
+            };
+
+            let age_secs = now
+                .duration_since(modified)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if age_secs < LOCAL_SWARM_FILE_RETENTION_SECS {
+                skipped_recent = skipped_recent.saturating_add(1);
+                continue;
+            }
+
+            match std::fs::remove_file(&path) {
+                Ok(_) => removed = removed.saturating_add(1),
+                Err(_) => errors = errors.saturating_add(1),
+            }
+        }
+
+        self.status_line = format!(
+            "Cleanup complete: removed {removed}, kept recent inactive {skipped_recent}, errors {errors}"
+        );
+    }
+
+    fn active_swarm_filenames(&self) -> HashSet<String> {
+        let mut active = HashSet::new();
+
+        if let Some(profile) = &self.profile {
+            let fp = &profile.profile.fingerprint;
+            active.insert(format!("profile_{fp}.json"));
+            active.insert(format!("posts_{fp}.json"));
+            active.insert(format!("inbox_{fp}.json"));
+        }
+
+        for contact in &self.contacts {
+            let fp = &contact.fingerprint;
+            active.insert(format!("profile_{fp}.json"));
+            active.insert(format!("posts_{fp}.json"));
+            active.insert(format!("inbox_{fp}.json"));
+        }
+
+        active
     }
 
     fn view_feed(&self) -> Element<'_, Message> {
@@ -1064,7 +1564,10 @@ impl App {
                     } else if peer_profile.profile.verify().unwrap_or(false) {
                         contact.verification = VerificationState::Verified;
                         contact.known_public_key = Some(peer_profile.profile.profile.public_key.clone());
+                        contact.known_encryption_public_key =
+                            peer_profile.profile.profile.encryption_public_key.clone();
                         contact.magnet_uri = peer_profile.profile.profile.magnet_uri.clone();
+                        contact.avatar_data_url = peer_profile.profile.profile.avatar_data_url.clone();
                         contact.profile_summary = format!(
                             "@{} {}",
                             peer_profile.profile.profile.username,
@@ -1135,6 +1638,9 @@ impl App {
                         id: msg.message.id.clone(),
                         incoming: true,
                         content: msg.message.content.clone(),
+                        encrypted: msg.message.encrypted,
+                        encryption_alg: msg.message.body_enc.clone(),
+                        nonce_b64: msg.message.nonce_b64.clone(),
                         pushed_via_bittorrent: true,
                         created_label: ts_label(),
                         verified_sender,
@@ -1362,6 +1868,9 @@ async fn create_profile_async(
     username: String,
     display_name: Option<String>,
     bio: Option<String>,
+    avatar_data_url: Option<String>,
+    keypair: Option<KeyPair>,
+    existing_profile: Option<SignedProfile>,
 ) -> Result<(KeyPair, SignedProfile), String> {
     if username.len() < 3 || username.len() > 32 {
         return Err("Username must be 3-32 characters".to_string());
@@ -1370,9 +1879,32 @@ async fn create_profile_async(
         return Err("Username may only contain letters, digits and underscore".to_string());
     }
 
-    let kp = KeyPair::generate()?;
-    let mut profile = Profile::new(username, kp.get_public_info());
-    profile.update(display_name, bio);
+    let mut kp = if let Some(existing) = keypair {
+        existing
+    } else {
+        KeyPair::generate()?
+    };
+    kp.ensure_encryption_keys();
+
+    let mut profile = if let Some(existing) = existing_profile {
+        let mut p = existing.profile;
+        p.username = username;
+        p.update(display_name, bio);
+        p
+    } else {
+        let mut p = Profile::new(username, kp.get_public_info());
+        p.update(display_name, bio);
+        p
+    };
+
+    profile.avatar_hash = avatar_data_url
+        .as_ref()
+        .map(|v| blake3::hash(v.as_bytes()).to_hex().to_string());
+    profile.avatar_data_url = avatar_data_url;
+    profile.encryption_public_key = kp.enc_public_key.clone();
+    // magnet_uri is derived after signing and must not be in signed bytes.
+    profile.magnet_uri = None;
+
     let mut signed = SignedProfile::create(profile, &kp)?;
     signed.profile.magnet_uri = Some(signed.profile.generate_magnet_uri());
     Ok((kp, signed))
@@ -1394,6 +1926,7 @@ async fn add_contact_async(fingerprint: String, alias: String) -> Result<Contact
         fingerprint: fp,
         alias,
         magnet_uri: None,
+        avatar_data_url: None,
         auto_synced: false,
         last_sync_label: "pending".to_string(),
         profile_summary: "Awaiting peer profile sync".to_string(),
@@ -1402,6 +1935,7 @@ async fn add_contact_async(fingerprint: String, alias: String) -> Result<Contact
         trust_score: default_trust(),
         synced_post_count: 0,
         known_public_key: None,
+        known_encryption_public_key: None,
         last_sync_error: None,
     })
 }
@@ -1424,13 +1958,21 @@ async fn create_message_async(
     recipient_fingerprint: String,
     content: String,
     keypair: Option<KeyPair>,
+    recipient_encryption_public_key: String,
 ) -> Result<SignedMessage, String> {
-    let kp = keypair.ok_or("No keypair available")?;
+    let mut kp = keypair.ok_or("No keypair available")?;
+    kp.ensure_encryption_keys();
     if content.trim().is_empty() {
         return Err("Message cannot be empty".to_string());
     }
 
-    let msg = CoreMessage::new_direct(sender_fingerprint, recipient_fingerprint, content);
+    let (ciphertext_b64, nonce_b64, alg) =
+        kp.encrypt_for_recipient(&recipient_encryption_public_key, &content)?;
+
+    let mut msg = CoreMessage::new_direct(sender_fingerprint, recipient_fingerprint, ciphertext_b64);
+    msg.encrypted = true;
+    msg.body_enc = Some(alg);
+    msg.nonce_b64 = Some(nonce_b64);
     SignedMessage::create(msg, &kp)
 }
 
@@ -1454,6 +1996,37 @@ fn short_fp(fp: &str) -> String {
     format!("{}...{}", &fp[..8], &fp[fp.len() - 4..])
 }
 
+fn short_payload(payload: &str) -> String {
+    const PREVIEW: usize = 28;
+    if payload.len() <= PREVIEW {
+        payload.to_string()
+    } else {
+        format!("{}...", &payload[..PREVIEW])
+    }
+}
+
+fn decrypt_for_display(
+    item: &ChatItem,
+    keypair: Option<&KeyPair>,
+    peer_enc_public_key: Option<&str>,
+) -> Result<String, String> {
+    if !item.encrypted {
+        return Ok(item.content.clone());
+    }
+
+    if !item.verified_sender {
+        return Err("sender signature not verified".to_string());
+    }
+
+    let kp = keypair.ok_or_else(|| "missing local keypair".to_string())?;
+    let peer_key = peer_enc_public_key.ok_or_else(|| "missing peer encryption key".to_string())?;
+    let nonce = item
+        .nonce_b64
+        .as_deref()
+        .ok_or_else(|| "missing nonce".to_string())?;
+    kp.decrypt_from_peer(peer_key, nonce, &item.content)
+}
+
 fn ts_label() -> String {
     format!("t={}", unix_secs())
 }
@@ -1465,22 +2038,123 @@ fn unix_secs() -> u64 {
         .as_secs()
 }
 
-/// Render `data` as a monospace Unicode QR code string suitable for display
-/// in an iced `text()` widget with `Font::MONOSPACE`.
-///
-/// Returns a placeholder string on error (e.g. data too large for any QR
-/// version).
-fn generate_qr_text(data: &str) -> String {
-    use qrcode::render::unicode;
-    use qrcode::{EcLevel, QrCode};
+fn configured_peer_count() -> usize {
+    std::env::var("SNARTNET_PEERS")
+        .ok()
+        .map(|v| v.split(',').filter(|p| !p.trim().is_empty()).count())
+        .unwrap_or(0)
+}
 
-    let code = match QrCode::with_error_correction_level(data.as_bytes(), EcLevel::L) {
-        Ok(c) => c,
-        Err(_) => return "[QR generation failed – data too large]".to_string(),
-    };
-    code.render::<unicode::Dense1x2>()
+fn local_swarm_dir() -> Result<PathBuf, String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "Cannot determine home directory".to_string())?;
+    let root = PathBuf::from(home).join(".snartnet").join("swarm");
+    std::fs::create_dir_all(&root).map_err(|e| format!("failed to create swarm dir: {e}"))?;
+    Ok(root)
+}
+
+fn app_output_dir() -> PathBuf {
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        let downloads = PathBuf::from(home).join("Downloads");
+        if downloads.is_dir() {
+            return downloads;
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir())
+}
+
+fn qr_export_path(ext: &str) -> PathBuf {
+    app_output_dir().join(format!("snartnet-invite-{}.{}", unix_secs(), ext))
+}
+
+fn qr_code_from_data(data: &str) -> Result<qrcode::QrCode, String> {
+    qrcode::QrCode::with_error_correction_level(data.as_bytes(), qrcode::EcLevel::L)
+        .map_err(|e| format!("QR generation failed: {e}"))
+}
+
+fn render_qr_svg_string(data: &str) -> Result<String, String> {
+    use qrcode::render::svg as qrcode_svg;
+
+    let code = qr_code_from_data(data)?;
+    Ok(code
+        .render::<qrcode_svg::Color>()
         .quiet_zone(true)
-        .build()
+        .min_dimensions(280, 280)
+        .dark_color(qrcode_svg::Color("#000000"))
+        .light_color(qrcode_svg::Color("#ffffff"))
+        .build())
+}
+
+fn save_qr_svg(data: &str) -> Result<PathBuf, String> {
+    let path = qr_export_path("svg");
+    let svg = render_qr_svg_string(data)?;
+    std::fs::write(&path, svg).map_err(|e| format!("write failed: {e}"))?;
+    Ok(path)
+}
+
+fn save_qr_png(data: &str) -> Result<PathBuf, String> {
+    let path = qr_export_path("png");
+    let code = qr_code_from_data(data)?;
+    let image = code
+        .render::<::image::Luma<u8>>()
+        .quiet_zone(true)
+        .min_dimensions(640, 640)
+        .build();
+    image
+        .save(&path)
+        .map_err(|e| format!("png save failed: {e}"))?;
+    Ok(path)
+}
+
+fn save_qr_jpg(data: &str) -> Result<PathBuf, String> {
+    let path = qr_export_path("jpg");
+    let code = qr_code_from_data(data)?;
+    let image = code
+        .render::<::image::Luma<u8>>()
+        .quiet_zone(true)
+        .min_dimensions(640, 640)
+        .build();
+    let dynimg = ::image::DynamicImage::ImageLuma8(image);
+    dynimg
+        .save_with_format(&path, ::image::ImageFormat::Jpeg)
+        .map_err(|e| format!("jpg save failed: {e}"))?;
+    Ok(path)
+}
+
+fn image_handle_from_data_url(data_url: &str) -> Option<iced::widget::image::Handle> {
+    let (_, b64) = data_url.split_once("base64,")?;
+    let bytes = general_purpose::STANDARD.decode(b64).ok()?;
+    Some(iced::widget::image::Handle::from_bytes(bytes))
+}
+
+fn load_avatar_data_url_from_path(path: &str) -> Result<String, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("empty path".to_string());
+    }
+
+    let img = ::image::open(path).map_err(|e| format!("open failed: {e}"))?;
+    let resized = img.resize(256, 256, ::image::imageops::FilterType::Lanczos3);
+    let mut png = Vec::new();
+    resized
+        .write_to(&mut Cursor::new(&mut png), ::image::ImageFormat::Png)
+        .map_err(|e| format!("encode failed: {e}"))?;
+
+    let b64 = general_purpose::STANDARD.encode(png);
+    Ok(format!("data:image/png;base64,{b64}"))
+}
+
+/// Render `data` as an SVG QR image handle suitable for display in iced.
+fn generate_qr_svg_handle(data: &str) -> svg::Handle {
+    match render_qr_svg_string(data) {
+        Ok(svg_text) => svg::Handle::from_memory(svg_text.into_bytes()),
+        Err(_) => svg::Handle::from_memory(
+            r#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 280 280' width='280' height='280'><rect width='100%' height='100%' fill='white'/><text x='12' y='28' font-size='16' font-family='monospace' fill='black'>QR generation failed</text></svg>"#
+                .as_bytes()
+                .to_vec(),
+        ),
+    }
 }
 
 /// Decode a base64 invite code and construct a pending `Contact` from it.
@@ -1496,6 +2170,7 @@ async fn import_invite_async(code: String) -> Result<Contact, String> {
         fingerprint: invite.fingerprint,
         alias,
         magnet_uri: invite.magnet_uri,
+        avatar_data_url: None,
         auto_synced: false,
         last_sync_label: "pending".to_string(),
         profile_summary: "Awaiting peer profile sync".to_string(),
@@ -1504,6 +2179,7 @@ async fn import_invite_async(code: String) -> Result<Contact, String> {
         trust_score: default_trust(),
         synced_post_count: 0,
         known_public_key: None,
+        known_encryption_public_key: None,
         last_sync_error: None,
     })
 }

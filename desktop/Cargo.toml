@@ -1,6 +1,6 @@
 [package]
 name = "snartnet-desktop"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "SnartNet desktop GUI (iced)"
 license = "AGPL-3.0-only"
@@ -11,7 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 snartnet-core = { path = "../core" }
-iced = { version = "0.13", features = ["tokio"] }
+iced = { version = "0.13", features = ["tokio", "svg", "image"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+base64 = { workspace = true }
+blake3 = { workspace = true }
 qrcode = "0.14"
+image = "0.25"

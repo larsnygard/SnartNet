@@ -1,7 +1,10 @@
 use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
 
 use crate::profile::SignedProfile;
+
+const COMPRESSED_INVITE_PREFIX: &str = "z1_";
 
 /// A shareable invite payload that bundles everything a peer needs to add you
 /// as a contact and start syncing your profile/feed.
@@ -53,16 +56,42 @@ impl ContactInvite {
     /// Encode as URL-safe base64 (no padding) for use in QR codes or text sharing.
     pub fn to_base64(&self) -> Result<String, String> {
         let json = self.to_json()?;
-        Ok(general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes()))
+        let mut encoder = flate2::write::ZlibEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        );
+        encoder
+            .write_all(json.as_bytes())
+            .map_err(|e| format!("invite compression failed: {e}"))?;
+        let compressed = encoder
+            .finish()
+            .map_err(|e| format!("invite compression finalize failed: {e}"))?;
+        Ok(format!(
+            "{COMPRESSED_INVITE_PREFIX}{}",
+            general_purpose::URL_SAFE_NO_PAD.encode(compressed)
+        ))
     }
 
     /// Decode from URL-safe base64 produced by [`to_base64`].
     pub fn from_base64(s: &str) -> Result<Self, String> {
+        let trimmed = s.trim();
+        if let Some(payload) = trimmed.strip_prefix(COMPRESSED_INVITE_PREFIX) {
+            let compressed = general_purpose::URL_SAFE_NO_PAD
+                .decode(payload)
+                .map_err(|e| format!("base64 decode failed: {e}"))?;
+            let mut decoder = flate2::read::ZlibDecoder::new(compressed.as_slice());
+            let mut json = String::new();
+            decoder
+                .read_to_string(&mut json)
+                .map_err(|e| format!("invite decompression failed: {e}"))?;
+            return Self::from_json(&json);
+        }
+
+        // Backward compatibility: accept legacy base64(JSON) invite format.
         let bytes = general_purpose::URL_SAFE_NO_PAD
-            .decode(s.trim())
+            .decode(trimmed)
             .map_err(|e| format!("base64 decode failed: {e}"))?;
-        let json =
-            std::str::from_utf8(&bytes).map_err(|e| format!("utf8 decode failed: {e}"))?;
+        let json = std::str::from_utf8(&bytes).map_err(|e| format!("utf8 decode failed: {e}"))?;
         Self::from_json(json)
     }
 }
@@ -115,15 +144,45 @@ mod tests {
         let sp = make_signed_profile("dave");
         let invite = ContactInvite::from_signed_profile(&sp, None);
         let encoded = invite.to_base64().expect("to_base64");
+        assert!(
+            encoded.starts_with(COMPRESSED_INVITE_PREFIX),
+            "encoded invite should include compressed format prefix"
+        );
         // URL_SAFE_NO_PAD must not contain '=' padding
         assert!(!encoded.contains('='), "URL_SAFE_NO_PAD should have no padding");
         // Only URL-safe characters
         assert!(
-            encoded.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            encoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "encoded string must be URL-safe"
         );
         let restored = ContactInvite::from_base64(&encoded).expect("from_base64");
         assert_eq!(restored, invite);
+    }
+
+    #[test]
+    fn invite_base64_legacy_roundtrip() {
+        let sp = make_signed_profile("legacy");
+        let invite = ContactInvite::from_signed_profile(&sp, None);
+        let json = invite.to_json().expect("json");
+        let legacy = general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes());
+        let restored = ContactInvite::from_base64(&legacy).expect("legacy decode");
+        assert_eq!(restored, invite);
+    }
+
+    #[test]
+    fn invite_base64_compressed_is_shorter_than_legacy() {
+        let sp = make_signed_profile("compressed");
+        let invite =
+            ContactInvite::from_signed_profile(&sp, Some("192.168.1.5:47470".to_string()));
+        let json = invite.to_json().expect("json");
+        let legacy = general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes());
+        let compressed = invite.to_base64().expect("compressed");
+        assert!(
+            compressed.len() < legacy.len(),
+            "compressed invite should be shorter than legacy format"
+        );
     }
 
     #[test]

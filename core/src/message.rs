@@ -10,9 +10,14 @@ pub struct Message {
     pub id: String,
     pub sender_fingerprint: String,
     pub recipient_fingerprint: String,
+    /// Plaintext for legacy messages or ciphertext when `encrypted=true`.
     pub content: String,
     pub created_at: DateTime<Utc>,
     pub encrypted: bool,
+    #[serde(default)]
+    pub body_enc: Option<String>,
+    #[serde(default)]
+    pub nonce_b64: Option<String>,
     pub message_type: MessageType,
 }
 
@@ -41,6 +46,8 @@ impl Message {
             content,
             created_at: Utc::now(),
             encrypted: false, // TODO: Implement encryption
+            body_enc: None,
+            nonce_b64: None,
             message_type: MessageType::Direct,
         }
     }
@@ -58,6 +65,8 @@ impl Message {
             content,
             created_at: Utc::now(),
             encrypted: false, // TODO: Implement encryption
+            body_enc: None,
+            nonce_b64: None,
             message_type: MessageType::Group { group_id },
         }
     }

@@ -14,7 +14,11 @@ pub struct Profile {
     pub display_name: Option<String>,
     pub bio: Option<String>,
     pub avatar_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_data_url: Option<String>,
     pub public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption_public_key: Option<String>,
     pub fingerprint: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -39,7 +43,9 @@ impl Profile {
             display_name: None,
             bio: None,
             avatar_hash: None,
+            avatar_data_url: None,
             public_key: key_info.public_key,
+            encryption_public_key: key_info.encryption_public_key,
             fingerprint: key_info.fingerprint,
             created_at: now,
             updated_at: now,
@@ -103,6 +109,7 @@ struct ProfileData {
     username: String,
     display_name: Option<String>,
     bio: Option<String>,
+    avatar_data_url: Option<String>,
 }
 
 // WASM exports
@@ -119,6 +126,7 @@ pub fn create_profile(profile_data_json: &str) -> Result<JsValue, JsValue> {
     let mut profile = Profile::new(profile_data.username, key_info);
     profile.display_name = profile_data.display_name;
     profile.bio = profile_data.bio;
+    profile.avatar_data_url = profile_data.avatar_data_url;
     
     serde_wasm_bindgen::to_value(&profile)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
@@ -129,6 +137,7 @@ pub fn create_profile(profile_data_json: &str) -> Result<JsValue, JsValue> {
 struct ProfileUpdateData {
     display_name: Option<String>,
     bio: Option<String>,
+    avatar_data_url: Option<String>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -141,6 +150,9 @@ pub fn update_profile(profile_json: &str, update_data_json: &str) -> Result<JsVa
         .map_err(|e| JsValue::from_str(&format!("Invalid update data: {}", e)))?;
 
     profile.update(update_data.display_name, update_data.bio);
+    if update_data.avatar_data_url.is_some() {
+        profile.avatar_data_url = update_data.avatar_data_url;
+    }
     
     serde_wasm_bindgen::to_value(&profile)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))

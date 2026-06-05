@@ -111,3 +111,45 @@ the app.
 | **Manual fingerprint** | Enter fingerprint + alias in the Contacts panel | When you have someone's fingerprint from any out-of-band source |
 | **Import invite code** | Paste a base64 invite code | When someone shares their code via text/email/chat |
 | **LAN peer** | Pick from the discovered-peers list | When both users are on the same Wi-Fi / LAN |
+
+---
+
+## Remote Messaging (Windows ↔ Mac)
+
+Use this when peers are in different cities and not on the same LAN.
+
+### Network setup
+
+Both peers run the desktop app with:
+
+- `SNARTNET_BIND=<public_or_local_bind_ip>:47470`
+- `SNARTNET_PEERS=<peer_ip_or_dns>:47470`
+
+Example:
+
+- Windows: `SNARTNET_BIND=0.0.0.0:47470`
+- Mac: `SNARTNET_BIND=0.0.0.0:47470`
+- Each side sets `SNARTNET_PEERS` to the other side's reachable endpoint.
+
+Requirements:
+
+- TCP port **47470** reachable through firewall/NAT (port-forwarding if behind home routers).
+- At least one side must expose a reachable endpoint for direct peer sync.
+
+### End-to-end test checklist
+
+1. Each peer creates/saves profile and shares invite code/QR.
+2. Import invite code in Contacts panel (`Import invite and subscribe`).
+3. Run sync and confirm contact profile appears (name/fingerprint/avatar).
+4. Open Messages panel and confirm status: `Recipient encryption key ready`.
+5. Send message from peer A to peer B.
+6. Receiver should see ciphertext preview by default (`[ciphertext] ...`).
+7. Click `Show decrypted` to decrypt on demand.
+8. Click `Show encrypted` to return to ciphertext view.
+
+### Security behavior in current desktop client
+
+- Messages are stored as ciphertext at rest.
+- Decrypted text is computed on demand in UI only.
+- Decryption is blocked unless sender signature is verified.
+- If recipient encryption key is missing, send is disabled and UI prompts to sync first.
