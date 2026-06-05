@@ -17,13 +17,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Compile workspace
-        run: cargo build --workspace
+        run: cargo build --workspace --release
 
-      - name: Upload Windows build artifacts
+      - name: Upload Windows release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: snartnet-windows-debug
+          name: snartnet-windows-release
           path: |
-            target/debug/snartnet*.exe
-            target/debug/*.dll
+            target/release/snartnet*.exe
+            target/release/*.dll
           if-no-files-found: error
