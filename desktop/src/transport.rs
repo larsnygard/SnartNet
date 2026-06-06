@@ -66,7 +66,8 @@ pub struct TcpSwarmTransport {
 struct Inner {
     swarm_dir: PathBuf,
     bind_addr: SocketAddr,
-    peers: Vec<SocketAddr>,
+    base_peers: Vec<SocketAddr>,
+    peers: Mutex<Vec<SocketAddr>>,
 }
 
 impl TcpSwarmTransport {
@@ -91,9 +92,32 @@ impl TcpSwarmTransport {
             inner: Arc::new(Inner {
                 swarm_dir,
                 bind_addr,
-                peers,
+                base_peers: peers,
+                peers: Mutex::new(Vec::new()),
             }),
         })
+    }
+
+    pub fn set_peers(&self, peers: Vec<SocketAddr>) {
+        let mut guard = self.inner.peers.lock().unwrap();
+        *guard = peers;
+    }
+
+    pub fn add_peer(&self, peer: SocketAddr) {
+        let mut guard = self.inner.peers.lock().unwrap();
+        if !guard.contains(&peer) {
+            guard.push(peer);
+        }
+    }
+
+    pub fn peer_snapshot(&self) -> Vec<SocketAddr> {
+        let mut peers = self.inner.base_peers.clone();
+        for peer in self.inner.peers.lock().unwrap().iter().copied() {
+            if !peers.contains(&peer) {
+                peers.push(peer);
+            }
+        }
+        peers
     }
 
     pub fn start_server(&self) {
@@ -182,8 +206,8 @@ impl TcpSwarmTransport {
     }
 
     fn fanout_put(&self, req: &TransportRequest) {
-        for peer in &self.inner.peers {
-            let _ = self.request_peer(*peer, req);
+        for peer in self.peer_snapshot() {
+            let _ = self.request_peer(peer, req);
         }
     }
 
@@ -236,11 +260,11 @@ impl NetworkTransport for TcpSwarmTransport {
             return Some(v);
         }
 
-        for peer in &self.inner.peers {
+        for peer in self.peer_snapshot() {
             let req = TransportRequest::GetProfile {
                 fingerprint: fingerprint.to_string(),
             };
-            if let Some(TransportResponse::Profile { blob: Some(blob) }) = self.request_peer(*peer, &req) {
+            if let Some(TransportResponse::Profile { blob: Some(blob) }) = self.request_peer(peer, &req) {
                 let _ = self.save_profile_local(fingerprint, &blob);
                 return Some(blob);
             }
@@ -263,11 +287,11 @@ impl NetworkTransport for TcpSwarmTransport {
             return Some(v);
         }
 
-        for peer in &self.inner.peers {
+        for peer in self.peer_snapshot() {
             let req = TransportRequest::GetPosts {
                 fingerprint: fingerprint.to_string(),
             };
-            if let Some(TransportResponse::Posts { blob: Some(blob) }) = self.request_peer(*peer, &req) {
+            if let Some(TransportResponse::Posts { blob: Some(blob) }) = self.request_peer(peer, &req) {
                 let _ = self.save_posts_local(fingerprint, &blob);
                 return Some(blob);
             }
@@ -289,11 +313,11 @@ impl NetworkTransport for TcpSwarmTransport {
         let mut local = self.load_inbox_local(recipient_fingerprint).unwrap_or_default();
         let mut changed = false;
 
-        for peer in &self.inner.peers {
+        for peer in self.peer_snapshot() {
             let req = TransportRequest::GetInbox {
                 recipient_fingerprint: recipient_fingerprint.to_string(),
             };
-            if let Some(TransportResponse::Inbox { blob: Some(mut remote) }) = self.request_peer(*peer, &req) {
+            if let Some(TransportResponse::Inbox { blob: Some(mut remote) }) = self.request_peer(peer, &req) {
                 let before = local.messages.len();
                 local.messages.append(&mut remote.messages);
                 dedupe_inbox(&mut local);

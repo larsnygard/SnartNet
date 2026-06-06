@@ -359,14 +359,16 @@ impl App {
                 }
 
                 self.recalculate_network();
+                self.refresh_transport_peers_from_discovery();
                 self.run_peer_sync();
                 Task::none()
             }
             Message::Tick(_instant) => {
-                self.run_peer_sync();
                 // Refresh the LAN peer snapshot so the UI stays current.
                 self.discovered_peers = self.lan_discovery.get_discovered();
                 self.network.discovered_peer_count = self.discovered_peers.len();
+                self.refresh_transport_peers_from_discovery();
+                self.run_peer_sync();
                 Task::none()
             }
             Message::RunSyncNow => {
@@ -575,6 +577,7 @@ impl App {
                 Task::none()
             }
             Message::AddDiscoveredPeer(fp) => {
+                self.refresh_transport_peers_from_discovery();
                 let peer = self.discovered_peers.iter().find(|p| p.fingerprint == fp).cloned();
                 if let Some(peer) = peer {
                     let alias = peer
@@ -768,6 +771,7 @@ impl App {
                     self.discovered_peers.clear();
                     self.network.lan_discovery_active = false;
                     self.network.discovered_peer_count = 0;
+                    self.refresh_transport_peers_from_discovery();
                     self.status_line = "LAN discovery stopped".to_string();
                 } else {
                     self.start_lan_discovery();
@@ -1829,6 +1833,21 @@ impl App {
         };
         let started = self.lan_discovery.start(announce);
         self.network.lan_discovery_active = started;
+        self.refresh_transport_peers_from_discovery();
+    }
+
+    fn refresh_transport_peers_from_discovery(&self) {
+        let mut peers = Vec::new();
+
+        for peer in &self.discovered_peers {
+            if let Some(addr) = peer.tcp_addr.as_deref().and_then(|value| value.parse().ok()) {
+                if !peers.contains(&addr) {
+                    peers.push(addr);
+                }
+            }
+        }
+
+        self.transport.set_peers(peers);
     }
 }
 
