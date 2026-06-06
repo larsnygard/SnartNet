@@ -18,8 +18,8 @@ use iced::{
 use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 use snartnet_core::{
-    ContactInvite, FileStorage, KeyPair, Message as CoreMessage, Post, Profile, SignedMessage,
-    SignedPost, SignedProfile,
+    profile_fingerprint_from_magnet_uri, ContactInvite, FileStorage, KeyPair,
+    Message as CoreMessage, Post, Profile, SignedMessage, SignedPost, SignedProfile,
 };
 use std::{
     collections::HashSet,
@@ -61,6 +61,8 @@ enum AddContactMode {
     Manual,
     /// Paste a base64 invite code copied from another user's profile panel.
     Invite,
+    /// Paste a profile magnet URI copied from another user's profile panel.
+    Magnet,
     /// Pick a peer that was discovered via LAN broadcast.
     LanPeer,
 }
@@ -213,6 +215,8 @@ struct FormState {
     add_contact_mode: AddContactMode,
     /// Invite code string pasted by the user.
     invite_code_input: String,
+    /// Profile magnet URI pasted by the user.
+    magnet_uri_input: String,
     /// Whether to show the QR code in the Profile panel.
     show_profile_qr: bool,
 }
@@ -243,6 +247,7 @@ enum Message {
     ProfileSaved(Result<(KeyPair, SignedProfile), String>),
     ToggleProfileQr,
     CopyInviteCode,
+        CopyMagnetUri,
     SaveQrSvg,
     SaveQrPng,
     SaveQrJpg,
@@ -251,9 +256,12 @@ enum Message {
     ContactAliasChanged(String),
     AddContactModeChanged(AddContactMode),
     InviteCodeChanged(String),
+    MagnetUriChanged(String),
     AddContact,
     ImportFromInvite,
     InviteImported(Result<Contact, String>),
+    ImportFromMagnet,
+    MagnetImported(Result<Contact, String>),
     AddDiscoveredPeer(String),
     ContactAdded(Result<Contact, String>),
     SelectChatContact(String),
@@ -479,6 +487,15 @@ impl App {
                 }
                 Task::none()
             }
+            Message::CopyMagnetUri => {
+                if let Some(sp) = &self.profile {
+                    if let Some(uri) = sp.profile.magnet_uri.clone() {
+                        self.status_line = "Profile magnet URI copied".to_string();
+                        return iced::clipboard::write::<Message>(uri);
+                    }
+                }
+                Task::none()
+            }
             Message::SaveQrSvg => {
                 if let Some(sp) = &self.profile {
                     let invite = ContactInvite::from_signed_profile(sp, None);
@@ -555,6 +572,10 @@ impl App {
                 self.forms.invite_code_input = v;
                 Task::none()
             }
+            Message::MagnetUriChanged(v) => {
+                self.forms.magnet_uri_input = v;
+                Task::none()
+            }
             Message::AddContact => {
                 let fp = self.forms.contact_fingerprint_input.clone();
                 let alias = self.forms.contact_alias_input.clone();
@@ -568,6 +589,22 @@ impl App {
                 match result {
                     Ok(contact) => {
                         self.forms.invite_code_input.clear();
+                        return self.update(Message::ContactAdded(Ok(contact)));
+                    }
+                    Err(e) => {
+                        self.status_line = format!("Import failed: {e}");
+                    }
+                }
+                Task::none()
+            }
+            Message::ImportFromMagnet => {
+                let uri = self.forms.magnet_uri_input.clone();
+                Task::perform(import_magnet_async(uri), Message::MagnetImported)
+            }
+            Message::MagnetImported(result) => {
+                match result {
+                    Ok(contact) => {
+                        self.forms.magnet_uri_input.clear();
                         return self.update(Message::ContactAdded(Ok(contact)));
                     }
                     Err(e) => {
@@ -897,6 +934,7 @@ impl App {
         // ── Invite code + QR ──────────────────────────────────────────────
         if let Some(sp) = &self.profile {
             let invite = ContactInvite::from_signed_profile(sp, None);
+            let magnet_uri = sp.profile.magnet_uri.clone().unwrap_or_default();
             if let Ok(code) = invite.to_base64() {
                 let truncated = if code.len() > INVITE_CODE_PREVIEW_LENGTH {
                     format!("{}…", &code[..INVITE_CODE_PREVIEW_LENGTH])
@@ -924,6 +962,23 @@ impl App {
                         .align_y(Alignment::Center),
                     );
 
+                if !magnet_uri.is_empty() {
+                    let truncated_magnet = if magnet_uri.len() > INVITE_CODE_PREVIEW_LENGTH {
+                        format!("{}…", &magnet_uri[..INVITE_CODE_PREVIEW_LENGTH])
+                    } else {
+                        magnet_uri.clone()
+                    };
+
+                    form = form.push(
+                        row![
+                            text(format!("Magnet URI: {truncated_magnet}")).size(12),
+                            button("Copy magnet").on_press(Message::CopyMagnetUri),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    );
+                }
+
                 if self.forms.show_profile_qr {
                     let qr = generate_qr_svg_handle(&code);
                     form = form.push(container(svg(qr).width(280).height(280)).padding(8));
@@ -949,6 +1004,12 @@ impl App {
                 "  Invite code"
             })
             .on_press(Message::AddContactModeChanged(AddContactMode::Invite)),
+            button(if self.forms.add_contact_mode == AddContactMode::Magnet {
+                "▶ Magnet URI"
+            } else {
+                "  Magnet URI"
+            })
+            .on_press(Message::AddContactModeChanged(AddContactMode::Magnet)),
             button(if self.forms.add_contact_mode == AddContactMode::LanPeer {
                 "▶ LAN peers"
             } else {
@@ -980,6 +1041,18 @@ impl App {
                 text_input("Invite code (base64)", &self.forms.invite_code_input)
                     .on_input(Message::InviteCodeChanged),
                 button("Import invite and subscribe").on_press(Message::ImportFromInvite),
+            ]
+            .spacing(10)
+            .max_width(620)
+            .into(),
+
+            AddContactMode::Magnet => column![
+                text("Friends and contacts").size(28),
+                mode_row,
+                text("Paste a profile magnet URI shared by another SnartNet user.").size(13),
+                text_input("Profile magnet URI", &self.forms.magnet_uri_input)
+                    .on_input(Message::MagnetUriChanged),
+                button("Import magnet and subscribe").on_press(Message::ImportFromMagnet),
             ]
             .spacing(10)
             .max_width(620)
@@ -2189,6 +2262,27 @@ async fn import_invite_async(code: String) -> Result<Contact, String> {
         fingerprint: invite.fingerprint,
         alias,
         magnet_uri: invite.magnet_uri,
+        avatar_data_url: None,
+        auto_synced: false,
+        last_sync_label: "pending".to_string(),
+        profile_summary: "Awaiting peer profile sync".to_string(),
+        latest_post_preview: "Awaiting peer post sync".to_string(),
+        verification: VerificationState::Unknown,
+        trust_score: default_trust(),
+        synced_post_count: 0,
+        known_public_key: None,
+        known_encryption_public_key: None,
+        last_sync_error: None,
+    })
+}
+
+async fn import_magnet_async(uri: String) -> Result<Contact, String> {
+    let fingerprint = profile_fingerprint_from_magnet_uri(&uri)?;
+    let alias = short_fp(&fingerprint);
+    Ok(Contact {
+        fingerprint,
+        alias,
+        magnet_uri: Some(uri),
         avatar_data_url: None,
         auto_synced: false,
         last_sync_label: "pending".to_string(),

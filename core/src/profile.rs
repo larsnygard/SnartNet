@@ -78,8 +78,45 @@ impl Profile {
         let hash = hasher.finalize();
         let hash_hex = hex::encode(hash);
         
-        format!("magnet:?xt=urn:btih:{}&dn=profile_{}", hash_hex, self.username)
+        format!(
+            "magnet:?xt=urn:btih:{}&dn=snartnet-profile-{}&x.snartnet.fp={}",
+            hash_hex,
+            self.fingerprint,
+            self.fingerprint
+        )
     }
+}
+
+pub fn profile_fingerprint_from_magnet_uri(uri: &str) -> Result<String, String> {
+    let trimmed = uri.trim();
+    let query = trimmed
+        .strip_prefix("magnet:?")
+        .ok_or_else(|| "invalid magnet uri".to_string())?;
+
+    for part in query.split('&') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+
+        if key == "x.snartnet.fp" && !value.trim().is_empty() {
+            return Ok(value.trim().to_string());
+        }
+
+        if key == "dn" {
+            if let Some(fp) = value.trim().strip_prefix("snartnet-profile-") {
+                if !fp.is_empty() {
+                    return Ok(fp.to_string());
+                }
+            }
+            if let Some(fp) = value.trim().strip_prefix("profile_") {
+                if !fp.is_empty() {
+                    return Ok(fp.to_string());
+                }
+            }
+        }
+    }
+
+    Err("magnet uri does not contain a profile fingerprint".to_string())
 }
 
 impl SignedProfile {

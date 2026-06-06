@@ -103,13 +103,6 @@ impl TcpSwarmTransport {
         *guard = peers;
     }
 
-    pub fn add_peer(&self, peer: SocketAddr) {
-        let mut guard = self.inner.peers.lock().unwrap();
-        if !guard.contains(&peer) {
-            guard.push(peer);
-        }
-    }
-
     pub fn peer_snapshot(&self) -> Vec<SocketAddr> {
         let mut peers = self.inner.base_peers.clone();
         for peer in self.inner.peers.lock().unwrap().iter().copied() {
