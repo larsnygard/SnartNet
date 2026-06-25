@@ -16,11 +16,10 @@ pluginManagement {
     repositories {
         val configuredMirrorUrls = providers.gradleProperty("snartnetGoogleMirrorUrls").orNull
             ?: System.getenv("SNARTNET_GOOGLE_MIRROR_URLS")
-        val mirrorUrls = if (configuredMirrorUrls.isNullOrBlank()) {
-            listOf("https://maven.aliyun.com/repository/google")
-        } else {
-            configuredMirrorUrls.split(",").mapNotNull { it.trim().takeIf(String::isNotEmpty) }
-        }
+        val mirrorUrls = configuredMirrorUrls
+            ?.split(",")
+            ?.mapNotNull { it.trim().takeIf(String::isNotEmpty) }
+            .orEmpty()
         mirrorUrls.forEach { mirrorUrl -> maven(url = uri(mirrorUrl)) }
         google()
         mavenCentral()
@@ -33,11 +32,10 @@ dependencyResolutionManagement {
     repositories {
         val configuredMirrorUrls = providers.gradleProperty("snartnetGoogleMirrorUrls").orNull
             ?: System.getenv("SNARTNET_GOOGLE_MIRROR_URLS")
-        val mirrorUrls = if (configuredMirrorUrls.isNullOrBlank()) {
-            listOf("https://maven.aliyun.com/repository/google")
-        } else {
-            configuredMirrorUrls.split(",").mapNotNull { it.trim().takeIf(String::isNotEmpty) }
-        }
+        val mirrorUrls = configuredMirrorUrls
+            ?.split(",")
+            ?.mapNotNull { it.trim().takeIf(String::isNotEmpty) }
+            .orEmpty()
         mirrorUrls.forEach { mirrorUrl -> maven(url = uri(mirrorUrl)) }
         google()
         mavenCentral()
