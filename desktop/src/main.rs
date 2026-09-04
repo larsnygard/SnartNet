@@ -23,7 +23,6 @@ use snartnet_core::{
 };
 use std::{
     collections::HashSet,
-    env,
     io::Cursor,
     path::PathBuf,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -2299,21 +2298,13 @@ async fn import_magnet_async(uri: String) -> Result<Contact, String> {
 }
 
 fn main() -> iced::Result {
-    configure_linux_wgpu_backend();
-
+    // Let wgpu auto-detect the best available backend (Vulkan/Metal/DX12, falling
+    // back to GL) rather than forcing one. Forcing GL previously caused a panic in
+    // `wgpu-core`'s surface creation on systems where the GL/EGL instance fails to
+    // initialize (its GL instance ends up `None`, which the crate unconditionally
+    // unwraps). Users who need a specific backend can still set `WGPU_BACKEND`.
     iced::application("SnartNet", App::update, App::view)
         .subscription(App::subscription)
         .window_size((1100.0, 760.0))
         .run_with(App::new)
-}
-
-fn configure_linux_wgpu_backend() {
-    #[cfg(target_os = "linux")]
-    {
-        // Vulkan can fail with "Parent device is lost" on some Linux VMs/CI runners.
-        // If the user has not chosen a backend explicitly, prefer OpenGL for stability.
-        if env::var_os("WGPU_BACKEND").is_none() {
-            env::set_var("WGPU_BACKEND", "gl");
-        }
-    }
 }
