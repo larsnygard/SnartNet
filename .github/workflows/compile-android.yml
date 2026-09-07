@@ -59,14 +59,13 @@ jobs:
           cargo build -p snartnet-core --target aarch64-linux-android --release
           cargo build -p snartnet-android-bridge --target aarch64-linux-android --release
 
-      - name: Build release APK
+      - name: Build release App Bundle
         working-directory: android
-        run: |
-          gradle --no-daemon :app:assembleRelease
+        run: gradle --no-daemon :app:bundleRelease
 
-      - name: Upload APK artifact
+      - name: Upload App Bundle artifact
         uses: actions/upload-artifact@v4
         with:
-          name: snartnet-android-release-apk
-          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
+          name: snartnet-android-release-bundle
+          path: android/app/build/outputs/bundle/release/app-release.aab
           if-no-files-found: error
