@@ -1,6 +1,15 @@
 /target/
 /node_modules/
 
+# Runtime identities, local databases, and shared invitation exports are not source.
+/.snartnet/
+/*.db
+/*.db-shm
+/*.db-wal
+/snartnet-invite-*.png
+/snartnet-invite-*.jpg
+/snartnet-invite-*.svg
+
 /PWA/dist/
 /PWA/node_modules/
 

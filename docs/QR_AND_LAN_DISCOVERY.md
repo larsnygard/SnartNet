@@ -1,155 +1,52 @@
-# QR Codes and LAN Discovery
+# Invitations and connectivity
 
-This document describes two new onboarding paths available in the SnartNet
-desktop client: sharing your profile as a **QR code / invite code**, and
-**automatic discovery of nearby SnartNet peers on your local network**.
+The desktop client supports invitation links, saved QR images, manual fingerprints, SnartNet profile magnets, and nearby peer discovery.
 
----
+## Share an invitation
 
-## Invite codes and QR codes
+Save your identity in **My profile**. The invitation card shows a QR code immediately. **Copy invitation link** writes a `snartnet://invite/z1_…` URI to the clipboard. **Save PNG**, **SVG**, and **JPG** export that same URI as a QR image, including a white quiet zone. PNG is recommended for sharing and scanning.
 
-### What is an invite code?
+Exports go to your home `Downloads` directory when it exists, otherwise to the current working directory. The status line shows the exact saved path. No upload or external QR service is involved.
 
-An invite code is a compact, URL-safe string that bundles everything another
-user needs to add you as a contact:
+An invitation contains your fingerprint, username, display name, profile magnet, and a TCP endpoint. It contains no private key. It is a distribution hint: the app still verifies the signed profile before trusting a contact's encryption key.
 
-| Field | Description |
-|---|---|
-| `fingerprint` | Your Ed25519 public-key fingerprint (the durable identity anchor) |
-| `username` | Your chosen username |
-| `display_name` | Optional human-readable name |
-| `magnet_uri` | Magnet link to your profile torrent (if available) |
-| `transport_addr` | Optional LAN address for direct sync |
+The default endpoint uses the local network address and the port from `SNARTNET_BIND`. To connect through a VPN or public endpoint, enter a reachable `IP:port` under **Connection address**, save, and share a fresh link. IPv6 uses `[address]:port`. Reimporting an invitation for an existing contact updates its endpoint without duplicating the contact.
 
-The code is the Base64url (no padding) encoding of a small JSON object.
-Your **signed profile** remains the source of truth; the invite is only a
-distribution wrapper.
+## Add a contact
 
-### Showing your invite code / QR code
+Open **Contacts → Invitation** and paste the entire link or a compressed/legacy invite code. Press Enter or **Add contact & start chatting**. The app stores the endpoint, opens the conversation, and starts syncing.
 
-1. Open the **Profile** panel.
-2. After saving your profile, a row appears at the bottom:
-   - A truncated preview of your invite code.
-   - **Copy** – writes the full invite code to your clipboard.
-   - **Show QR / Hide QR** – toggles a monospace-rendered QR code that any
-     QR-capable device can scan.
+For a QR image, enter the saved PNG/JPG path and choose **Import QR**. QR import searches the image for a valid SnartNet invitation. Invalid or oversized images and malformed invitations produce an error without creating a contact. Live camera scanning is not included.
 
-> **Tip:** Share the invite code via any channel (email, chat, printed paper).
-> The QR code is intended for future mobile clients and any QR reader that
-> understands the `snartnet://` scheme.
+**Fingerprint** and **Magnet** remain available for advanced use. They identify the contact but need discovery or a configured reachable peer to obtain the signed profile. Adding your own invitation is rejected. Send your invitation back so the other person can add you too.
 
-### Adding a contact via invite code
+## Nearby discovery
 
-1. Open the **Contacts** panel.
-2. Click **Invite code** in the mode selector at the top.
-3. Paste the invite code you received into the text field.
-4. Click **Import invite and subscribe**.
+After a profile is saved or loaded, the app announces its fingerprint, username, display name, and TCP address over UDP port **47471** every 30 seconds. **Contacts → Nearby** lists discovered peers. Entries expire after 120 seconds and are not automatically added as contacts. Choosing **Connect** persists that peer's endpoint.
 
-The contact is added through the normal contact workflow – the same sync,
-verification, and trust-scoring pipeline used for manually added contacts.
-The magnet URI from the invite is stored on the contact record so the sync
-engine can locate the peer's profile torrent immediately.
+**Connection → Turn off discovery** stops announcements and clears the list. A listening socket may remain reserved until the app exits to support restarting discovery. Discovery depends on local broadcast support and firewall settings; a blocked or occupied port is reported as inactive. It does not traverse routers. Share an invitation directly if broadcast discovery is unavailable.
 
----
+## Messaging and retry
 
-## LAN peer discovery
+Keep both clients open for the initial profile exchange. Once the recipient's signed profile has been verified, the composer becomes available. Type a message and press Enter or **Send**.
 
-### How it works
+The signed ciphertext is persisted before the draft is cleared. Outgoing messages remain **Queued** until a peer accepts them. Sync retries queued messages every four seconds when enabled, including after restart. **Relayed** acknowledges peer storage only; it does not mean the recipient read or received the message. Peers can also pull the inbox from the sender.
 
-When you have a profile, SnartNet broadcasts a small UDP datagram to
-`255.255.255.255:47471` every 30 seconds.  Each datagram contains your
-fingerprint, username, and display name.  At the same time, SnartNet listens
-on the same port for announcements from other peers on the same network
-segment.
+Inbox updates merge under a write lock and replace the cache atomically. Duplicate envelopes do not produce repeated chat entries or unread counts. Received messages must match both the selected contact's signing identity and the local recipient fingerprint. Invalid signatures are excluded.
 
-Discovered peers are kept in memory only (never written to your contacts file
-automatically) and expire after 120 seconds of silence.
+Plaintext is derived for display and is not stored in newly created chat records. Each message retains the peer encryption key used for that message so later profile changes do not make its history unreadable. Drafts are kept in memory per conversation and do not survive quitting the app.
 
-### Picking a peer from LAN discovery
+**Pause sync** stops outgoing retries and polling. The TCP listener continues to accept inbound requests. It is not a network kill switch.
 
-1. Open the **Contacts** panel.
-2. Click **LAN peers** in the mode selector.
-3. Any nearby SnartNet users appear in the list with their username and a
-   shortened fingerprint.
-4. Click **Add contact** next to a peer to add them through the normal contact
-   workflow.
+## Remote setup
 
-The added contact is synced, verified, and stored exactly like a manually
-added contact.  The LAN-presence metadata (broadcast address, last-seen time)
-is kept separate and does not overwrite the durable contact record.
+The native protocol uses direct TCP, not NAT traversal. At least one participant needs a reachable listening endpoint, and each person must import the other's identity. A VPN or port forwarding may be needed for machines on different networks. There is no managed offline relay service.
 
-### Discovery state
+```bash
+# First instance; choose another root and port for the second instance.
+SNARTNET_HOME=/tmp/snartnet-a SNARTNET_BIND=127.0.0.1:47570 cargo run -p snartnet-desktop
+```
 
-The **Network** panel shows:
+`SNARTNET_PEERS=127.0.0.1:47571` optionally supplies additional endpoints. These settings currently accept literal IP addresses, not DNS names. Endpoint errors and TCP bind failures are shown or reported at startup.
 
-| Field | Meaning |
-|---|---|
-| **LAN discovery** | Active / Inactive |
-| **Nearby peers visible** | Number of peers seen within the last 120 s |
-
-Use the **Start / Stop LAN discovery** button to toggle broadcasting and
-listening without restarting the application.  Discovery starts automatically
-when you load or save a profile; it stops when you click the button or quit
-the app.
-
-### Firewall and privacy notes
-
-- LAN discovery uses UDP port **47471** (one above the TCP sync port 47470).
-- If the port is already in use or blocked by a firewall, discovery silently
-  stays inactive; you can still add contacts manually or via invite code.
-- Broadcasts are limited to your local network segment (they do not traverse
-  routers).
-- No data beyond your fingerprint, username, and display name is broadcast.
-  Your posts and messages are never included in discovery packets.
-
----
-
-## Summary of add-contact paths
-
-| Path | How | When to use |
-|---|---|---|
-| **Manual fingerprint** | Enter fingerprint + alias in the Contacts panel | When you have someone's fingerprint from any out-of-band source |
-| **Import invite code** | Paste a base64 invite code | When someone shares their code via text/email/chat |
-| **LAN peer** | Pick from the discovered-peers list | When both users are on the same Wi-Fi / LAN |
-
----
-
-## Remote Messaging (Windows ↔ Mac)
-
-Use this when peers are in different cities and not on the same LAN.
-
-### Network setup
-
-Both peers run the desktop app with:
-
-- `SNARTNET_BIND=<public_or_local_bind_ip>:47470`
-- `SNARTNET_PEERS=<peer_ip_or_dns>:47470`
-
-Example:
-
-- Windows: `SNARTNET_BIND=0.0.0.0:47470`
-- Mac: `SNARTNET_BIND=0.0.0.0:47470`
-- Each side sets `SNARTNET_PEERS` to the other side's reachable endpoint.
-
-Requirements:
-
-- TCP port **47470** reachable through firewall/NAT (port-forwarding if behind home routers).
-- At least one side must expose a reachable endpoint for direct peer sync.
-
-### End-to-end test checklist
-
-1. Each peer creates/saves profile and shares invite code/QR.
-2. Import invite code in Contacts panel (`Import invite and subscribe`).
-3. Run sync and confirm contact profile appears (name/fingerprint/avatar).
-4. Open Messages panel and confirm status: `Recipient encryption key ready`.
-5. Send message from peer A to peer B.
-6. Receiver should see ciphertext preview by default (`[ciphertext] ...`).
-7. Click `Show decrypted` to decrypt on demand.
-8. Click `Show encrypted` to return to ciphertext view.
-
-### Security behavior in current desktop client
-
-- Messages are stored as ciphertext at rest.
-- Decrypted text is computed on demand in UI only.
-- Decryption is blocked unless sender signature is verified.
-- If recipient encryption key is missing, send is disabled and UI prompts to sync first.
+An app launched with an invitation URI as its first positional argument pre-fills Contacts. Native installers do not yet register the `snartnet://` scheme with operating systems, so clicking a link in another app may require copying and pasting it.

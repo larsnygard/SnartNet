@@ -1,22 +1,24 @@
 use crate::crypto::KeyPair;
-use crate::profile::{Profile, SignedProfile};
-use crate::post::{Post, SignedPost};
 use crate::message::{Message, SignedMessage};
+use crate::post::{Post, SignedPost};
+use crate::profile::{Profile, SignedProfile};
 use crate::storage::{StorageBackend, StorageError};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
 // ----- Shared JSON API structs (additive, forward-compatible) -----
 #[derive(Serialize, Deserialize)]
 pub struct CreateProfileRequest {
     pub username: String,
-    #[serde(rename = "displayName")] pub display_name: Option<String>,
+    #[serde(rename = "displayName")]
+    pub display_name: Option<String>,
     pub bio: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct UpdateProfileRequest {
-    #[serde(rename = "displayName")] pub display_name: Option<String>,
+    #[serde(rename = "displayName")]
+    pub display_name: Option<String>,
     pub bio: Option<String>,
 }
 
@@ -24,16 +26,20 @@ pub struct UpdateProfileRequest {
 pub struct ProfileEnvelope {
     pub profile: Profile,
     pub signature: String,
-    #[serde(rename = "magnetUri")] pub magnet_uri: String,
+    #[serde(rename = "magnetUri")]
+    pub magnet_uri: String,
     pub api: String,
     pub version: u32,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct CapabilityDescriptor {
-    #[serde(rename = "profileJsonApi")] pub profile_json_api: bool,
-    #[serde(rename = "postJsonApi")] pub post_json_api: bool,
-    #[serde(rename = "messageJsonApi")] pub message_json_api: bool,
+    #[serde(rename = "profileJsonApi")]
+    pub profile_json_api: bool,
+    #[serde(rename = "postJsonApi")]
+    pub post_json_api: bool,
+    #[serde(rename = "messageJsonApi")]
+    pub message_json_api: bool,
     pub version: String,
 }
 
@@ -107,9 +113,8 @@ impl<S: StorageBackend> CoreService<S> {
         match (&mut self.current_profile, &self.keypair) {
             (Some(profile), Some(keypair)) => {
                 profile.profile.update(display_name, bio);
-                let mut new_signed =
-                    SignedProfile::create(profile.profile.clone(), keypair)
-                        .map_err(|e| StorageError::Backend(format!("sign failed: {e}")))?;
+                let mut new_signed = SignedProfile::create(profile.profile.clone(), keypair)
+                    .map_err(|e| StorageError::Backend(format!("sign failed: {e}")))?;
                 let magnet_uri = new_signed.profile.generate_magnet_uri();
                 new_signed.profile.magnet_uri = Some(magnet_uri);
                 S::set_json("snartnet_current_profile", &new_signed)?;
@@ -260,10 +265,7 @@ mod tests {
         svc2.init().expect("init failed");
         assert!(svc2.has_profile());
 
-        let magnet2 = svc2
-            .get_profile()
-            .unwrap()
-            .magnet_uri;
+        let magnet2 = svc2.get_profile().unwrap().magnet_uri;
         assert_eq!(magnet1, magnet2);
     }
 
@@ -287,9 +289,7 @@ mod tests {
             .unwrap();
         assert_eq!(post.post.content, "Hello world");
 
-        let msg = svc
-            .create_message("other-fingerprint", "hi")
-            .unwrap();
+        let msg = svc.create_message("other-fingerprint", "hi").unwrap();
         assert_eq!(msg.message.content, "hi");
     }
 }

@@ -1,10 +1,12 @@
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
 use crate::profile::SignedProfile;
 
 const COMPRESSED_INVITE_PREFIX: &str = "z1_";
+const INVITE_URI_PREFIX: &str = "snartnet://invite/";
+const MAX_INVITE_BYTES: usize = 16 * 1024;
 
 /// A shareable invite payload that bundles everything a peer needs to add you
 /// as a contact and start syncing your profile/feed.
@@ -50,16 +52,47 @@ impl ContactInvite {
 
     /// Deserialize from JSON.
     pub fn from_json(s: &str) -> Result<Self, String> {
-        serde_json::from_str(s).map_err(|e| format!("invite parse failed: {e}"))
+        if s.len() > MAX_INVITE_BYTES {
+            return Err("Invite is too large".into());
+        }
+        let invite: Self =
+            serde_json::from_str(s).map_err(|e| format!("invite parse failed: {e}"))?;
+        let fingerprint = general_purpose::STANDARD
+            .decode(&invite.fingerprint)
+            .map_err(|_| "Invalid contact fingerprint")?;
+        if fingerprint.len() != 16 || invite.username.trim().is_empty() {
+            return Err("Invite must contain a valid fingerprint and username".into());
+        }
+        if let Some(addr) = &invite.transport_addr {
+            // Invitations use explicit IP endpoints; no DNS or connection is attempted while parsing.
+            let endpoint: std::net::SocketAddr = addr
+                .parse()
+                .map_err(|_| "Use an IP address and port for the connection address")?;
+            if endpoint.ip().is_unspecified()
+                || endpoint.ip().is_multicast()
+                || endpoint.port() == 0
+            {
+                return Err("Invite connection address is not reachable".into());
+            }
+        }
+        Ok(invite)
+    }
+
+    /// The same URI is copied to the clipboard and encoded in exported QR images.
+    pub fn to_uri(&self) -> Result<String, String> {
+        Ok(format!("{INVITE_URI_PREFIX}{}", self.to_base64()?))
+    }
+
+    /// Accept share links as well as compressed and legacy invitation codes.
+    pub fn parse(input: &str) -> Result<Self, String> {
+        let input = input.trim();
+        Self::from_base64(input.strip_prefix(INVITE_URI_PREFIX).unwrap_or(input))
     }
 
     /// Encode as URL-safe base64 (no padding) for use in QR codes or text sharing.
     pub fn to_base64(&self) -> Result<String, String> {
         let json = self.to_json()?;
-        let mut encoder = flate2::write::ZlibEncoder::new(
-            Vec::new(),
-            flate2::Compression::fast(),
-        );
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
         encoder
             .write_all(json.as_bytes())
             .map_err(|e| format!("invite compression failed: {e}"))?;
@@ -75,11 +108,16 @@ impl ContactInvite {
     /// Decode from URL-safe base64 produced by [`to_base64`].
     pub fn from_base64(s: &str) -> Result<Self, String> {
         let trimmed = s.trim();
+        if trimmed.len() > MAX_INVITE_BYTES {
+            return Err("Invite is too large".into());
+        }
         if let Some(payload) = trimmed.strip_prefix(COMPRESSED_INVITE_PREFIX) {
             let compressed = general_purpose::URL_SAFE_NO_PAD
                 .decode(payload)
                 .map_err(|e| format!("base64 decode failed: {e}"))?;
-            let mut decoder = flate2::read::ZlibDecoder::new(compressed.as_slice());
+            // Bound expanded data too: a tiny compressed payload can otherwise exhaust memory.
+            let mut decoder = flate2::read::ZlibDecoder::new(compressed.as_slice())
+                .take((MAX_INVITE_BYTES + 1) as u64);
             let mut json = String::new();
             decoder
                 .read_to_string(&mut json)
@@ -124,16 +162,14 @@ mod tests {
     #[test]
     fn invite_with_transport_addr() {
         let sp = make_signed_profile("bob");
-        let invite =
-            ContactInvite::from_signed_profile(&sp, Some("192.168.1.5:47470".to_string()));
+        let invite = ContactInvite::from_signed_profile(&sp, Some("192.168.1.5:47470".to_string()));
         assert_eq!(invite.transport_addr.as_deref(), Some("192.168.1.5:47470"));
     }
 
     #[test]
     fn invite_json_roundtrip() {
         let sp = make_signed_profile("carol");
-        let invite =
-            ContactInvite::from_signed_profile(&sp, Some("10.0.0.1:47470".to_string()));
+        let invite = ContactInvite::from_signed_profile(&sp, Some("10.0.0.1:47470".to_string()));
         let json = invite.to_json().expect("to_json");
         let restored = ContactInvite::from_json(&json).expect("from_json");
         assert_eq!(restored, invite);
@@ -149,7 +185,10 @@ mod tests {
             "encoded invite should include compressed format prefix"
         );
         // URL_SAFE_NO_PAD must not contain '=' padding
-        assert!(!encoded.contains('='), "URL_SAFE_NO_PAD should have no padding");
+        assert!(
+            !encoded.contains('='),
+            "URL_SAFE_NO_PAD should have no padding"
+        );
         // Only URL-safe characters
         assert!(
             encoded
@@ -174,8 +213,7 @@ mod tests {
     #[test]
     fn invite_base64_compressed_is_shorter_than_legacy() {
         let sp = make_signed_profile("compressed");
-        let invite =
-            ContactInvite::from_signed_profile(&sp, Some("192.168.1.5:47470".to_string()));
+        let invite = ContactInvite::from_signed_profile(&sp, Some("192.168.1.5:47470".to_string()));
         let json = invite.to_json().expect("json");
         let legacy = general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes());
         let compressed = invite.to_base64().expect("compressed");
@@ -219,5 +257,33 @@ mod tests {
     #[test]
     fn invite_json_rejects_garbage() {
         assert!(ContactInvite::from_json("not json").is_err());
+    }
+    #[test]
+    fn invite_links_accept_unicode_names_and_legacy_codes() {
+        let sp = make_signed_profile("alice");
+        let mut invite = ContactInvite::from_signed_profile(&sp, None);
+        invite.display_name = Some("Åse 🌱".into());
+        assert_eq!(
+            ContactInvite::parse(&invite.to_uri().unwrap()).unwrap(),
+            invite
+        );
+        assert_eq!(
+            ContactInvite::parse(&invite.to_base64().unwrap()).unwrap(),
+            invite
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_expanded_invites_and_invalid_identity() {
+        let sp = make_signed_profile("alice");
+        let mut invite = ContactInvite::from_signed_profile(&sp, None);
+        invite.display_name = Some("a".repeat(MAX_INVITE_BYTES));
+        assert!(ContactInvite::parse(&invite.to_uri().unwrap()).is_err());
+        invite.display_name = None;
+        invite.fingerprint = "not-a-fingerprint".into();
+        assert!(ContactInvite::parse(&invite.to_uri().unwrap()).is_err());
+        invite.fingerprint = sp.profile.fingerprint;
+        invite.transport_addr = Some("0.0.0.0:47470".into());
+        assert!(ContactInvite::parse(&invite.to_uri().unwrap()).is_err());
     }
 }

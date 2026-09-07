@@ -1,11 +1,14 @@
+//! Direct TCP exchange and local cache; this is not a BitTorrent implementation.
+use crate::discovery::{lan_unix_secs, local_lan_ip};
 use serde::{Deserialize, Serialize};
 use snartnet_core::{SignedMessage, SignedPost, SignedProfile};
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+const MAX_PACKET_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmProfileBlob {
@@ -39,19 +42,34 @@ pub trait NetworkTransport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum TransportRequest {
-    GetProfile { fingerprint: String },
-    PutProfile { fingerprint: String, blob: SwarmProfileBlob },
-    GetPosts { fingerprint: String },
-    PutPosts { fingerprint: String, blob: SwarmPostsBlob },
-    GetInbox { recipient_fingerprint: String },
-    PutInbox { recipient_fingerprint: String, blob: SwarmInboxBlob },
+    GetProfile {
+        fingerprint: String,
+    },
+    PutProfile {
+        fingerprint: String,
+        blob: Box<SwarmProfileBlob>,
+    },
+    GetPosts {
+        fingerprint: String,
+    },
+    PutPosts {
+        fingerprint: String,
+        blob: SwarmPostsBlob,
+    },
+    GetInbox {
+        recipient_fingerprint: String,
+    },
+    PutInbox {
+        recipient_fingerprint: String,
+        blob: SwarmInboxBlob,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum TransportResponse {
     Ok,
-    Profile { blob: Option<SwarmProfileBlob> },
+    Profile { blob: Option<Box<SwarmProfileBlob>> },
     Posts { blob: Option<SwarmPostsBlob> },
     Inbox { blob: Option<SwarmInboxBlob> },
     Err { message: String },
@@ -68,9 +86,25 @@ struct Inner {
     bind_addr: SocketAddr,
     base_peers: Vec<SocketAddr>,
     peers: Mutex<Vec<SocketAddr>>,
+    /// Serializes read/merge/replace inbox updates from the listener and sync worker.
+    writes: Mutex<()>,
 }
 
 impl TcpSwarmTransport {
+    #[cfg(test)]
+    pub(crate) fn for_test(root: &Path) -> Self {
+        std::fs::create_dir_all(root).unwrap();
+        Self {
+            inner: Arc::new(Inner {
+                swarm_dir: root.into(),
+                bind_addr: "127.0.0.1:0".parse().unwrap(),
+                base_peers: Vec::new(),
+                peers: Mutex::new(Vec::new()),
+                writes: Mutex::new(()),
+            }),
+        }
+    }
+
     pub fn from_env() -> Result<Self, String> {
         let bind_addr = std::env::var("SNARTNET_BIND")
             .ok()
@@ -94,6 +128,7 @@ impl TcpSwarmTransport {
                 bind_addr,
                 base_peers: peers,
                 peers: Mutex::new(Vec::new()),
+                writes: Mutex::new(()),
             }),
         })
     }
@@ -113,44 +148,91 @@ impl TcpSwarmTransport {
         peers
     }
 
-    pub fn start_server(&self) {
+    /// Bind synchronously so startup can report a port conflict instead of pretending to listen.
+    pub fn start_server(&self) -> Result<SocketAddr, String> {
+        let listener = TcpListener::bind(self.inner.bind_addr)
+            .map_err(|e| format!("Cannot listen on {}: {e}", self.inner.bind_addr))?;
+        let address = listener.local_addr().map_err(|e| e.to_string())?;
         let this = self.clone();
         std::thread::spawn(move || {
-            let listener = match TcpListener::bind(this.inner.bind_addr) {
-                Ok(v) => v,
-                Err(_) => return,
-            };
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else {
-                    continue;
+            for mut stream in listener.incoming().flatten() {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let response = match (&mut stream)
+                    .take(MAX_PACKET_BYTES + 1)
+                    .read_to_end(&mut buf)
+                {
+                    Ok(_) if buf.len() as u64 <= MAX_PACKET_BYTES => {
+                        match serde_json::from_slice(&buf) {
+                            Ok(request) => this.handle_request(request),
+                            Err(e) => TransportResponse::Err {
+                                message: e.to_string(),
+                            },
+                        }
+                    }
+                    _ => TransportResponse::Err {
+                        message: "Request too large or timed out".into(),
+                    },
                 };
-                let req: Result<TransportRequest, String> = (|| {
-                    let mut buf = Vec::new();
-                    stream
-                        .read_to_end(&mut buf)
-                        .map_err(|e| format!("read failed: {e}"))?;
-                    serde_json::from_slice::<TransportRequest>(&buf)
-                        .map_err(|e| format!("parse failed: {e}"))
-                })();
-
-                let resp = match req {
-                    Ok(r) => this.handle_request(r),
-                    Err(e) => TransportResponse::Err { message: e },
-                };
-
-                let payload = serde_json::to_vec(&resp)
-                    .unwrap_or_else(|_| b"{\"kind\":\"err\",\"message\":\"serialization failed\"}".to_vec());
-                let _ = stream.write_all(&payload);
-                let _ = stream.flush();
+                if let Ok(payload) = serde_json::to_vec(&response) {
+                    let _ = stream.write_all(&payload);
+                }
                 let _ = stream.shutdown(Shutdown::Both);
             }
         });
+        Ok(address)
+    }
+
+    pub fn advertised_addr(&self) -> Option<String> {
+        let bind = self.inner.bind_addr;
+        let ip = if bind.ip().is_unspecified() {
+            local_lan_ip()?
+        } else {
+            bind.ip()
+        };
+        Some(SocketAddr::new(ip, bind.port()).to_string())
+    }
+
+    pub fn swarm_dir(&self) -> &Path {
+        &self.inner.swarm_dir
+    }
+
+    /// Publish a durable local snapshot. Acknowledgement means a peer stored it, not that it was read.
+    pub fn relay_profile(&self, profile: &SignedProfile) {
+        self.fanout_put(&TransportRequest::PutProfile {
+            fingerprint: profile.profile.fingerprint.clone(),
+            blob: Box::new(SwarmProfileBlob {
+                profile: profile.clone(),
+                updated_at: lan_unix_secs(),
+            }),
+        });
+    }
+
+    pub fn relay_posts(&self, fingerprint: &str, posts: Vec<SignedPost>) {
+        self.fanout_put(&TransportRequest::PutPosts {
+            fingerprint: fingerprint.into(),
+            blob: SwarmPostsBlob {
+                posts,
+                updated_at: lan_unix_secs(),
+            },
+        });
+    }
+
+    pub fn relay_message(&self, message: &SignedMessage) -> bool {
+        self.fanout_put(&TransportRequest::PutInbox {
+            recipient_fingerprint: message.message.recipient_fingerprint.clone(),
+            blob: SwarmInboxBlob {
+                messages: vec![message.clone()],
+                updated_at: lan_unix_secs(),
+            },
+        }) > 0
     }
 
     fn handle_request(&self, req: TransportRequest) -> TransportResponse {
         match req {
             TransportRequest::GetProfile { fingerprint } => TransportResponse::Profile {
-                blob: self.load_profile_local(&fingerprint),
+                blob: self.load_profile_local(&fingerprint).map(Box::new),
             },
             TransportRequest::PutProfile { fingerprint, blob } => {
                 match self.save_profile_local(&fingerprint, &blob) {
@@ -167,7 +249,9 @@ impl TcpSwarmTransport {
                     Err(e) => TransportResponse::Err { message: e },
                 }
             }
-            TransportRequest::GetInbox { recipient_fingerprint } => TransportResponse::Inbox {
+            TransportRequest::GetInbox {
+                recipient_fingerprint,
+            } => TransportResponse::Inbox {
                 blob: self.load_inbox_local(&recipient_fingerprint),
             },
             TransportRequest::PutInbox {
@@ -194,14 +278,21 @@ impl TcpSwarmTransport {
         let _ = stream.shutdown(Shutdown::Write);
 
         let mut out = Vec::new();
-        stream.read_to_end(&mut out).ok()?;
+        stream
+            .take(MAX_PACKET_BYTES + 1)
+            .read_to_end(&mut out)
+            .ok()?;
+        if out.len() as u64 > MAX_PACKET_BYTES {
+            return None;
+        }
         serde_json::from_slice::<TransportResponse>(&out).ok()
     }
 
-    fn fanout_put(&self, req: &TransportRequest) {
-        for peer in self.peer_snapshot() {
-            let _ = self.request_peer(peer, req);
-        }
+    fn fanout_put(&self, req: &TransportRequest) -> usize {
+        self.peer_snapshot()
+            .into_iter()
+            .filter(|peer| matches!(self.request_peer(*peer, req), Some(TransportResponse::Ok)))
+            .count()
     }
 
     fn profile_path(&self, fingerprint: &str) -> PathBuf {
@@ -217,16 +308,30 @@ impl TcpSwarmTransport {
     }
 
     fn inbox_path(&self, recipient_fingerprint: &str) -> PathBuf {
-        self.inner
-            .swarm_dir
-            .join(format!("inbox_{}.json", sanitize_component(recipient_fingerprint)))
+        self.inner.swarm_dir.join(format!(
+            "inbox_{}.json",
+            sanitize_component(recipient_fingerprint)
+        ))
     }
 
     fn load_profile_local(&self, fingerprint: &str) -> Option<SwarmProfileBlob> {
-        load_json_file(&self.profile_path(fingerprint)).ok().flatten()
+        load_json_file(&self.profile_path(fingerprint))
+            .ok()
+            .flatten()
     }
 
     fn save_profile_local(&self, fingerprint: &str, blob: &SwarmProfileBlob) -> Result<(), String> {
+        if blob.profile.profile.fingerprint != fingerprint
+            || !blob.profile.verify().unwrap_or(false)
+        {
+            return Err("Profile identity or signature is invalid".into());
+        }
+        let _guard = self.inner.writes.lock().unwrap();
+        if let Some(existing) = self.load_profile_local(fingerprint) {
+            if existing.profile.profile.updated_at > blob.profile.profile.updated_at {
+                return Ok(());
+            }
+        }
         save_json_file(&self.profile_path(fingerprint), blob)
     }
 
@@ -235,113 +340,135 @@ impl TcpSwarmTransport {
     }
 
     fn save_posts_local(&self, fingerprint: &str, blob: &SwarmPostsBlob) -> Result<(), String> {
-        save_json_file(&self.posts_path(fingerprint), blob)
+        let profile = self
+            .load_profile_local(fingerprint)
+            .ok_or("Author profile is missing")?;
+        if blob.posts.iter().any(|post| {
+            post.post.author_fingerprint != fingerprint
+                || !post
+                    .verify(&profile.profile.profile.public_key)
+                    .unwrap_or(false)
+        }) {
+            return Err("Post signature is invalid".into());
+        }
+        let _guard = self.inner.writes.lock().unwrap();
+        let mut merged = self.load_posts_local(fingerprint).unwrap_or_default();
+        merged.posts.extend(blob.posts.clone());
+        let mut seen = std::collections::HashSet::new();
+        merged
+            .posts
+            .retain(|post| seen.insert(post.post.id.clone()));
+        merged
+            .posts
+            .sort_by_key(|post| std::cmp::Reverse(post.post.created_at));
+        merged.updated_at = merged.updated_at.max(blob.updated_at);
+        save_json_file(&self.posts_path(fingerprint), &merged)
     }
 
     fn load_inbox_local(&self, recipient_fingerprint: &str) -> Option<SwarmInboxBlob> {
-        load_json_file(&self.inbox_path(recipient_fingerprint)).ok().flatten()
+        load_json_file(&self.inbox_path(recipient_fingerprint))
+            .ok()
+            .flatten()
     }
 
-    fn save_inbox_local(&self, recipient_fingerprint: &str, blob: &SwarmInboxBlob) -> Result<(), String> {
-        save_json_file(&self.inbox_path(recipient_fingerprint), blob)
+    fn save_inbox_local(
+        &self,
+        recipient_fingerprint: &str,
+        blob: &SwarmInboxBlob,
+    ) -> Result<(), String> {
+        for message in &blob.messages {
+            let sender = self
+                .load_profile_local(&message.message.sender_fingerprint)
+                .ok_or("Sender profile is missing")?;
+            if message.message.recipient_fingerprint != recipient_fingerprint
+                || !message
+                    .verify(&sender.profile.profile.public_key)
+                    .unwrap_or(false)
+            {
+                return Err("Message signature or recipient is invalid".into());
+            }
+        }
+        let _guard = self.inner.writes.lock().unwrap();
+        let mut merged = self
+            .load_inbox_local(recipient_fingerprint)
+            .unwrap_or_default();
+        merged.messages.extend(blob.messages.clone());
+        merged.updated_at = merged.updated_at.max(blob.updated_at);
+        dedupe_inbox(&mut merged);
+        save_json_file(&self.inbox_path(recipient_fingerprint), &merged)
     }
 }
 
 impl NetworkTransport for TcpSwarmTransport {
     fn load_profile(&self, fingerprint: &str) -> Option<SwarmProfileBlob> {
-        if let Some(v) = self.load_profile_local(fingerprint) {
-            return Some(v);
-        }
-
+        // Always refresh from peers: returning the first cache hit prevented profile updates forever.
         for peer in self.peer_snapshot() {
-            let req = TransportRequest::GetProfile {
-                fingerprint: fingerprint.to_string(),
-            };
-            if let Some(TransportResponse::Profile { blob: Some(blob) }) = self.request_peer(peer, &req) {
+            if let Some(TransportResponse::Profile { blob: Some(blob) }) = self.request_peer(
+                peer,
+                &TransportRequest::GetProfile {
+                    fingerprint: fingerprint.into(),
+                },
+            ) {
                 let _ = self.save_profile_local(fingerprint, &blob);
-                return Some(blob);
             }
         }
-        None
+        self.load_profile_local(fingerprint)
     }
 
     fn save_profile(&self, fingerprint: &str, blob: &SwarmProfileBlob) -> Result<(), String> {
-        self.save_profile_local(fingerprint, blob)?;
-        let req = TransportRequest::PutProfile {
-            fingerprint: fingerprint.to_string(),
-            blob: blob.clone(),
-        };
-        self.fanout_put(&req);
-        Ok(())
+        self.save_profile_local(fingerprint, blob)
     }
 
     fn load_posts(&self, fingerprint: &str) -> Option<SwarmPostsBlob> {
-        if let Some(v) = self.load_posts_local(fingerprint) {
-            return Some(v);
-        }
-
         for peer in self.peer_snapshot() {
-            let req = TransportRequest::GetPosts {
-                fingerprint: fingerprint.to_string(),
-            };
-            if let Some(TransportResponse::Posts { blob: Some(blob) }) = self.request_peer(peer, &req) {
+            if let Some(TransportResponse::Posts { blob: Some(blob) }) = self.request_peer(
+                peer,
+                &TransportRequest::GetPosts {
+                    fingerprint: fingerprint.into(),
+                },
+            ) {
                 let _ = self.save_posts_local(fingerprint, &blob);
-                return Some(blob);
             }
         }
-        None
+        self.load_posts_local(fingerprint)
     }
 
     fn save_posts(&self, fingerprint: &str, blob: &SwarmPostsBlob) -> Result<(), String> {
-        self.save_posts_local(fingerprint, blob)?;
-        let req = TransportRequest::PutPosts {
-            fingerprint: fingerprint.to_string(),
-            blob: blob.clone(),
-        };
-        self.fanout_put(&req);
-        Ok(())
+        self.save_posts_local(fingerprint, blob)
     }
 
     fn load_inbox(&self, recipient_fingerprint: &str) -> Option<SwarmInboxBlob> {
-        let mut local = self.load_inbox_local(recipient_fingerprint).unwrap_or_default();
-        let mut changed = false;
-
         for peer in self.peer_snapshot() {
-            let req = TransportRequest::GetInbox {
-                recipient_fingerprint: recipient_fingerprint.to_string(),
-            };
-            if let Some(TransportResponse::Inbox { blob: Some(mut remote) }) = self.request_peer(peer, &req) {
-                let before = local.messages.len();
-                local.messages.append(&mut remote.messages);
-                dedupe_inbox(&mut local);
-                if local.messages.len() != before {
-                    changed = true;
+            if let Some(TransportResponse::Inbox { blob: Some(blob) }) = self.request_peer(
+                peer,
+                &TransportRequest::GetInbox {
+                    recipient_fingerprint: recipient_fingerprint.into(),
+                },
+            ) {
+                // Validate separately: a bad envelope must not discard other valid messages.
+                for message in blob.messages {
+                    let single = SwarmInboxBlob {
+                        messages: vec![message],
+                        updated_at: blob.updated_at,
+                    };
+                    let _ = self.save_inbox_local(recipient_fingerprint, &single);
                 }
             }
         }
-
-        if changed {
-            let _ = self.save_inbox_local(recipient_fingerprint, &local);
-        }
-
-        Some(local)
+        self.load_inbox_local(recipient_fingerprint)
     }
 
     fn save_inbox(&self, recipient_fingerprint: &str, blob: &SwarmInboxBlob) -> Result<(), String> {
-        let mut cloned = blob.clone();
-        dedupe_inbox(&mut cloned);
-
-        self.save_inbox_local(recipient_fingerprint, &cloned)?;
-        let req = TransportRequest::PutInbox {
-            recipient_fingerprint: recipient_fingerprint.to_string(),
-            blob: cloned,
-        };
-        self.fanout_put(&req);
-        Ok(())
+        self.save_inbox_local(recipient_fingerprint, blob)
     }
 }
 
 fn swarm_root_dir() -> Result<PathBuf, String> {
+    if let Some(root) = std::env::var_os("SNARTNET_HOME") {
+        let root = PathBuf::from(root).join("swarm");
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        return Ok(root);
+    }
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| "Cannot determine home directory".to_string())?;
@@ -350,7 +477,7 @@ fn swarm_root_dir() -> Result<PathBuf, String> {
     Ok(root)
 }
 
-fn sanitize_component(s: &str) -> String {
+pub(crate) fn sanitize_component(s: &str) -> String {
     const UNSAFE: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|', '%'];
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -375,204 +502,23 @@ fn load_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>
 }
 
 fn save_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(value).map_err(|e| format!("json write failed: {e}"))?;
-    std::fs::write(path, text).map_err(|e| format!("write failed: {e}"))
+    let text =
+        serde_json::to_string_pretty(value).map_err(|e| format!("json write failed: {e}"))?;
+    let mut file =
+        tempfile::NamedTempFile::new_in(path.parent().ok_or("Missing parent directory")?)
+            .map_err(|e| e.to_string())?;
+    file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    file.as_file().sync_all().map_err(|e| e.to_string())?;
+    file.persist(path).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub fn dedupe_inbox(inbox: &mut SwarmInboxBlob) {
     let mut seen = std::collections::HashSet::new();
-    inbox.messages.retain(|m| seen.insert(m.message.id.clone()));
-}
-
-// ---------------------------------------------------------------------------
-// LAN peer discovery (UDP broadcast)
-// ---------------------------------------------------------------------------
-
-/// UDP port used for LAN presence announcements.
-pub const LAN_DISCOVERY_PORT: u16 = 47471;
-
-/// How often (seconds) the local node re-broadcasts its presence.
-const BROADCAST_INTERVAL_SECS: u64 = 30;
-
-/// Milliseconds between shutdown-check iterations inside the sender sleep loop.
-const SHUTDOWN_CHECK_INTERVAL_MS: u64 = 500;
-
-/// Seconds after last-seen before a peer is considered gone.
-const PEER_EXPIRY_SECS: u64 = 120;
-
-/// The payload broadcast over UDP so nearby SnartNet peers can discover us.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LanAnnounce {
-    pub fingerprint: String,
-    pub username: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    /// "ip:port" of our TCP sync server so a peer can add us directly.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tcp_addr: Option<String>,
-}
-
-/// A peer discovered on the local network via UDP broadcast.
-#[derive(Debug, Clone)]
-pub struct DiscoveredPeer {
-    pub fingerprint: String,
-    pub username: String,
-    pub display_name: Option<String>,
-    /// TCP sync address advertised by the peer, if provided.
-    pub tcp_addr: Option<String>,
-    /// Unix-epoch seconds of the most recent announcement.
-    pub last_seen: u64,
-}
-
-/// Manages LAN peer discovery: broadcasts our own presence and listens for
-/// announcements from nearby SnartNet peers.
-///
-/// Discovery state is kept in memory only; it is intentionally separate from
-/// the durable contact/trust data managed by `FileStorage`.
-pub struct LanDiscovery {
-    peers: Arc<Mutex<Vec<DiscoveredPeer>>>,
-    active: Arc<AtomicBool>,
-}
-
-impl LanDiscovery {
-    pub fn new() -> Self {
-        Self {
-            peers: Arc::new(Mutex::new(Vec::new())),
-            active: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    /// Start broadcasting `announce` and listening for other peers.
-    ///
-    /// Returns `true` if both sockets were successfully created.  Returns
-    /// `false` if the listener socket could not be bound (firewall, port
-    /// already in use, etc.) – callers should degrade gracefully.
-    pub fn start(&self, announce: LanAnnounce) -> bool {
-        // Try to bind the listener socket first; bail if this fails so we
-        // don't start a sender without a corresponding receiver.
-        let listener = match std::net::UdpSocket::bind(format!("0.0.0.0:{LAN_DISCOVERY_PORT}")) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-        let _ = listener.set_read_timeout(Some(Duration::from_millis(500)));
-
-        self.active.store(true, Ordering::Relaxed);
-        let active_listener = self.active.clone();
-        let active_sender = self.active.clone();
-        let peers_listener = self.peers.clone();
-        let own_fp = announce.fingerprint.clone();
-
-        // Listener thread – receives UDP datagrams from peers.
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 2048];
-            while active_listener.load(Ordering::Relaxed) {
-                match listener.recv_from(&mut buf) {
-                    Ok((len, _src)) => {
-                        let Ok(msg) = serde_json::from_slice::<LanAnnounce>(&buf[..len]) else {
-                            continue;
-                        };
-                        // Skip our own broadcasts.
-                        if msg.fingerprint == own_fp {
-                            continue;
-                        }
-                        let now = lan_unix_secs();
-                        let mut guard = peers_listener.lock().unwrap();
-                        if let Some(existing) =
-                            guard.iter_mut().find(|p| p.fingerprint == msg.fingerprint)
-                        {
-                            existing.last_seen = now;
-                            existing.username.clone_from(&msg.username);
-                            existing.tcp_addr.clone_from(&msg.tcp_addr);
-                            existing.display_name.clone_from(&msg.display_name);
-                        } else {
-                            guard.push(DiscoveredPeer {
-                                fingerprint: msg.fingerprint,
-                                username: msg.username,
-                                display_name: msg.display_name,
-                                tcp_addr: msg.tcp_addr,
-                                last_seen: now,
-                            });
-                        }
-                        guard.retain(|p| is_peer_fresh(p.last_seen));
-                    }
-                    Err(_) => {} // read-timeout or error; just loop
-                }
-            }
-        });
-
-        // Sender thread – periodically broadcasts our own presence.
-        std::thread::spawn(move || {
-            let sender = match std::net::UdpSocket::bind("0.0.0.0:0") {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            let _ = sender.set_broadcast(true);
-            let broadcast_addr: SocketAddr =
-                format!("255.255.255.255:{LAN_DISCOVERY_PORT}").parse().unwrap();
-            while active_sender.load(Ordering::Relaxed) {
-                if let Ok(payload) = serde_json::to_vec(&announce) {
-                    let _ = sender.send_to(&payload, broadcast_addr);
-                }
-                // Sleep in short increments so the thread can exit promptly.
-                let checks = BROADCAST_INTERVAL_SECS * 1000 / SHUTDOWN_CHECK_INTERVAL_MS;
-                for _ in 0..checks {
-                    if !active_sender.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(SHUTDOWN_CHECK_INTERVAL_MS));
-                }
-            }
-        });
-
-        true
-    }
-
-    /// Stop broadcasting and listening.  Any already-discovered peers are cleared.
-    pub fn stop(&self) {
-        self.active.store(false, Ordering::Relaxed);
-        self.peers.lock().unwrap().clear();
-    }
-
-    /// Whether discovery threads are currently running.
-    pub fn is_active(&self) -> bool {
-        self.active.load(Ordering::Relaxed)
-    }
-
-    /// Return a snapshot of currently-visible peers, evicting stale entries first.
-    pub fn get_discovered(&self) -> Vec<DiscoveredPeer> {
-        let mut guard = self.peers.lock().unwrap();
-        guard.retain(|p| is_peer_fresh(p.last_seen));
-        guard.clone()
-    }
-}
-
-impl Default for LanDiscovery {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Returns `true` if a peer with the given `last_seen` timestamp is still
-/// within the liveness window (i.e. has not yet expired).
-#[inline]
-fn is_peer_fresh(last_seen: u64) -> bool {
-    lan_unix_secs().saturating_sub(last_seen) < PEER_EXPIRY_SECS
-}
-
-fn lan_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-/// Best-effort attempt to find this host's primary LAN IP address.
-///
-/// Opens a UDP socket, "connects" it to a public address (no packets are
-/// actually sent), then reads the local address the OS assigned.  Returns
-/// `None` on any error so callers can fall back gracefully.
-pub fn local_lan_ip() -> Option<std::net::IpAddr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    socket.local_addr().ok().map(|a| a.ip())
+    // Include the signature in the transport dedupe key. An invalid envelope with a guessed
+    // message ID must not suppress the authentic envelope before the recipient verifies it.
+    inbox
+        .messages
+        .retain(|m| seen.insert((m.message.id.clone(), m.signature.clone())));
+    inbox.messages.sort_by_key(|m| m.message.created_at);
 }

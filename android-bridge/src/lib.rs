@@ -101,7 +101,9 @@ pub extern "system" fn Java_com_snartnet_android_NativeBridge_nativeGetProfileJs
     let result = (|| -> Result<String, String> {
         let svc = core().lock().map_err(|e| format!("lock failed: {e}"))?;
         match svc.get_profile() {
-            Some(profile) => Ok(ok_json(serde_json::to_value(profile).map_err(|e| e.to_string())?)),
+            Some(profile) => Ok(ok_json(
+                serde_json::to_value(profile).map_err(|e| e.to_string())?,
+            )),
             None => Ok(ok_json(serde_json::json!({ "profile": null }))),
         }
     })();
@@ -121,7 +123,9 @@ pub extern "system" fn Java_com_snartnet_android_NativeBridge_nativeCreatePost(
         let post = svc
             .create_post(&content, None, None)
             .map_err(|e| e.to_string())?;
-        Ok(ok_json(serde_json::to_value(post).map_err(|e| e.to_string())?))
+        Ok(ok_json(
+            serde_json::to_value(post).map_err(|e| e.to_string())?,
+        ))
     })();
 
     make_jstring(&mut env, &result.unwrap_or_else(err_json))
@@ -142,7 +146,9 @@ pub extern "system" fn Java_com_snartnet_android_NativeBridge_nativeCreateMessag
         let msg = svc
             .create_message(&recipient_fingerprint, &content)
             .map_err(|e| e.to_string())?;
-        Ok(ok_json(serde_json::to_value(msg).map_err(|e| e.to_string())?))
+        Ok(ok_json(
+            serde_json::to_value(msg).map_err(|e| e.to_string())?,
+        ))
     })();
 
     make_jstring(&mut env, &result.unwrap_or_else(err_json))
