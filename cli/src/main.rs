@@ -194,16 +194,14 @@ fn cmd_init(
         profile.update(display_name, bio);
     }
 
-    let mut signed = SignedProfile::create(profile, &keypair)?;
-    let magnet = signed.profile.generate_magnet_uri();
-    signed.profile.magnet_uri = Some(magnet.clone());
+    let signed = SignedProfile::create(profile, &keypair)?;
 
     save_keypair(storage, &keypair)?;
     save_profile(storage, &signed)?;
 
     println!("✓ Identity created for @{username}");
     println!("  Fingerprint : {}", keypair.fingerprint);
-    println!("  Magnet URI  : {magnet}");
+    println!("  Identity URI: {}", signed.profile.identity_uri());
     Ok(())
 }
 
@@ -246,8 +244,6 @@ fn cmd_profile_edit(
     sp.profile.update(display_name, bio);
 
     let new_signed = SignedProfile::create(sp.profile.clone(), &kp)?;
-    let mut new_signed = new_signed;
-    new_signed.profile.magnet_uri = Some(new_signed.profile.generate_magnet_uri());
 
     save_profile(storage, &new_signed)?;
     println!("✓ Profile updated (version {})", new_signed.profile.version);

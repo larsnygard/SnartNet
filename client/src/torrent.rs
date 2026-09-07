@@ -209,10 +209,20 @@ fn validate_object_id(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use snartnet_core::validate_torrent_magnet_uri;
 
     #[test]
     fn rejects_path_traversal_object_ids() {
         assert!(validate_object_id("../secret").is_err());
         assert!(validate_object_id("message-123").is_ok());
+    }
+
+    #[test]
+    fn published_magnets_are_valid_bit_torrent_v1_uris() {
+        let root = tempfile::tempdir().unwrap();
+        let node = TorrentNode::open(root.path(), 0).unwrap();
+        let magnet = node.publish("profile-test", br"{}" ).unwrap();
+        validate_torrent_magnet_uri(&magnet).unwrap();
+        assert!(magnet.contains("dn=snartnet-profile-test"));
     }
 }

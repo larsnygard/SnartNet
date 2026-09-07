@@ -85,8 +85,7 @@ pub async fn create_profile_async(
     // magnet_uri is derived after signing and must not be in signed bytes.
     profile.magnet_uri = None;
 
-    let mut signed = SignedProfile::create(profile, &kp)?;
-    signed.profile.magnet_uri = Some(signed.profile.generate_magnet_uri());
+    let signed = SignedProfile::create(profile, &kp)?;
     Ok((kp, signed))
 }
 
@@ -171,10 +170,17 @@ pub async fn import_invite_async(code: String) -> Result<Contact, String> {
         .filter(|d| !d.is_empty())
         .cloned()
         .unwrap_or_else(|| invite.username.clone());
+    let (magnet_uri, last_sync_error) = match invite.magnet_uri {
+        Some(magnet) => match snartnet_core::validate_torrent_magnet_uri(&magnet) {
+            Ok(()) => (Some(magnet), None),
+            Err(error) => (None, Some(format!("Identity-only profile link: {error}"))),
+        },
+        None => (None, None),
+    };
     Ok(Contact {
         fingerprint: invite.fingerprint,
         alias,
-        magnet_uri: invite.magnet_uri,
+        magnet_uri,
         transport_addr: invite.transport_addr,
         avatar_data_url: None,
         auto_synced: false,
@@ -186,12 +192,23 @@ pub async fn import_invite_async(code: String) -> Result<Contact, String> {
         synced_post_count: 0,
         known_public_key: None,
         known_encryption_public_key: None,
-        last_sync_error: None,
+        last_sync_error,
     })
 }
 
 pub async fn import_magnet_async(uri: String) -> Result<Contact, String> {
+    if let Ok(fingerprint) = snartnet_core::profile_fingerprint_from_identity_uri(&uri) {
+        let mut contact = add_contact_async(fingerprint.clone(), String::new()).await?;
+        contact.alias = short_fp(&fingerprint);
+        return Ok(contact);
+    }
     let fingerprint = profile_fingerprint_from_magnet_uri(&uri)?;
+    if let Err(error) = snartnet_core::validate_torrent_magnet_uri(&uri) {
+        let mut contact = add_contact_async(fingerprint.clone(), String::new()).await?;
+        contact.alias = short_fp(&fingerprint);
+        contact.last_sync_error = Some(format!("Identity-only link: {error}"));
+        return Ok(contact);
+    }
     add_contact_async(fingerprint.clone(), String::new()).await?;
     let alias = short_fp(&fingerprint);
     Ok(Contact {

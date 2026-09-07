@@ -19,7 +19,7 @@ On Linux, the app needs a graphical session and the platform libraries used by i
 ## Start a conversation
 
 1. Open **My profile**, choose a username and display name, and save.
-2. Choose **Copy invitation link** or **Save PNG**. The QR code contains the same invitation link.
+2. Choose **Copy invitation link** or **Save PNG**. The QR code contains the same invitation link. The invitation includes a shareable `snartnet://profile/...` identity URI and, after publication, a standard BitTorrent magnet for retrieving the signed profile torrent.
 3. Your friend opens **Contacts → Invitation**, pastes your link, or imports the saved QR image. Compressed and older base64 invite codes still work.
 4. Exchange invitations in both directions so each person has the other as a contact. On the same local network, **Contacts → Nearby** also works.
 5. Open **Messages**. Once the signed profile and encryption key are available, type a message and press Enter or **Send**.
@@ -31,7 +31,7 @@ The desktop shows readable conversations while retaining ciphertext on disk. **V
 
 ## Connect across networks
 
-Invitations include the detected local IP and actual listening port. For remote friends, set **My profile → Connection address** to a reachable IP and port, then save and share a fresh invitation. Profile, post, and message objects are also published to BitTorrent swarms and announced through the DHT, so peers can synchronize without a central server. A VPN or TCP port forwarding may still be required for the initial direct connection or when DHT bootstrap is unavailable.
+Invitations include the detected local IP and actual listening port. For remote friends, set **My profile → Connection address** to a reachable IP and port, then save and share a fresh invitation. Profile, post, and message objects are also published to BitTorrent swarms and announced through the DHT, so peers can synchronize without a central server. A profile identity can be shared before its torrent is published; the app will show that the downloadable magnet is pending. A VPN or TCP port forwarding may still be required for the initial direct connection or when DHT bootstrap is unavailable.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |

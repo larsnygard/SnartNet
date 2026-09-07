@@ -437,6 +437,11 @@ impl Session {
 
     pub fn apply_sync(&mut self, result: sync::SyncResult) -> Result<(), String> {
         let mut next = self.state.clone();
+        if let Some(magnet) = result.profile_magnet {
+            if let Some(profile) = next.profile.as_mut() {
+                profile.profile.magnet_uri = Some(magnet);
+            }
+        }
         for refreshed in result.contacts {
             if let Some(c) = next
                 .contacts
@@ -483,7 +488,9 @@ impl Session {
         let nearby: Vec<Value> = self.discovery.get_discovered().iter().map(|p| json!({
             "fingerprint": p.fingerprint, "alias": p.display_name.as_ref().unwrap_or(&p.username), "address": p.tcp_addr
         })).collect();
-        json!({"profile": self.state.profile.as_ref().map(|p| &p.profile), "posts": self.state.posts,
+        json!({"profile": self.state.profile.as_ref().map(|p| &p.profile),
+            "identityUri": self.state.profile.as_ref().map(|p| p.profile.identity_uri()),
+            "posts": self.state.posts,
             "contacts": self.state.contacts, "threads": threads, "nearby": nearby,
             "address": self.state.address, "listening": self.transport.advertised_addr(),
             "listenerError": self.listener_error, "paused": self.paused,

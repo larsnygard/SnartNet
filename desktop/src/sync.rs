@@ -34,6 +34,14 @@ impl App {
     }
 
     pub(crate) fn apply_sync(&mut self, result: SyncResult) -> Task<Message> {
+        if let Some(magnet) = result.profile_magnet.clone() {
+            if let Some(profile) = self.profile.as_mut() {
+                profile.profile.magnet_uri = Some(magnet);
+                if let Err(error) = self.storage.set_json(STORAGE_PROFILE, profile) {
+                    self.status_line = format!("Profile magnet could not be saved: {error}");
+                }
+            }
+        }
         for refreshed in result.contacts {
             if let Some(contact) = self
                 .contacts

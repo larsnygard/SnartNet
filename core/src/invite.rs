@@ -2,7 +2,7 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
-use crate::profile::SignedProfile;
+use crate::profile::{profile_fingerprint_from_identity_uri, SignedProfile};
 
 const COMPRESSED_INVITE_PREFIX: &str = "z1_";
 const INVITE_URI_PREFIX: &str = "snartnet://invite/";
@@ -24,6 +24,9 @@ pub struct ContactInvite {
     /// Optional human-readable display name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Identity-only URI that does not claim to be a downloadable torrent.
+    #[serde(default)]
+    pub identity_uri: String,
     /// Magnet URI pointing at the profile torrent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub magnet_uri: Option<String>,
@@ -40,6 +43,7 @@ impl ContactInvite {
             fingerprint: sp.profile.fingerprint.clone(),
             username: sp.profile.username.clone(),
             display_name: sp.profile.display_name.clone(),
+            identity_uri: sp.profile.identity_uri(),
             magnet_uri: sp.profile.magnet_uri.clone(),
             transport_addr,
         }
@@ -55,13 +59,23 @@ impl ContactInvite {
         if s.len() > MAX_INVITE_BYTES {
             return Err("Invite is too large".into());
         }
-        let invite: Self =
+        let mut invite: Self =
             serde_json::from_str(s).map_err(|e| format!("invite parse failed: {e}"))?;
         let fingerprint = general_purpose::STANDARD
             .decode(&invite.fingerprint)
             .map_err(|_| "Invalid contact fingerprint")?;
         if fingerprint.len() != 16 || invite.username.trim().is_empty() {
             return Err("Invite must contain a valid fingerprint and username".into());
+        }
+        if invite.identity_uri.is_empty() {
+            invite.identity_uri = format!(
+                "snartnet://profile/{}",
+                general_purpose::URL_SAFE_NO_PAD.encode(&fingerprint)
+            );
+        }
+        let identity_fingerprint = profile_fingerprint_from_identity_uri(&invite.identity_uri)?;
+        if identity_fingerprint != invite.fingerprint {
+            return Err("Invite identity URI does not match its fingerprint".into());
         }
         if let Some(addr) = &invite.transport_addr {
             // Invitations use explicit IP endpoints; no DNS or connection is attempted while parsing.
@@ -144,7 +158,7 @@ mod tests {
         let kp = KeyPair::generate().expect("keygen");
         let mut p = Profile::new(username.to_string(), kp.get_public_info());
         p.display_name = Some("Test User".to_string());
-        p.magnet_uri = Some(p.generate_magnet_uri());
+        p.magnet_uri = None;
         SignedProfile::create(p, &kp).expect("sign")
     }
 
@@ -155,6 +169,7 @@ mod tests {
         assert_eq!(invite.fingerprint, sp.profile.fingerprint);
         assert_eq!(invite.username, "alice");
         assert_eq!(invite.display_name.as_deref(), Some("Test User"));
+        assert_eq!(invite.identity_uri, sp.profile.identity_uri());
         assert_eq!(invite.magnet_uri, sp.profile.magnet_uri);
         assert!(invite.transport_addr.is_none());
     }

@@ -269,25 +269,28 @@ impl TcpSwarmTransport {
     }
 
     /// Publish a durable local snapshot. Acknowledgement means a peer stored it, not that it was read.
-    pub fn relay_profile(&self, profile: &SignedProfile) {
-        if let Some(torrent) = &self.inner.torrent {
-            let object_id = format!("profile-{}", profile.profile.fingerprint);
-            if let Ok(bytes) = serde_json::to_vec(profile) {
-                if let Ok(magnet) = torrent.publish(&object_id, &bytes) {
-                    if let Some(dht) = self.inner.dht.lock().unwrap().as_ref() {
-                        if let Ok(value) = serde_json::to_vec(
-                            &serde_json::json!({"magnet": magnet, "object_id": object_id}),
-                        ) {
-                            let _ = dht.publish(
-                                "snartnet/profile",
-                                &[&profile.profile.fingerprint],
-                                &value,
-                            );
-                        }
-                    }
-                }
-            }
-        }
+    pub fn publish_profile_torrent(&self, profile: &SignedProfile) -> Result<String, String> {
+        let torrent = self.inner.torrent.as_ref().ok_or("torrent transport unavailable")?;
+        let dht = self
+            .inner
+            .dht
+            .lock()
+            .map_err(|_| "DHT lock poisoned".to_string())?
+            .clone()
+            .ok_or("DHT transport unavailable")?;
+        let object_id = format!("profile-{}", profile.profile.fingerprint);
+        let bytes = serde_json::to_vec(profile).map_err(|e| e.to_string())?;
+        let magnet = torrent.publish(&object_id, &bytes)?;
+        let value = serde_json::to_vec(
+            &serde_json::json!({"magnet": magnet, "object_id": object_id}),
+        )
+        .map_err(|e| e.to_string())?;
+        dht.publish("snartnet/profile", &[&profile.profile.fingerprint], &value)?;
+        Ok(magnet)
+    }
+
+    pub fn relay_profile(&self, profile: &SignedProfile) -> Option<String> {
+        let magnet = self.publish_profile_torrent(profile).ok();
         self.fanout_put(&TransportRequest::PutProfile {
             fingerprint: profile.profile.fingerprint.clone(),
             blob: Box::new(SwarmProfileBlob {
@@ -295,6 +298,7 @@ impl TcpSwarmTransport {
                 updated_at: lan_unix_secs(),
             }),
         });
+        magnet
     }
 
     pub fn relay_posts(&self, fingerprint: &str, posts: Vec<SignedPost>) {

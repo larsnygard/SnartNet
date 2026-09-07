@@ -1,4 +1,5 @@
 use crate::crypto::{verify_signature, KeyInfo, KeyPair};
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -69,19 +70,59 @@ impl Profile {
         serde_json::to_string(self).map_err(|e| format!("Failed to serialize profile: {}", e))
     }
 
-    pub fn generate_magnet_uri(&self) -> String {
-        // Generate a deterministic hash for the profile
-        let json = self.to_canonical_json().unwrap_or_default();
-        let mut hasher = Sha256::new();
-        hasher.update(json.as_bytes());
-        let hash = hasher.finalize();
-        let hash_hex = hex::encode(hash);
-
-        format!(
-            "magnet:?xt=urn:btih:{}&dn=snartnet-profile-{}&x.snartnet.fp={}",
-            hash_hex, self.fingerprint, self.fingerprint
-        )
+    pub fn identity_uri(&self) -> String {
+        let fingerprint = base64::engine::general_purpose::STANDARD
+            .decode(&self.fingerprint)
+            .map(|bytes| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+            .unwrap_or_else(|_| percent_encode(&self.fingerprint));
+        format!("snartnet://profile/{fingerprint}")
     }
+
+}
+
+pub fn profile_fingerprint_from_identity_uri(uri: &str) -> Result<String, String> {
+    let encoded = uri
+        .trim()
+        .strip_prefix("snartnet://profile/")
+        .ok_or_else(|| "invalid SnartNet identity URI".to_string())?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| "invalid identity fingerprint".to_string())?;
+    if bytes.len() != 16 {
+        return Err("identity fingerprint must be 16 bytes".into());
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+pub fn validate_torrent_magnet_uri(uri: &str) -> Result<(), String> {
+    let query = uri
+        .trim()
+        .strip_prefix("magnet:?")
+        .ok_or_else(|| "invalid magnet URI".to_string())?;
+    let mut xt = None;
+    for part in query.split('&') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        if key == "xt" {
+            xt = Some(percent_decode(value)?);
+            break;
+        }
+    }
+    let xt = xt.ok_or_else(|| "magnet URI is missing xt".to_string())?;
+    if let Some(hash) = xt.strip_prefix("urn:btih:") {
+        if hash.len() == 40 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(());
+        }
+        return Err("BitTorrent v1 magnets require a 40-character infohash".into());
+    }
+    if let Some(hash) = xt.strip_prefix("urn:btmh:1220") {
+        if hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(());
+        }
+        return Err("BitTorrent v2 magnets require a 32-byte multihash".into());
+    }
+    Err("unsupported magnet xt value".into())
 }
 
 pub fn profile_fingerprint_from_magnet_uri(uri: &str) -> Result<String, String> {
@@ -95,12 +136,13 @@ pub fn profile_fingerprint_from_magnet_uri(uri: &str) -> Result<String, String> 
             continue;
         };
 
-        if key == "x.snartnet.fp" && !value.trim().is_empty() {
-            return Ok(value.trim().to_string());
+        let decoded = percent_decode(value)?;
+        if key == "x.snartnet.fp" && !decoded.trim().is_empty() {
+            return Ok(decoded.trim().to_string());
         }
 
         if key == "dn" {
-            if let Some(fp) = value.trim().strip_prefix("snartnet-profile-") {
+            if let Some(fp) = decoded.trim().strip_prefix("snartnet-profile-") {
                 if !fp.is_empty() {
                     return Ok(fp.to_string());
                 }
@@ -114,6 +156,42 @@ pub fn profile_fingerprint_from_magnet_uri(uri: &str) -> Result<String, String> 
     }
 
     Err("magnet uri does not contain a profile fingerprint".to_string())
+}
+
+fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+                vec![byte as char]
+            } else {
+                format!("%{byte:02X}").chars().collect()
+            }
+        })
+        .collect()
+}
+
+fn percent_decode(value: &str) -> Result<String, String> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let raw = value.as_bytes();
+    let mut index = 0;
+    while index < raw.len() {
+        if raw[index] == b'%' {
+            if index + 2 >= raw.len() {
+                return Err("invalid percent-encoding".into());
+            }
+            let hex = std::str::from_utf8(&raw[index + 1..index + 3])
+                .map_err(|_| "invalid percent-encoding".to_string())?;
+            let byte = u8::from_str_radix(hex, 16)
+                .map_err(|_| "invalid percent-encoding".to_string())?;
+            bytes.push(byte);
+            index += 3;
+        } else {
+            bytes.push(raw[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(bytes).map_err(|_| "magnet parameter is not UTF-8".into())
 }
 
 impl SignedProfile {
@@ -232,7 +310,7 @@ pub fn generate_profile_magnet_uri(profile_json: &str) -> Result<String, JsValue
     let profile: Profile = serde_json::from_str(profile_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid profile JSON: {}", e)))?;
 
-    Ok(profile.generate_magnet_uri())
+    Ok(profile.identity_uri())
 }
 
 #[cfg(test)]
@@ -276,12 +354,28 @@ mod tests {
     fn magnet_uri_roundtrips_contact_identity() {
         let kp = make_keypair();
         let p = Profile::new("dave".to_string(), kp.get_public_info());
-        let uri = p.generate_magnet_uri();
-        assert!(uri.starts_with("magnet:?xt=urn:btih:"));
+        let uri = p.identity_uri();
+        assert!(uri.starts_with("snartnet://profile/"));
         assert_eq!(
-            profile_fingerprint_from_magnet_uri(&uri).unwrap(),
+            profile_fingerprint_from_identity_uri(&uri).unwrap(),
             p.fingerprint
         );
+    }
+
+    #[test]
+    fn torrent_magnets_validate_and_decode_encoded_metadata() {
+        let fingerprint = "ab/c+d=";
+        let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=snartnet-profile-ab%2Fc%2Bd%3D&x.snartnet.fp=ab%2Fc%2Bd%3D".to_string();
+        validate_torrent_magnet_uri(&uri).unwrap();
+        assert_eq!(profile_fingerprint_from_magnet_uri(&uri).unwrap(), fingerprint);
+        validate_torrent_magnet_uri(
+            "magnet:?xt=urn:btmh:12200123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        assert!(validate_torrent_magnet_uri(
+            "magnet:?xt=urn:btih:0123456789abcdef"
+        )
+        .is_err());
     }
     #[test]
     fn a_valid_signature_cannot_claim_someone_elses_fingerprint() {
@@ -297,7 +391,7 @@ mod tests {
     fn resigning_a_profile_with_a_magnet_keeps_the_signature_valid() {
         let kp = make_keypair();
         let mut profile = Profile::new("alice".into(), kp.get_public_info());
-        profile.magnet_uri = Some(profile.generate_magnet_uri());
+        profile.magnet_uri = None;
         assert!(SignedProfile::create(profile, &kp)
             .unwrap()
             .verify()

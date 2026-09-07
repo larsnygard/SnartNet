@@ -8,7 +8,7 @@ Save your identity in **My profile**. The invitation card shows a QR code immedi
 
 Exports go to your home `Downloads` directory when it exists, otherwise to the current working directory. The status line shows the exact saved path. No upload or external QR service is involved.
 
-An invitation contains your fingerprint, username, display name, profile magnet, and a TCP endpoint. It contains no private key. It is a distribution hint: the app still verifies the signed profile before trusting a contact's encryption key.
+An invitation contains your fingerprint, username, display name, a `snartnet://profile/<url-safe-fingerprint>` identity URI, an optional standard BitTorrent profile magnet, and a TCP endpoint. The magnet is emitted only after the profile torrent has been published; the identity URI remains useful for identifying a contact while publication is pending. It contains no private key. It is a distribution hint: the app still verifies the signed profile before trusting a contact's encryption key.
 
 The default endpoint uses the local network address and the port from `SNARTNET_BIND`. To connect through a VPN or public endpoint, enter a reachable `IP:port` under **Connection address**, save, and share a fresh link. IPv6 uses `[address]:port`. Reimporting an invitation for an existing contact updates its endpoint without duplicating the contact.
 

@@ -7,6 +7,7 @@ pub struct SyncResult {
     pub contacts: Vec<Contact>,
     pub incoming: Vec<(String, ChatItem)>,
     pub relayed_ids: HashSet<String>,
+    pub profile_magnet: Option<String>,
 }
 
 pub fn exchange(
@@ -18,7 +19,7 @@ pub fn exchange(
 ) -> SyncResult {
     // Announce our signed key before sending envelopes. This also enables replies
     // when only one side has a reachable TCP endpoint.
-    transport.relay_profile(&profile);
+    let profile_magnet = transport.relay_profile(&profile);
     transport.relay_posts(&profile.profile.fingerprint, posts);
     let mut result = SyncResult::default();
     for contact in &mut contacts {
@@ -97,6 +98,7 @@ pub fn exchange(
         }
     }
     result.contacts = contacts;
+    result.profile_magnet = profile_magnet;
     result
 }
 

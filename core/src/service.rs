@@ -27,7 +27,9 @@ pub struct ProfileEnvelope {
     pub profile: Profile,
     pub signature: String,
     #[serde(rename = "magnetUri")]
-    pub magnet_uri: String,
+    pub magnet_uri: Option<String>,
+    #[serde(rename = "identityUri")]
+    pub identity_uri: String,
     pub api: String,
     pub version: u32,
 }
@@ -73,7 +75,7 @@ impl<S: StorageBackend> CoreService<S> {
         Ok(())
     }
 
-    /// Create (or replace) the user profile, persist keypair + profile, return magnet URI.
+    /// Create (or replace) the user profile, persist keypair + profile, return identity URI.
     pub fn create_profile(
         &mut self,
         username: &str,
@@ -91,17 +93,16 @@ impl<S: StorageBackend> CoreService<S> {
         let mut profile = Profile::new(username.to_string(), keypair.get_public_info());
         profile.update(display_name, bio);
 
-        let mut signed_profile = SignedProfile::create(profile, keypair)
+        let signed_profile = SignedProfile::create(profile, keypair)
             .map_err(|e| StorageError::Backend(format!("sign failed: {e}")))?;
 
-        let magnet_uri = signed_profile.profile.generate_magnet_uri();
-        signed_profile.profile.magnet_uri = Some(magnet_uri.clone());
+        let identity_uri = signed_profile.profile.identity_uri();
 
         S::set_json("snartnet_keypair", keypair)?;
         S::set_json("snartnet_current_profile", &signed_profile)?;
 
         self.current_profile = Some(signed_profile);
-        Ok(magnet_uri)
+        Ok(identity_uri)
     }
 
     /// Update display name / bio of the current profile, re-sign and persist.
@@ -113,10 +114,8 @@ impl<S: StorageBackend> CoreService<S> {
         match (&mut self.current_profile, &self.keypair) {
             (Some(profile), Some(keypair)) => {
                 profile.profile.update(display_name, bio);
-                let mut new_signed = SignedProfile::create(profile.profile.clone(), keypair)
+                let new_signed = SignedProfile::create(profile.profile.clone(), keypair)
                     .map_err(|e| StorageError::Backend(format!("sign failed: {e}")))?;
-                let magnet_uri = new_signed.profile.generate_magnet_uri();
-                new_signed.profile.magnet_uri = Some(magnet_uri);
                 S::set_json("snartnet_current_profile", &new_signed)?;
                 self.current_profile = Some(new_signed);
                 Ok(())
@@ -128,15 +127,11 @@ impl<S: StorageBackend> CoreService<S> {
     /// Return the current profile envelope (if any).
     pub fn get_profile(&self) -> Option<ProfileEnvelope> {
         self.current_profile.as_ref().map(|signed| {
-            let magnet_uri = signed
-                .profile
-                .magnet_uri
-                .clone()
-                .unwrap_or_else(|| signed.profile.generate_magnet_uri());
             ProfileEnvelope {
                 profile: signed.profile.clone(),
                 signature: signed.signature.clone(),
-                magnet_uri,
+                magnet_uri: signed.profile.magnet_uri.clone(),
+                identity_uri: signed.profile.identity_uri(),
                 api: "profile-json-v1".to_string(),
                 version: signed.profile.version,
             }
@@ -245,12 +240,14 @@ mod tests {
         let magnet = svc
             .create_profile("alice", Some("Alice A.".into()), None)
             .expect("create_profile failed");
-        assert!(magnet.starts_with("magnet:?xt=urn:btih:"));
+        assert!(magnet.starts_with("snartnet://profile/"));
         assert!(svc.has_profile());
 
         let env = svc.get_profile().expect("no profile");
         assert_eq!(env.profile.username, "alice");
         assert_eq!(env.profile.display_name.as_deref(), Some("Alice A."));
+        assert!(env.magnet_uri.is_none());
+        assert_eq!(env.identity_uri, magnet);
     }
 
     #[test]
@@ -265,8 +262,8 @@ mod tests {
         svc2.init().expect("init failed");
         assert!(svc2.has_profile());
 
-        let magnet2 = svc2.get_profile().unwrap().magnet_uri;
-        assert_eq!(magnet1, magnet2);
+        let identity2 = svc2.get_profile().unwrap().identity_uri;
+        assert_eq!(magnet1, identity2);
     }
 
     #[test]

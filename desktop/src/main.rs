@@ -350,6 +350,20 @@ impl App {
                         }
                         self.keypair = Some(kp.clone());
                         self.transport.set_identity(&kp);
+                        let mut sp = sp;
+                        let mut publication_pending = false;
+                        match self.transport.publish_profile_torrent(&sp) {
+                            Ok(magnet) => {
+                                sp.profile.magnet_uri = Some(magnet);
+                                if let Err(error) = self.storage.set_json(STORAGE_PROFILE, &sp) {
+                                    self.status_line = format!("Profile saved; magnet could not be saved: {error}");
+                                }
+                            }
+                            Err(error) => {
+                                publication_pending = true;
+                                self.status_line = format!("Profile saved; torrent publication pending: {error}");
+                            }
+                        }
                         self.forms.avatar_data_url = sp.profile.avatar_data_url.clone();
                         self.profile = Some(sp.clone());
 
@@ -361,8 +375,11 @@ impl App {
                                 "Profile saved; connection address could not be saved: {error}"
                             );
                         } else {
-                            self.status_line =
-                                "Profile saved. Your invitation is ready to share.".into();
+                            self.status_line = if publication_pending {
+                                "Profile saved. Share the identity link now; the torrent magnet is pending.".into()
+                            } else {
+                                "Profile saved. Your invitation is ready to share.".into()
+                            };
                         }
 
                         self.publish_local_profile_to_swarm();

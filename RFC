@@ -19,8 +19,9 @@ SnartNet is a peer-to-peer social media protocol that uses BitTorrent swarms for
 - **Post**: A signed message or media item shared via torrent.
 - **Ring of Trust**: A set of trusted peers authorized to verify or recover a profile.
 - **Descriptor record**: A small DHT value containing an object id and magnet URI. It is a hint, not the object itself.
+- **Identity URI**: `snartnet://profile/<url-safe-fingerprint>`, identifying a profile without asserting that a downloadable torrent exists.
 - **Swarm**: A group of peers sharing a specific torrent.
-- **Magnet URI**: A content-addressable link used for torrent discovery.
+- **Magnet URI**: A content-addressable link used for torrent discovery. Profile magnets are emitted only after publication and contain a valid BitTorrent v1 `btih` or v2 `btmh` identifier; identity URIs and magnets are separate invitation fields.
 
 ## 3. Protocol Overview
 
