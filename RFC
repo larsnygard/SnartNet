@@ -10,7 +10,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 ## 1. Abstract
 
-SnartNet is a peer-to-peer social media protocol that uses torrent swarms for profile and content distribution, cryptographic keys for identity and trust, and a Ring of Trust model for profile recovery. It supports scalable post propagation, encrypted messaging, and mobile optimization via decentralized push-like mechanisms. This specification incorporates elliptic curve cryptography, hybrid encryption, and forward secrecy to ensure secure and efficient communication.
+SnartNet is a peer-to-peer social media protocol that uses BitTorrent swarms for content distribution and a Kademlia DHT for magnet discovery. Ed25519 identities sign every object and X25519/ChaCha20-Poly1305 protects private message bodies. No central server is required: peers publish immutable objects to swarms and small, signed DHT records point to those objects. Direct TCP remains a compatibility and LAN fallback.
 
 ## 2. Terminology
 
@@ -18,7 +18,7 @@ SnartNet is a peer-to-peer social media protocol that uses torrent swarms for pr
 - **Profile Torrent**: A torrent containing a user's public identity and content.
 - **Post**: A signed message or media item shared via torrent.
 - **Ring of Trust**: A set of trusted peers authorized to verify or recover a profile.
-- **Notification Torrent**: A lightweight torrent used to signal updates or messages.
+- **Descriptor record**: A small DHT value containing an object id and magnet URI. It is a hint, not the object itself.
 - **Swarm**: A group of peers sharing a specific torrent.
 - **Magnet URI**: A content-addressable link used for torrent discovery.
 
@@ -31,7 +31,7 @@ SnartNet operates as a fully decentralized protocol with the following component
 - **Trust**: Ring of Trust for verification and recovery.
 - **Messaging**: Encrypted direct and group communication using hybrid encryption.
 - **Discovery**: DHT and magnet URIs for peer/content lookup.
-- **Mobile Optimization**: Push-like messaging via relay and notification torrents.
+- **Mobile Optimization**: Periodic DHT polling and bounded torrent sessions; operating systems may still suspend background work.
 
 ## 4. Identity and Profile Format
 
@@ -102,34 +102,30 @@ All application-layer messages (posts, direct messages, group messages, control 
 ```jsonc
 {
   "v": 1,                      // Protocol message version (integer)
-  "type": "dm|group|post|ctrl", // Message category
-  "subtype": "optional-detail", // OPTIONAL subtype (e.g., ratchet-key, post-reply)
+  "kind": "profile|post|feed|message|mailbox|control",
+  "id": "<stable object id>",
   "from": "<Ed25519 fingerprint>",
   "to": ["<recipient-id>"] ,    // Array; single recipient for DM, group members, or empty for public post
-  "ts": "<ISO 8601 UTC>",
-  "nonce": "<base64>",          // OPTIONAL per-message nonce
-  "body_enc": "chacha20-poly1305|aes256-gcm|plaintext", // Encoding method
+  "created_at": "<RFC3339 UTC>",
+  "expires_at": "<RFC3339 UTC or null>",
+  "body_enc": "plaintext|chacha20poly1305-x25519-v1",
+  "nonce": "<base64 nonce when encrypted>",
   "body": "<base64 ciphertext OR UTF-8 if plaintext>",
   "sig": "<Ed25519 signature base64>",
-  "fwd_secret": true,           // OPTIONAL indicates forward secrecy ratchet applied
-  "prev": "<message-id>",       // OPTIONAL link to previous (threading / ratchet)
-  "meta": {                      // OPTIONAL auxiliary metadata (hashed or encrypted when possible)
-    "reply_to": "<post-id>",
-    "tags": ["hashtag1", "hashtag2"],
-    "expires": "<ISO 8601 UTC>"
-  }
+  "prev": "<optional previous object id>",
+  "meta": {}
 }
 ```
 
-Implementations MUST verify `sig` over a canonical serialization (e.g., deterministic JSON with sorted keys excluding `sig`). Fields not understood MUST be ignored (forward compatibility) unless marked REQUIRED by future capability negotiation.
+Implementations MUST verify `sig` over canonical JSON with `sig` omitted. Version 1 uses `chacha20poly1305-x25519-v1`: a random X25519 content key is wrapped for the recipient and the body is sealed with ChaCha20-Poly1305. A private message MUST have exactly one recipient. Unknown fields are retained when forwarding and ignored when processing.
 
 ### 7.2 Direct Messaging
 
 Direct messages use hybrid encryption:
 
-- Content encrypted with AES-256-GCM or ChaCha20-Poly1305 (implementations SHOULD support both; MUST support at least one).
+- Content is encrypted with ChaCha20-Poly1305 and the content key is wrapped to the recipient's X25519 key.
 - A randomly generated symmetric key encrypted with recipient’s Curve25519 static or pre-negotiated ephemeral key.
-- Delivery via ephemeral torrents or DHT-based routing entries referencing short-lived magnet identifiers.
+- Delivery uses an immutable message torrent and a DHT mailbox descriptor keyed by sender and recipient. The descriptor contains only `{object_id, magnet}` and an expiry; the encrypted envelope is the torrent payload.
 - Forward secrecy MAY be provided using an X3DH-style prekey bundle plus a Double Ratchet state; when enabled `fwd_secret` MUST be set to true.
 
 ### 7.3 Group Messaging
@@ -157,10 +153,9 @@ Direct messages use hybrid encryption:
 
 ## 8. Discovery and Swarm Management
 
-- DHT used for peer and content lookup (profile magnet URIs, post indexes, prekey bundles).
-- Trackers OPTIONAL for bootstrap; clients SHOULD maintain a rotating list of bootstrap nodes.
-- Magnet URIs used for profile, post, and attachment references.
-- Routing tables MAY cache recently resolved profile magnets to reduce DHT load.
+SnartNet uses BEP-44 mutable DHT records. The Ed25519 identity key owns a record; a namespace and salt separate profile, feed, and mailbox records. Each value contains a monotonically increasing sequence number, an expiry, an object id, and a magnet URI. Peers MUST verify the DHT signature, reject expired records, and treat the DHT as untrusted routing metadata.
+
+The object referenced by a descriptor is immutable and content-addressed by its torrent infohash. A publisher SHOULD seed its own object and MAY keep seeding it after publishing. Receivers verify the envelope signature and recipient before storing or displaying downloaded bytes. Trackers are OPTIONAL; the DHT and the magnet's peer discovery are sufficient when bootstrap nodes are reachable. Implementations SHOULD cache bootstrap nodes and previously resolved descriptors, but caches MUST NOT override signature or expiry checks.
 
 ## 9. Mobile Optimization
 
@@ -170,19 +165,17 @@ Direct messages use hybrid encryption:
 - Reduce polling and background activity.
 - Maintain low-latency communication.
 
-### 9.2 Push-like Messaging
+### 9.2 Mobile polling
 
-- **Notification Torrents**: Lightweight torrents containing compact update descriptors (hashes, counts).
-- **Relay Nodes**: Trusted peers cache and forward queued encrypted envelopes for temporarily offline mobile clients.
-- **Wake-on-Swarm**: OS-level trigger when new metadata segments appear for subscribed notification torrents.
+Android and other mobile clients periodically query mailbox descriptors, download only new message torrents, and then seed them. This is best-effort polling; no OS-level wake guarantee is assumed. A future relay can cache the same immutable torrent without gaining decryption keys. Notification torrents and push integrations remain optional optimizations.
 
 ## 10. Security Considerations
 
 - All profile and post content MUST be signed with Ed25519 and verifiable before acceptance.
 - Messages MUST be encrypted end-to-end except explicitly public posts.
 - Metadata leakage SHOULD be minimized; sensitive routing hints MAY be encrypted inside the envelope `meta` field.
-- Forward secrecy SHOULD be enabled by default for direct messages; group forward secrecy MAY be progressive.
-- Revocation lists and certificates MUST be consulted prior to processing profile updates.
+- Current X25519 keys are long-lived profile keys, so compromise of a key can expose stored messages. Forward secrecy via prekeys and a ratchet is future work.
+- Revocation lists and certificates SHOULD be consulted prior to processing profile updates; ring-of-trust validation is not yet required by version 1.
 
 ## 11. Scalability
 
@@ -210,5 +203,3 @@ Direct messages use hybrid encryption:
 - WebRTC, libp2p
 - Signal Protocol (X3DH, Double Ratchet)
 - MLS (Messaging Layer Security) Drafts
-
-

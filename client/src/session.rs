@@ -1,9 +1,12 @@
 //! Durable Android host state. Commands commit before changing the visible state.
-use crate::{actions::*, discovery::*, model::*, transport::*, *};
+use crate::{
+    actions::*, dht::DhtNode, discovery::*, model::*, protocol::*, torrent::TorrentNode,
+    transport::*, *,
+};
 use futures::executor::block_on;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct State {
@@ -20,6 +23,8 @@ pub struct Session {
     state: State,
     storage: FileStorage,
     pub transport: TcpSwarmTransport,
+    pub torrent: Option<Arc<TorrentNode>>,
+    pub dht: Option<Arc<DhtNode>>,
     discovery: LanDiscovery,
     paused: bool,
     pub listener_error: Option<String>,
@@ -57,10 +62,20 @@ impl Session {
             }
         }
         let transport = TcpSwarmTransport::new(&root.join("swarm"), bind)?;
+        let torrent = TorrentNode::open(root.join("torrent"), bind.port().saturating_add(1))
+            .ok()
+            .map(Arc::new);
+        let dht = state
+            .keypair
+            .as_ref()
+            .and_then(|keypair| DhtNode::open(keypair, bind.port().saturating_add(2)).ok())
+            .map(Arc::new);
         Ok(Self {
             state,
             storage,
             transport,
+            torrent,
+            dht,
             discovery: LanDiscovery::new(),
             paused: false,
             listener_error: None,
@@ -70,7 +85,183 @@ impl Session {
 
     pub fn start(&mut self) {
         self.listener_error = self.transport.start_server().err();
+        self.start_distributed();
+        if self.state.profile.is_some() {
+            let _ = self.publish_profile_torrent();
+        }
         self.start_discovery();
+    }
+
+    fn start_distributed(&mut self) {
+        if self.torrent.is_none() {
+            self.torrent = TorrentNode::open(self.transport.swarm_dir().join("torrent"), 47472)
+                .ok()
+                .map(Arc::new);
+        }
+        if self.dht.is_none() {
+            self.dht = self
+                .state
+                .keypair
+                .as_ref()
+                .and_then(|keypair| DhtNode::open(keypair, 47473).ok())
+                .map(Arc::new);
+        }
+    }
+
+    fn publish_profile_torrent(&mut self) -> Result<(), String> {
+        let Some(profile) = self.state.profile.clone() else {
+            return Ok(());
+        };
+        let Some(torrent) = self.torrent.as_ref() else {
+            return Ok(());
+        };
+        let object_id = format!("profile-{}", profile.profile.fingerprint);
+        let bytes = serde_json::to_vec(&profile).map_err(|e| e.to_string())?;
+        let magnet = torrent.publish(&object_id, &bytes)?;
+        let mut next = self.state.clone();
+        if let Some(local) = next.profile.as_mut() {
+            local.profile.magnet_uri = Some(magnet.clone());
+        }
+        self.commit(next)?;
+        if let Some(dht) = self.dht.as_ref() {
+            let value = serde_json::to_vec(&json!({"magnet": magnet, "object_id": object_id}))
+                .map_err(|e| e.to_string())?;
+            dht.publish("snartnet/profile", &[&profile.profile.fingerprint], &value)?;
+        }
+        Ok(())
+    }
+
+    fn publish_post_torrent(&self, post: &SignedPost) -> Result<(), String> {
+        let Some(torrent) = self.torrent.as_ref() else {
+            return Ok(());
+        };
+        let object_id = format!("post-{}", post.post.id);
+        let bytes = serde_json::to_vec(post).map_err(|e| e.to_string())?;
+        let magnet = torrent.publish(&object_id, &bytes)?;
+        if let Some(dht) = self.dht.as_ref() {
+            let value = serde_json::to_vec(&json!({"magnet": magnet, "object_id": object_id}))
+                .map_err(|e| e.to_string())?;
+            dht.publish("snartnet/feed", &[&post.post.author_fingerprint], &value)?;
+        }
+        Ok(())
+    }
+
+    fn publish_message_torrent(
+        &self,
+        sender: &str,
+        recipient: &str,
+        message: &SignedMessage,
+    ) -> Result<(), String> {
+        let Some(torrent) = self.torrent.as_ref() else {
+            return Ok(());
+        };
+        let Some(dht) = self.dht.as_ref() else {
+            return Ok(());
+        };
+        let legacy = SignedEnvelope::from_signed_message(message);
+        let keypair = self.state.keypair.as_ref().ok_or("missing signing key")?;
+        let envelope = SignedEnvelope::sign(legacy.envelope, keypair)?;
+        let object_id = format!("message-{}", message.message.id);
+        let magnet = torrent.publish(&object_id, &envelope.to_json()?)?;
+        let value = serde_json::to_vec(&json!({"magnet": magnet, "object_id": object_id}))
+            .map_err(|e| e.to_string())?;
+        dht.publish("snartnet/mailbox", &[sender, recipient], &value)?;
+        Ok(())
+    }
+
+    /// Resolve contact profile torrents and encrypted mailbox descriptors.
+    pub fn sync_distributed(&mut self) -> Result<usize, String> {
+        self.start_distributed();
+        let Some(torrent) = self.torrent.clone() else {
+            return Ok(0);
+        };
+        let Some(dht) = self.dht.clone() else {
+            return Ok(0);
+        };
+        let local_fp = self
+            .state
+            .profile
+            .as_ref()
+            .map(|p| p.profile.fingerprint.clone())
+            .unwrap_or_default();
+        let mut next = self.state.clone();
+        let mut received = 0;
+        for index in 0..next.contacts.len() {
+            let fingerprint = next.contacts[index].fingerprint.clone();
+            if let Some(magnet) = next.contacts[index].magnet_uri.clone() {
+                let object_id = format!("profile-{}", fingerprint);
+                if let Ok(bytes) = torrent.fetch(&magnet, &object_id) {
+                    if let Ok(profile) = serde_json::from_slice::<SignedProfile>(&bytes) {
+                        if profile.profile.fingerprint == fingerprint
+                            && profile.verify().unwrap_or(false)
+                        {
+                            let contact = &mut next.contacts[index];
+                            contact.verification = VerificationState::Verified;
+                            contact.known_public_key = Some(profile.profile.public_key.clone());
+                            contact.known_encryption_public_key =
+                                profile.profile.encryption_public_key.clone();
+                            contact.profile_summary =
+                                profile.profile.bio.clone().unwrap_or_default();
+                            contact.avatar_data_url = profile.profile.avatar_data_url.clone();
+                        }
+                    }
+                }
+            }
+            let Some(public_key) = next.contacts[index].known_public_key.clone() else {
+                continue;
+            };
+            let encryption_key = next.contacts[index].known_encryption_public_key.clone();
+            let Some(value) =
+                dht.get_for(&public_key, "snartnet/mailbox", &[&fingerprint, &local_fp])?
+            else {
+                continue;
+            };
+            let descriptor: Value = serde_json::from_slice(&value).map_err(|e| e.to_string())?;
+            let magnet = descriptor["magnet"]
+                .as_str()
+                .ok_or("mailbox descriptor missing magnet")?;
+            let object_id = descriptor["object_id"]
+                .as_str()
+                .ok_or("mailbox descriptor missing object id")?;
+            let bytes = torrent.fetch(magnet, object_id)?;
+            let envelope = SignedEnvelope::from_json(&bytes)?;
+            if !envelope.verify(&public_key, Some(&local_fp))? {
+                continue;
+            }
+            let thread = thread_mut(&mut next, &fingerprint);
+            if thread.messages.iter().any(|m| m.id == envelope.envelope.id) {
+                continue;
+            }
+            let content = envelope
+                .envelope
+                .body
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            thread.messages.push(ChatItem {
+                id: envelope.envelope.id,
+                incoming: true,
+                content,
+                encrypted: true,
+                encryption_alg: envelope.envelope.body_enc,
+                nonce_b64: envelope.envelope.nonce,
+                pushed_via_bittorrent: true,
+                created_label: envelope
+                    .envelope
+                    .created_at
+                    .format("%d %b · %H:%M UTC")
+                    .to_string(),
+                verified_sender: true,
+                envelope: None,
+                delivery: DeliveryState::Relayed,
+                peer_encryption_key: encryption_key,
+            });
+            received += 1;
+        }
+        if received > 0 {
+            self.commit(next)?;
+        }
+        Ok(received)
     }
 
     fn commit(&mut self, next: State) -> Result<(), String> {
@@ -321,7 +512,35 @@ impl Session {
             _ => return Err("Unknown command".into()),
         }
         self.commit(next)?;
-        if field("op") == "profile" {
+        let operation = field("op");
+        if operation == "profile" {
+            self.start_distributed();
+            let _ = self.publish_profile_torrent();
+        }
+        if operation == "post" {
+            self.start_distributed();
+            if let Some(post) = self.state.posts.first() {
+                let _ = self.publish_post_torrent(post);
+            }
+        }
+        if operation == "message" {
+            self.start_distributed();
+            if let Some(thread) = self
+                .state
+                .threads
+                .iter()
+                .find(|t| t.contact_fingerprint == field("recipient"))
+            {
+                if let Some(item) = thread.messages.last().and_then(|m| m.envelope.as_ref()) {
+                    let _ = self.publish_message_torrent(
+                        &item.message.sender_fingerprint,
+                        &item.message.recipient_fingerprint,
+                        item,
+                    );
+                }
+            }
+        }
+        if operation == "profile" {
             self.start_discovery();
         }
         // Publish only committed state. Failed network work can retry on the next sync.

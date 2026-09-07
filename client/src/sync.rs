@@ -22,7 +22,7 @@ pub fn exchange(
     transport.relay_posts(&profile.profile.fingerprint, posts);
     let mut result = SyncResult::default();
     for contact in &mut contacts {
-        if let Some(blob) = transport.load_profile(&contact.fingerprint) {
+        if let Some(blob) = transport.load_profile_for_contact(contact) {
             let peer = blob.profile;
             if peer.profile.fingerprint == contact.fingerprint && peer.verify().unwrap_or(false) {
                 contact.verification = VerificationState::Verified;

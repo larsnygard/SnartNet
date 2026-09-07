@@ -1,9 +1,12 @@
 //! Shared native client protocol, records and validated actions.
 pub mod actions;
+pub mod dht;
 pub mod discovery;
 pub mod model;
+pub mod protocol;
 pub mod session;
 pub mod sync;
+pub mod torrent;
 pub mod transport;
 use base64::{engine::general_purpose, Engine as _};
 use model::*;

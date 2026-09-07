@@ -34,11 +34,11 @@ This roadmap outlines the phased approach to implementing the SnartNet decentral
 
 ### 1.3 Torrent Integration
 **Timeline:** Month 3
-- [ ] Integrate BitTorrent library (libtorrent or equivalent)
-- [ ] Implement profile torrent creation
-- [ ] Create magnet URI generation and parsing
-- [ ] Implement DHT integration for peer discovery
-- [ ] Create seeding and downloading mechanisms
+- [x] Integrate BitTorrent library (`librqbit`)
+- [x] Implement profile torrent creation
+- [x] Create magnet URI generation and parsing
+- [x] Implement DHT integration for peer discovery (BEP-44 descriptors)
+- [x] Create seeding and downloading mechanisms
 - [ ] Implement torrent health monitoring
 
 **Dependencies:** libtorrent-rasterbar, DHT implementation
@@ -116,8 +116,8 @@ Shift focus to delivering a native-first experience early. A shared Rust core, d
 **Timeline:** Month 5
 - [ ] Implement X3DH key agreement protocol
 - [ ] Create hybrid encryption for messages
-- [ ] Implement message serialization and signing
-- [ ] Create ephemeral torrent messaging
+- [x] Implement message serialization and signing
+- [x] Create immutable torrent messaging objects
 - [ ] Implement forward secrecy mechanisms
 - [ ] Create message delivery confirmation
 
@@ -136,7 +136,7 @@ Shift focus to delivering a native-first experience early. A shared Rust core, d
 
 ### 2.3 Message Routing
 **Timeline:** Month 7
-- [ ] Implement DHT-based message routing
+- [x] Implement DHT-based message routing
 - [ ] Create relay node functionality
 - [ ] Implement message queuing for offline users
 - [ ] Create delivery retry mechanisms

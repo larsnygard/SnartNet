@@ -172,6 +172,7 @@ impl App {
                     if !had_keys {
                         let _ = self.storage.set_json(STORAGE_KEYPAIR, kp);
                     }
+                    self.transport.set_identity(kp);
                 }
                 self.profile = data.profile;
                 self.local_posts = data.local_posts;
@@ -348,6 +349,7 @@ impl App {
                             return Task::none();
                         }
                         self.keypair = Some(kp.clone());
+                        self.transport.set_identity(&kp);
                         self.forms.avatar_data_url = sp.profile.avatar_data_url.clone();
                         self.profile = Some(sp.clone());
 

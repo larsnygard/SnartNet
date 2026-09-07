@@ -130,6 +130,9 @@ pub extern "system" fn Java_com_snartnet_android_NativeBridge_nativeSync(
 ) -> jstring {
     let result = (|| {
         let _sync = SYNC.try_lock().map_err(|_| "Sync already running")?;
+        if let Some(client) = session().lock().map_err(|e| e.to_string())?.as_mut() {
+            let _ = client.sync_distributed();
+        }
         let work = session()
             .lock()
             .map_err(|e| e.to_string())?

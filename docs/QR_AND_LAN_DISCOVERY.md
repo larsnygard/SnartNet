@@ -40,7 +40,7 @@ Plaintext is derived for display and is not stored in newly created chat records
 
 ## Remote setup
 
-The native protocol uses direct TCP, not NAT traversal. At least one participant needs a reachable listening endpoint, and each person must import the other's identity. A VPN or port forwarding may be needed for machines on different networks. There is no managed offline relay service.
+The native protocol keeps direct TCP as a fallback, while profile, post, and message objects use BitTorrent with signed DHT descriptors. At least one participant still needs a reachable endpoint for the initial invitation or when DHT bootstrap is unavailable. A VPN or port forwarding may be needed for machines on different networks. There is no managed offline relay service.
 
 ```bash
 # First instance; choose another root and port for the second instance.

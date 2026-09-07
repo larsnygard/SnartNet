@@ -31,7 +31,7 @@ The desktop shows readable conversations while retaining ciphertext on disk. **V
 
 ## Connect across networks
 
-Invitations include the detected local IP and actual listening port. For remote friends, set **My profile → Connection address** to a reachable IP and port, then save and share a fresh invitation. A VPN or TCP port forwarding may be required. Automatic NAT traversal and hosted offline relays are not implemented.
+Invitations include the detected local IP and actual listening port. For remote friends, set **My profile → Connection address** to a reachable IP and port, then save and share a fresh invitation. Profile, post, and message objects are also published to BitTorrent swarms and announced through the DHT, so peers can synchronize without a central server. A VPN or TCP port forwarding may still be required for the initial direct connection or when DHT bootstrap is unavailable.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
@@ -94,10 +94,10 @@ SNARTNET_HOME=/tmp/snartnet-review cargo run -p snartnet-desktop
 
 ## Current scope
 
-The desktop implements Ed25519 signed identities and X25519 + ChaCha20-Poly1305 direct messages. Signatures are checked against the contact's public-key fingerprint before trusting profile keys or displaying incoming messages. Sync uses bounded TCP requests, atomic cache replacement, and merge-based inbox updates. It runs outside the UI thread.
+The desktop implements Ed25519 signed identities and X25519 + ChaCha20-Poly1305 direct messages. Signatures are checked against the contact's public-key fingerprint before trusting profile keys or displaying incoming messages. Sync uses BitTorrent objects with signed DHT descriptors and retains bounded TCP as a fallback. It runs outside the UI thread.
 
 Private keys are stored locally and are not password-encrypted. Back up the complete `data/` directory securely. Messages use static X25519 keys; forward secrecy, Double Ratchet, group chat, attachments, and key recovery remain future work. The shared low-level service and CLI also expose legacy signed plaintext messages; the desktop chat always encrypts new messages.
 
-“Swarm” and magnet fields remain for protocol compatibility. The current native transport is direct TCP, not BitTorrent or DHT. It is intended for experimentation with known peers, not deployment as an unrestricted public relay.
+Torrent and DHT exchange is best-effort and currently supplements direct peer sync. DHT records contain routing metadata only; downloaded objects and message envelopes are verified before use. The implementation is intended for experimentation and does not provide anonymity or forward secrecy yet.
 
 Licensed under [AGPL-3.0-only](LICENSE).

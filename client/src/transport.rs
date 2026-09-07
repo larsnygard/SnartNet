@@ -1,7 +1,12 @@
-//! Direct TCP exchange and local cache; this is not a BitTorrent implementation.
-use crate::discovery::{lan_unix_secs, local_lan_ip};
+//! Direct TCP fallback plus BitTorrent/DHT publication and profile retrieval.
+use crate::{
+    dht::DhtNode,
+    discovery::{lan_unix_secs, local_lan_ip},
+    model::Contact,
+    torrent::TorrentNode,
+};
 use serde::{Deserialize, Serialize};
-use snartnet_core::{SignedMessage, SignedPost, SignedProfile};
+use snartnet_core::{KeyPair, SignedMessage, SignedPost, SignedProfile};
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -30,6 +35,9 @@ pub struct SwarmInboxBlob {
 
 pub trait NetworkTransport {
     fn load_profile(&self, fingerprint: &str) -> Option<SwarmProfileBlob>;
+    fn load_profile_for_contact(&self, contact: &Contact) -> Option<SwarmProfileBlob> {
+        self.load_profile(&contact.fingerprint)
+    }
     fn save_profile(&self, fingerprint: &str, blob: &SwarmProfileBlob) -> Result<(), String>;
 
     fn load_posts(&self, fingerprint: &str) -> Option<SwarmPostsBlob>;
@@ -80,7 +88,6 @@ pub struct TcpSwarmTransport {
     inner: Arc<Inner>,
 }
 
-#[derive(Debug)]
 struct Inner {
     swarm_dir: PathBuf,
     bind_addr: SocketAddr,
@@ -89,6 +96,9 @@ struct Inner {
     /// Serializes read/merge/replace inbox updates from the listener and sync worker.
     writes: Mutex<()>,
     listening_addr: Mutex<Option<SocketAddr>>,
+    torrent: Option<Arc<TorrentNode>>,
+    dht: Mutex<Option<Arc<DhtNode>>>,
+    identity: Mutex<Option<KeyPair>>,
 }
 
 impl TcpSwarmTransport {
@@ -102,6 +112,9 @@ impl TcpSwarmTransport {
                 peers: Mutex::new(Vec::new()),
                 writes: Mutex::new(()),
                 listening_addr: Mutex::new(None),
+                torrent: None,
+                dht: Mutex::new(None),
+                identity: Mutex::new(None),
             }),
         }
     }
@@ -116,6 +129,14 @@ impl TcpSwarmTransport {
                 peers: Mutex::new(Vec::new()),
                 writes: Mutex::new(()),
                 listening_addr: Mutex::new(None),
+                torrent: TorrentNode::open(
+                    root.join("torrent"),
+                    bind_addr.port().saturating_add(1),
+                )
+                .ok()
+                .map(Arc::new),
+                dht: Mutex::new(None),
+                identity: Mutex::new(None),
             }),
         })
     }
@@ -139,12 +160,20 @@ impl TcpSwarmTransport {
 
         Ok(Self {
             inner: Arc::new(Inner {
-                swarm_dir,
+                swarm_dir: swarm_dir.clone(),
                 bind_addr,
                 base_peers: peers,
                 peers: Mutex::new(Vec::new()),
                 writes: Mutex::new(()),
                 listening_addr: Mutex::new(None),
+                torrent: TorrentNode::open(
+                    swarm_dir.join("torrent"),
+                    bind_addr.port().saturating_add(1),
+                )
+                .ok()
+                .map(Arc::new),
+                dht: Mutex::new(None),
+                identity: Mutex::new(None),
             }),
         })
     }
@@ -162,6 +191,16 @@ impl TcpSwarmTransport {
             }
         }
         peers
+    }
+
+    /// Attach the local identity so the transport can publish signed BEP-44
+    /// mailbox/feed descriptors. The secret key never leaves the DHT node.
+    pub fn set_identity(&self, keypair: &KeyPair) {
+        *self.inner.identity.lock().unwrap() = Some(keypair.clone());
+        if self.inner.dht.lock().unwrap().is_none() {
+            let port = self.inner.bind_addr.port().saturating_add(2);
+            *self.inner.dht.lock().unwrap() = DhtNode::open(keypair, port).ok().map(Arc::new);
+        }
     }
 
     /// Bind synchronously so startup can report a port conflict instead of pretending to listen.
@@ -225,6 +264,24 @@ impl TcpSwarmTransport {
 
     /// Publish a durable local snapshot. Acknowledgement means a peer stored it, not that it was read.
     pub fn relay_profile(&self, profile: &SignedProfile) {
+        if let Some(torrent) = &self.inner.torrent {
+            let object_id = format!("profile-{}", profile.profile.fingerprint);
+            if let Ok(bytes) = serde_json::to_vec(profile) {
+                if let Ok(magnet) = torrent.publish(&object_id, &bytes) {
+                    if let Some(dht) = self.inner.dht.lock().unwrap().as_ref() {
+                        if let Ok(value) = serde_json::to_vec(
+                            &serde_json::json!({"magnet": magnet, "object_id": object_id}),
+                        ) {
+                            let _ = dht.publish(
+                                "snartnet/profile",
+                                &[&profile.profile.fingerprint],
+                                &value,
+                            );
+                        }
+                    }
+                }
+            }
+        }
         self.fanout_put(&TransportRequest::PutProfile {
             fingerprint: profile.profile.fingerprint.clone(),
             blob: Box::new(SwarmProfileBlob {
@@ -235,6 +292,23 @@ impl TcpSwarmTransport {
     }
 
     pub fn relay_posts(&self, fingerprint: &str, posts: Vec<SignedPost>) {
+        if let Some(torrent) = &self.inner.torrent {
+            let object_id = format!("feed-{fingerprint}-{}", lan_unix_secs());
+            if let Ok(bytes) = serde_json::to_vec(&SwarmPostsBlob {
+                posts: posts.clone(),
+                updated_at: lan_unix_secs(),
+            }) {
+                if let Ok(magnet) = torrent.publish(&object_id, &bytes) {
+                    if let Some(dht) = self.inner.dht.lock().unwrap().as_ref() {
+                        if let Ok(value) = serde_json::to_vec(
+                            &serde_json::json!({"magnet": magnet, "object_id": object_id}),
+                        ) {
+                            let _ = dht.publish("snartnet/feed", &[fingerprint], &value);
+                        }
+                    }
+                }
+            }
+        }
         self.fanout_put(&TransportRequest::PutPosts {
             fingerprint: fingerprint.into(),
             blob: SwarmPostsBlob {
@@ -245,6 +319,32 @@ impl TcpSwarmTransport {
     }
 
     pub fn relay_message(&self, message: &SignedMessage) -> bool {
+        if let (Some(torrent), Some(dht), Some(keypair)) = (
+            &self.inner.torrent,
+            self.inner.dht.lock().unwrap().clone(),
+            self.inner.identity.lock().unwrap().clone(),
+        ) {
+            let legacy = crate::protocol::SignedEnvelope::from_signed_message(message);
+            if let Ok(envelope) = crate::protocol::SignedEnvelope::sign(legacy.envelope, &keypair) {
+                let object_id = format!("message-{}", message.message.id);
+                if let Ok(magnet) =
+                    torrent.publish(&object_id, &envelope.to_json().unwrap_or_default())
+                {
+                    if let Ok(value) = serde_json::to_vec(
+                        &serde_json::json!({"magnet": magnet, "object_id": object_id}),
+                    ) {
+                        let _ = dht.publish(
+                            "snartnet/mailbox",
+                            &[
+                                &message.message.sender_fingerprint,
+                                &message.message.recipient_fingerprint,
+                            ],
+                            &value,
+                        );
+                    }
+                }
+            }
+        }
         self.fanout_put(&TransportRequest::PutInbox {
             recipient_fingerprint: message.message.recipient_fingerprint.clone(),
             blob: SwarmInboxBlob {
@@ -438,6 +538,27 @@ impl NetworkTransport for TcpSwarmTransport {
             }
         }
         self.load_profile_local(fingerprint)
+    }
+
+    fn load_profile_for_contact(&self, contact: &Contact) -> Option<SwarmProfileBlob> {
+        if let Some(profile) = self.load_profile_local(&contact.fingerprint) {
+            return Some(profile);
+        }
+        if let (Some(torrent), Some(magnet)) = (&self.inner.torrent, contact.magnet_uri.as_ref()) {
+            let object_id = format!("profile-{}", contact.fingerprint);
+            if let Ok(bytes) = torrent.fetch(magnet, &object_id) {
+                if let Ok(profile) = serde_json::from_slice::<SignedProfile>(&bytes) {
+                    let blob = SwarmProfileBlob {
+                        profile,
+                        updated_at: lan_unix_secs(),
+                    };
+                    if self.save_profile_local(&contact.fingerprint, &blob).is_ok() {
+                        return Some(blob);
+                    }
+                }
+            }
+        }
+        self.load_profile(&contact.fingerprint)
     }
 
     fn save_profile(&self, fingerprint: &str, blob: &SwarmProfileBlob) -> Result<(), String> {
