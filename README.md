@@ -38,6 +38,9 @@ Invitations include the detected local IP and actual listening port. For remote 
 | `SNARTNET_BIND` | `0.0.0.0:47470` | TCP listen IP and port |
 | `SNARTNET_PEERS` | empty | Additional comma-separated IP:port endpoints; bracket IPv6 addresses |
 | `SNARTNET_HOME` | `~/.snartnet` | Isolated root for `data/` and `swarm/` |
+| `SNARTNET_DHT_BOOTSTRAP` | library defaults | Comma-separated replacement bootstrap nodes for signed DHT discovery |
+| `SNARTNET_DHT_EXTRA_BOOTSTRAP` | empty | Comma-separated additional signed DHT bootstrap nodes |
+| `SNARTNET_TORRENT_BOOTSTRAP` | library defaults | Comma-separated replacement BitTorrent DHT bootstrap nodes |
 
 For example, run a separate test identity without touching your normal data:
 
@@ -98,6 +101,6 @@ The desktop implements Ed25519 signed identities and X25519 + ChaCha20-Poly1305 
 
 Private keys are stored locally and are not password-encrypted. Back up the complete `data/` directory securely. Messages use static X25519 keys; forward secrecy, Double Ratchet, group chat, attachments, and key recovery remain future work. The shared low-level service and CLI also expose legacy signed plaintext messages; the desktop chat always encrypts new messages.
 
-Torrent and DHT exchange is best-effort and currently supplements direct peer sync. DHT records contain routing metadata only; downloaded objects and message envelopes are verified before use. The implementation is intended for experimentation and does not provide anonymity or forward secrecy yet.
+Torrent and DHT exchange is best-effort and uses direct peer connections; there is no SnartNet-operated relay. IPv6 and UPnP port mapping are enabled when available. DHT records contain routing metadata only; downloaded objects and message envelopes are verified before use. If both peers are behind unreachable NAT, use IPv6, VPN, or port forwarding. The implementation is intended for experimentation and does not provide anonymity or forward secrecy yet.
 
 Licensed under [AGPL-3.0-only](LICENSE).

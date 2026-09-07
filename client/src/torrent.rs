@@ -10,7 +10,7 @@ use librqbit::{
 };
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::runtime::{Builder, Runtime};
@@ -18,10 +18,21 @@ use tokio::runtime::{Builder, Runtime};
 const OBJECT_DIR: &str = "objects";
 const DOWNLOAD_DIR: &str = "downloads";
 
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TorrentStatus {
+    pub listening: bool,
+    pub reachability: String,
+    pub peer_count: u64,
+    pub last_fetch: Option<String>,
+    pub last_publish: Option<String>,
+    pub last_error: Option<String>,
+}
+
 pub struct TorrentNode {
     runtime: Arc<Runtime>,
     session: Arc<Session>,
     root: PathBuf,
+    status: Arc<Mutex<TorrentStatus>>,
 }
 
 impl TorrentNode {
@@ -36,19 +47,31 @@ impl TorrentNode {
                 .build()
                 .map_err(|e| format!("torrent runtime failed: {e}"))?,
         );
+        let bootstrap_addrs = std::env::var("SNARTNET_TORRENT_BOOTSTRAP")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|values| !values.is_empty());
         let options = SessionOptions {
-            ipv4_only: true,
+            ipv4_only: false,
             dht: Some(DhtSessionConfig {
                 // librqbit supplies a rotating default bootstrap list when this is None.
-                bootstrap_addrs: None,
+                bootstrap_addrs,
                 port: Some(listen_port),
                 persistence: None,
             }),
             listen: Some(ListenerOptions {
                 mode: ListenerMode::TcpAndUtp,
-                listen_addr: ([0, 0, 0, 0], listen_port).into(),
+                listen_addr: ([0, 0, 0, 0, 0, 0, 0, 0], listen_port).into(),
                 announce_port: Some(listen_port),
-                ipv4_only: true,
+                ipv4_only: false,
+                enable_upnp_port_forwarding: true,
                 ..Default::default()
             }),
             ..Default::default()
@@ -60,21 +83,39 @@ impl TorrentNode {
             runtime,
             session,
             root,
+            status: Arc::new(Mutex::new(TorrentStatus {
+                listening: true,
+                reachability: "unknown".into(),
+                ..Default::default()
+            })),
         })
+    }
+
+    pub fn status(&self) -> TorrentStatus {
+        let mut status = self.status.lock().map(|status| status.clone()).unwrap_or_default();
+        let peers = self.session.stats_snapshot().peers;
+        status.peer_count = u64::from(peers.live_tcp + peers.live_utp + peers.live_socks);
+        status
     }
 
     /// Create a single-file torrent, seed it locally, and return its magnet.
     pub fn publish(&self, object_id: &str, bytes: &[u8]) -> Result<String, String> {
         validate_object_id(object_id)?;
         let path = self.root.join(OBJECT_DIR).join(format!("{object_id}.json"));
-        std::fs::write(&path, bytes).map_err(|e| format!("torrent object write failed: {e}"))?;
+        if let Err(error) = std::fs::write(&path, bytes) {
+            self.record_error(error.to_string());
+            return Err(format!("torrent object write failed: {error}"));
+        }
         let torrent = self
             .runtime
             .block_on(async {
                 let spawner = BlockingSpawner::new(2);
                 create_torrent(&path, CreateTorrentOptions::default(), &spawner).await
             })
-            .map_err(|e| format!("torrent metadata creation failed: {e:#}"))?;
+            .map_err(|e| {
+                self.record_error(format!("{e:#}"));
+                format!("torrent metadata creation failed: {e:#}")
+            })?;
         let torrent_bytes = torrent
             .as_bytes()
             .map_err(|e| format!("torrent encoding failed: {e:#}"))?;
@@ -88,7 +129,14 @@ impl TorrentNode {
                     ..Default::default()
                 }),
             ))
-            .map_err(|e| format!("torrent seed failed: {e:#}"))?;
+            .map_err(|e| {
+                self.record_error(format!("{e:#}"));
+                format!("torrent seed failed: {e:#}")
+            })?;
+        if let Ok(mut status) = self.status.lock() {
+            status.last_publish = Some(chrono::Utc::now().to_rfc3339());
+            status.last_error = None;
+        }
         Ok(magnet)
     }
 
@@ -114,7 +162,10 @@ impl TorrentNode {
                     ..Default::default()
                 }),
             ))
-            .map_err(|e| format!("torrent download failed: {e:#}"))?
+            .map_err(|e| {
+                self.record_error(format!("{e:#}"));
+                format!("torrent download failed: {e:#}")
+            })?
             .into_handle()
             .ok_or("torrent was not added")?;
         self.runtime.block_on(async {
@@ -122,8 +173,24 @@ impl TorrentNode {
                 .await
                 .map_err(|_| "torrent download timed out".to_string())?
                 .map_err(|e| format!("torrent completion failed: {e:#}"))
+        })
+        .inspect_err(|error| {
+            self.record_error(error.clone());
         })?;
-        std::fs::read(path).map_err(|e| format!("downloaded torrent object missing: {e}"))
+        let bytes = std::fs::read(path).map_err(|e| format!("downloaded torrent object missing: {e}"))?;
+        if let Ok(mut status) = self.status.lock() {
+            status.last_fetch = Some(chrono::Utc::now().to_rfc3339());
+            status.reachability = "direct".into();
+            status.last_error = None;
+        }
+        Ok(bytes)
+    }
+
+    fn record_error(&self, error: String) {
+        if let Ok(mut status) = self.status.lock() {
+            status.reachability = "unreachable".into();
+            status.last_error = Some(error);
+        }
     }
 }
 

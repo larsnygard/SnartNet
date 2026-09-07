@@ -6,6 +6,7 @@ use crate::{
 use futures::executor::block_on;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use snartnet_core::{Message, MessageType};
 use std::{path::Path, sync::Arc};
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -158,13 +159,74 @@ impl Session {
         let Some(dht) = self.dht.as_ref() else {
             return Ok(());
         };
-        let legacy = SignedEnvelope::from_signed_message(message);
         let keypair = self.state.keypair.as_ref().ok_or("missing signing key")?;
+        let legacy = SignedEnvelope::from_signed_message(message);
         let envelope = SignedEnvelope::sign(legacy.envelope, keypair)?;
         let object_id = format!("message-{}", message.message.id);
         let magnet = torrent.publish(&object_id, &envelope.to_json()?)?;
-        let value = serde_json::to_vec(&json!({"magnet": magnet, "object_id": object_id}))
-            .map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now();
+        let batch = TorrentDescriptor {
+            magnet,
+            object_id,
+            created_at: now,
+            expires_at: Some(now + chrono::Duration::days(30)),
+        };
+        let parts = [sender, recipient];
+        let current = dht
+            .get_for(&keypair.public_key, "snartnet/mailbox", &parts)?
+            .and_then(|value| serde_json::from_slice::<Value>(&value).ok())
+            .and_then(|value| {
+                Some((
+                    value.get("magnet")?.as_str()?.to_owned(),
+                    value.get("object_id")?.as_str()?.to_owned(),
+                ))
+            });
+        let current_pointer = current.clone();
+        let mut manifest = if let Some((manifest_magnet, manifest_id)) = current {
+            torrent
+                .fetch(&manifest_magnet, &manifest_id)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<MailboxManifest>(&bytes).ok())
+                .filter(|manifest| {
+                    manifest.sender == sender
+                        && manifest.recipient == recipient
+                        && manifest.verify(&keypair.public_key, now).unwrap_or(false)
+                })
+        } else {
+            None
+        }
+        .unwrap_or(MailboxManifest {
+            v: WIRE_VERSION,
+            kind: ObjectType::MailboxManifest,
+            sender: sender.to_owned(),
+            recipient: recipient.to_owned(),
+            sequence: 0,
+            batches: Vec::new(),
+            previous: None,
+            signature: String::new(),
+        });
+        manifest.sequence = manifest.sequence.saturating_add(1);
+        if manifest.batches.len() >= 4 {
+            manifest.previous = current_pointer.map(|(magnet, object_id)| TorrentDescriptor {
+                magnet,
+                object_id,
+                created_at: now,
+                expires_at: Some(now + chrono::Duration::days(30)),
+            });
+            manifest.batches.clear();
+        }
+        manifest.batches.push(batch);
+        let manifest = manifest.sign(keypair)?;
+        let manifest_id = format!(
+            "mailbox-{}-{}-{}",
+            sender, recipient, manifest.sequence
+        );
+        let manifest_bytes = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
+        let manifest_magnet = torrent.publish(&manifest_id, &manifest_bytes)?;
+        let value = serde_json::to_vec(
+            &json!({"magnet": manifest_magnet, "object_id": manifest_id}),
+        )
+        .map_err(|e| e.to_string())?;
         dht.publish("snartnet/mailbox", &[sender, recipient], &value)?;
         Ok(())
     }
@@ -173,9 +235,6 @@ impl Session {
     pub fn sync_distributed(&mut self) -> Result<usize, String> {
         self.start_distributed();
         let Some(torrent) = self.torrent.clone() else {
-            return Ok(0);
-        };
-        let Some(dht) = self.dht.clone() else {
             return Ok(0);
         };
         let local_fp = self
@@ -207,61 +266,122 @@ impl Session {
                     }
                 }
             }
-            let Some(public_key) = next.contacts[index].known_public_key.clone() else {
-                continue;
-            };
-            let encryption_key = next.contacts[index].known_encryption_public_key.clone();
-            let Some(value) =
-                dht.get_for(&public_key, "snartnet/mailbox", &[&fingerprint, &local_fp])?
-            else {
-                continue;
-            };
-            let descriptor: Value = serde_json::from_slice(&value).map_err(|e| e.to_string())?;
-            let magnet = descriptor["magnet"]
-                .as_str()
-                .ok_or("mailbox descriptor missing magnet")?;
-            let object_id = descriptor["object_id"]
-                .as_str()
-                .ok_or("mailbox descriptor missing object id")?;
-            let bytes = torrent.fetch(magnet, object_id)?;
-            let envelope = SignedEnvelope::from_json(&bytes)?;
-            if !envelope.verify(&public_key, Some(&local_fp))? {
-                continue;
+            let contact = next.contacts[index].clone();
+            for signed in self.load_distributed_messages(&torrent, &contact, &local_fp) {
+                let thread = thread_mut(&mut next, &fingerprint);
+                if thread.messages.iter().any(|m| m.id == signed.message.id) {
+                    continue;
+                }
+                let mut item = ChatItem::from_signed(
+                    signed,
+                    true,
+                    contact.known_encryption_public_key.clone(),
+                );
+                item.pushed_via_bittorrent = true;
+                item.delivery = DeliveryState::Relayed;
+                thread.messages.push(item);
+                received += 1;
             }
-            let thread = thread_mut(&mut next, &fingerprint);
-            if thread.messages.iter().any(|m| m.id == envelope.envelope.id) {
-                continue;
-            }
-            let content = envelope
-                .envelope
-                .body
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
-            thread.messages.push(ChatItem {
-                id: envelope.envelope.id,
-                incoming: true,
-                content,
-                encrypted: true,
-                encryption_alg: envelope.envelope.body_enc,
-                nonce_b64: envelope.envelope.nonce,
-                pushed_via_bittorrent: true,
-                created_label: envelope
-                    .envelope
-                    .created_at
-                    .format("%d %b · %H:%M UTC")
-                    .to_string(),
-                verified_sender: true,
-                envelope: None,
-                delivery: DeliveryState::Relayed,
-                peer_encryption_key: encryption_key,
-            });
-            received += 1;
         }
         if received > 0 {
             self.commit(next)?;
         }
         Ok(received)
+    }
+
+    fn load_distributed_messages(
+        &self,
+        torrent: &TorrentNode,
+        sender: &Contact,
+        recipient_fingerprint: &str,
+    ) -> Vec<SignedMessage> {
+        let Some(public_key) = sender.known_public_key.as_deref() else {
+            return Vec::new();
+        };
+        let Some(dht) = self.dht.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(Some(value)) = dht.get_for(
+            public_key,
+            "snartnet/mailbox",
+            &[&sender.fingerprint, recipient_fingerprint],
+        ) else {
+            return Vec::new();
+        };
+        let Ok(pointer) = serde_json::from_slice::<Value>(&value) else {
+            return Vec::new();
+        };
+        let Some(mut magnet) = pointer
+            .get("magnet")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+        else {
+            return Vec::new();
+        };
+        let Some(mut object_id) = pointer
+            .get("object_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+        else {
+            return Vec::new();
+        };
+        let mut output = Vec::new();
+        for _ in 0..16 {
+            let Ok(bytes) = torrent.fetch(&magnet, &object_id) else {
+                break;
+            };
+            let Ok(manifest) = serde_json::from_slice::<MailboxManifest>(&bytes) else {
+                break;
+            };
+            if manifest.sender != sender.fingerprint
+                || manifest.recipient != recipient_fingerprint
+                || !manifest
+                    .verify(public_key, chrono::Utc::now())
+                    .unwrap_or(false)
+            {
+                break;
+            }
+            for batch in &manifest.batches {
+                let Ok(message_bytes) = torrent.fetch(&batch.magnet, &batch.object_id) else {
+                    continue;
+                };
+                let Ok(envelope) = SignedEnvelope::from_json(&message_bytes) else {
+                    continue;
+                };
+                if !envelope
+                    .verify(public_key, Some(recipient_fingerprint))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let Some(content) = envelope.envelope.body.as_str() else {
+                    continue;
+                };
+                output.push(SignedMessage {
+                    message: Message {
+                        id: envelope.envelope.id,
+                        sender_fingerprint: envelope.envelope.from,
+                        recipient_fingerprint: recipient_fingerprint.to_owned(),
+                        content: content.to_owned(),
+                        created_at: envelope.envelope.created_at,
+                        encrypted: true,
+                        body_enc: envelope.envelope.body_enc,
+                        nonce_b64: envelope.envelope.nonce,
+                        message_type: MessageType::Direct,
+                    },
+                    signature: envelope.signature,
+                });
+            }
+            let Some(previous) = manifest.previous else {
+                break;
+            };
+            if previous.magnet.is_empty() {
+                break;
+            }
+            magnet = previous.magnet;
+            object_id = previous.object_id;
+        }
+        output
     }
 
     fn commit(&mut self, next: State) -> Result<(), String> {
@@ -368,7 +488,9 @@ impl Session {
             "address": self.state.address, "listening": self.transport.advertised_addr(),
             "listenerError": self.listener_error, "paused": self.paused,
             "discovery": self.discovery.is_active(), "lastSync": self.last_sync,
-            "peers": self.transport.peer_snapshot().len()})
+            "peers": self.transport.peer_snapshot().len(),
+            "dht": self.dht.as_ref().map(|node| node.status()),
+            "torrent": self.torrent.as_ref().map(|node| node.status())})
     }
 
     pub fn invitation(&self) -> Result<String, String> {

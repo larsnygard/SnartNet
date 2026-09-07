@@ -46,6 +46,23 @@ pub fn exchange(
                 .unwrap_or_default();
         }
     }
+    // DHT/torrent mailbox polling is a direct peer-to-peer path. The DHT only
+    // supplies signed manifest pointers; message bytes come from torrent peers.
+    for contact in &contacts {
+        for signed in transport.load_distributed_messages(contact, &profile.profile.fingerprint) {
+            if accepts_message(&signed, contact, &profile.profile.fingerprint)
+                && !result.incoming.iter().any(|(_, item)| item.id == signed.message.id)
+            {
+                let mut item = ChatItem::from_signed(
+                    signed,
+                    true,
+                    contact.known_encryption_public_key.clone(),
+                );
+                item.pushed_via_bittorrent = true;
+                result.incoming.push((contact.fingerprint.clone(), item));
+            }
+        }
+    }
     for message in pending {
         // The local inbox also allows peers to pull messages if their inbound port is closed.
         let inbox = transport::SwarmInboxBlob {

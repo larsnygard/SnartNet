@@ -40,7 +40,7 @@ Plaintext is derived for display and is not stored in newly created chat records
 
 ## Remote setup
 
-The native protocol keeps direct TCP as a fallback, while profile, post, and message objects use BitTorrent with signed DHT descriptors. At least one participant still needs a reachable endpoint for the initial invitation or when DHT bootstrap is unavailable. A VPN or port forwarding may be needed for machines on different networks. There is no managed offline relay service.
+The native protocol keeps direct TCP as a fallback, while profile, post, and message objects use direct BitTorrent peers discovered through signed DHT descriptors. IPv6 and UPnP port forwarding are attempted automatically. If both participants are behind unreachable NAT, a VPN or manual port forwarding may be needed; there is no managed SnartNet relay service.
 
 ```bash
 # First instance; choose another root and port for the second instance.

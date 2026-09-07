@@ -757,10 +757,18 @@ impl App {
             .transport
             .advertised_addr()
             .unwrap_or_else(|| "Unavailable".into());
+        let (dht_status, torrent_status) = self.transport.distributed_status();
+        let dht_label = dht_status
+            .map(|status| if status.bootstrapped { "bootstrapped" } else { "starting" })
+            .unwrap_or("disabled");
+        let torrent_label = torrent_status
+            .map(|status| format!("{} ({}, {} peers)", if status.listening { "listening" } else { "stopped" }, status.reachability, status.peer_count))
+            .unwrap_or_else(|| "disabled".into());
         let mut connection = column![text("Connected on your terms").size(24),
-            muted("SnartNet exchanges signed profiles and encrypted messages directly over TCP."),
+            muted("SnartNet exchanges signed profiles and encrypted messages directly over DHT-discovered torrent peers."),
             text(format!("Your address: {endpoint}")).size(16),
             text(format!("Known peer addresses: {}", self.transport.peer_snapshot().len())).size(16),
+            text(format!("DHT: {dht_label} · Torrent: {torrent_label}")).size(16),
             text(format!("Last sync: {}", self.network.last_poll_label)).size(16),
             row![button(if self.syncing { "Syncing…" } else { "Sync now" }).padding(12).on_press_maybe((!self.syncing && self.network.bittorrent_running).then_some(Message::RunSyncNow)),
                 button(if self.network.bittorrent_running { "Pause sync" } else { "Resume sync" }).padding(12).style(button::secondary).on_press(Message::ToggleBittorrent)].spacing(10),
@@ -774,7 +782,7 @@ impl App {
             button(if self.network.lan_discovery_active { "Turn off discovery" } else { "Turn on discovery" }).padding(12).style(button::secondary).on_press(Message::LanDiscoveryToggle),
         ].spacing(16));
         scrollable(column![card(connection).width(Length::Fill), nearby,
-            card(column![text("Across networks").size(21), muted("For remote chat, share an invitation containing a reachable IP and port. Use a VPN or configure TCP port forwarding; automatic NAT traversal and offline relay services are not implemented."), button("Edit invitation address").padding(12).style(button::secondary).on_press(Message::SwitchPanel(Panel::Profile))].spacing(16)),
+            card(column![text("Across networks").size(21), muted("Messages use direct torrent peers discovered through public DHT bootstrap nodes. IPv6 and UPnP are attempted automatically. If both peers are behind unreachable NAT, use a VPN or configure port forwarding; SnartNet does not operate a relay."), button("Edit invitation address").padding(12).style(button::secondary).on_press(Message::SwitchPanel(Panel::Profile))].spacing(16)),
             button("Clean unused cache files older than 7 days").style(button::text).on_press(Message::CleanupLocalFiles),
         ].spacing(20)).height(Length::Fill).into()
     }

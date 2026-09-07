@@ -125,7 +125,7 @@ Direct messages use hybrid encryption:
 
 - Content is encrypted with ChaCha20-Poly1305 and the content key is wrapped to the recipient's X25519 key.
 - A randomly generated symmetric key encrypted with recipient’s Curve25519 static or pre-negotiated ephemeral key.
-- Delivery uses an immutable message torrent and a DHT mailbox descriptor keyed by sender and recipient. The descriptor contains only `{object_id, magnet}` and an expiry; the encrypted envelope is the torrent payload.
+- Delivery uses immutable message torrents and a signed mailbox manifest. The BEP-44 descriptor keyed by sender and recipient points to the current manifest torrent; the manifest lists a bounded batch of `{object_id, magnet}` entries and a pointer to the previous manifest. Recipients walk the manifest chain and download only unseen objects. The encrypted envelope is the torrent payload.
 - Forward secrecy MAY be provided using an X3DH-style prekey bundle plus a Double Ratchet state; when enabled `fwd_secret` MUST be set to true.
 
 ### 7.3 Group Messaging
@@ -153,9 +153,9 @@ Direct messages use hybrid encryption:
 
 ## 8. Discovery and Swarm Management
 
-SnartNet uses BEP-44 mutable DHT records. The Ed25519 identity key owns a record; a namespace and salt separate profile, feed, and mailbox records. Each value contains a monotonically increasing sequence number, an expiry, an object id, and a magnet URI. Peers MUST verify the DHT signature, reject expired records, and treat the DHT as untrusted routing metadata.
+SnartNet uses BEP-44 mutable DHT records. The Ed25519 identity key owns a record; a namespace and salt separate profile, feed, and mailbox records. Mailbox values point to a signed, immutable manifest torrent. Each manifest contains a monotonically increasing sequence number, bounded object descriptors, a previous-manifest pointer, and expiry. Peers MUST verify both the DHT signature and manifest signature, reject expired records, and treat the DHT as untrusted routing metadata.
 
-The object referenced by a descriptor is immutable and content-addressed by its torrent infohash. A publisher SHOULD seed its own object and MAY keep seeding it after publishing. Receivers verify the envelope signature and recipient before storing or displaying downloaded bytes. Trackers are OPTIONAL; the DHT and the magnet's peer discovery are sufficient when bootstrap nodes are reachable. Implementations SHOULD cache bootstrap nodes and previously resolved descriptors, but caches MUST NOT override signature or expiry checks.
+The object referenced by a descriptor is immutable and content-addressed by its torrent infohash. A publisher SHOULD seed its own object and MAY keep seeding it after publishing. Receivers verify the envelope signature and recipient before storing or displaying downloaded bytes. Trackers are OPTIONAL; the DHT and the magnet's peer discovery are sufficient when bootstrap nodes are reachable. Implementations SHOULD cache bootstrap nodes and previously resolved descriptors, but caches MUST NOT override signature or expiry checks. Implementations SHOULD prefer IPv6 and may request UPnP or NAT-PMP mappings. If both peers are behind an unreachable NAT, delivery fails unless the users provide a VPN or manual port mapping; no application relay is required.
 
 ## 9. Mobile Optimization
 
@@ -167,7 +167,7 @@ The object referenced by a descriptor is immutable and content-addressed by its 
 
 ### 9.2 Mobile polling
 
-Android and other mobile clients periodically query mailbox descriptors, download only new message torrents, and then seed them. This is best-effort polling; no OS-level wake guarantee is assumed. A future relay can cache the same immutable torrent without gaining decryption keys. Notification torrents and push integrations remain optional optimizations.
+Android and desktop clients periodically query mailbox descriptors, download only new message torrents, and then seed them. This is best-effort polling; no OS-level wake guarantee is assumed. No application relay is required. Notification torrents and push integrations remain optional optimizations.
 
 ## 10. Security Considerations
 

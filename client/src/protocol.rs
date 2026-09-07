@@ -174,8 +174,52 @@ pub struct MailboxManifest {
     #[serde(default)]
     pub batches: Vec<TorrentDescriptor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous: Option<String>,
+    pub previous: Option<TorrentDescriptor>,
     pub signature: String,
+}
+
+impl MailboxManifest {
+    pub fn canonical_json(&self) -> Result<String, String> {
+        #[derive(Serialize)]
+        struct Unsigned<'a> {
+            v: u16,
+            kind: &'a ObjectType,
+            sender: &'a str,
+            recipient: &'a str,
+            sequence: u64,
+            batches: &'a [TorrentDescriptor],
+            previous: &'a Option<TorrentDescriptor>,
+        }
+        serde_json::to_string(&Unsigned {
+            v: self.v,
+            kind: &self.kind,
+            sender: &self.sender,
+            recipient: &self.recipient,
+            sequence: self.sequence,
+            batches: &self.batches,
+            previous: &self.previous,
+        })
+        .map_err(|e| format!("mailbox manifest serialization failed: {e}"))
+    }
+
+    pub fn sign(mut self, keypair: &KeyPair) -> Result<Self, String> {
+        self.signature = keypair.sign(&self.canonical_json()?)?;
+        Ok(self)
+    }
+
+    pub fn verify(&self, public_key: &str, now: DateTime<Utc>) -> Result<bool, String> {
+        if self.v != WIRE_VERSION || self.kind != ObjectType::MailboxManifest {
+            return Err("unsupported mailbox manifest".into());
+        }
+        if self.batches.iter().any(|batch| {
+            batch
+                .expires_at
+                .is_some_and(|expires_at| expires_at <= now)
+        }) {
+            return Err("mailbox manifest contains an expired batch".into());
+        }
+        snartnet_core::verify_signature(&self.canonical_json()?, &self.signature, public_key)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -297,5 +341,29 @@ mod tests {
         .unwrap();
         assert!(record.verify(&keypair.public_key, Utc::now()).unwrap());
         assert!(DhtRecord::key_for("snartnet/mailbox", &["alice", "bob"]) == record.key);
+    }
+
+    #[test]
+    fn mailbox_manifest_is_signed_and_verifies() {
+        let keypair = KeyPair::generate().unwrap();
+        let now = Utc::now();
+        let manifest = MailboxManifest {
+            v: WIRE_VERSION,
+            kind: ObjectType::MailboxManifest,
+            sender: keypair.fingerprint.clone(),
+            recipient: "recipient".into(),
+            sequence: 1,
+            batches: vec![TorrentDescriptor {
+                magnet: "magnet:?xt=urn:btih:test".into(),
+                object_id: "message-1".into(),
+                created_at: now,
+                expires_at: Some(now + Duration::hours(1)),
+            }],
+            previous: None,
+            signature: String::new(),
+        }
+        .sign(&keypair)
+        .unwrap();
+        assert!(manifest.verify(&keypair.public_key, now).unwrap());
     }
 }

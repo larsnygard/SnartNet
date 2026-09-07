@@ -137,7 +137,7 @@ Shift focus to delivering a native-first experience early. A shared Rust core, d
 ### 2.3 Message Routing
 **Timeline:** Month 7
 - [x] Implement DHT-based message routing
-- [ ] Create relay node functionality
+- [ ] Create optional user-run relay functionality (not required for protocol delivery)
 - [ ] Implement message queuing for offline users
 - [ ] Create delivery retry mechanisms
 - [ ] Implement notification torrents

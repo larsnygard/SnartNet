@@ -6,7 +6,7 @@ use crate::{
     torrent::TorrentNode,
 };
 use serde::{Deserialize, Serialize};
-use snartnet_core::{KeyPair, SignedMessage, SignedPost, SignedProfile};
+use snartnet_core::{KeyPair, Message, MessageType, SignedMessage, SignedPost, SignedProfile};
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -193,6 +193,12 @@ impl TcpSwarmTransport {
         peers
     }
 
+    pub fn distributed_status(&self) -> (Option<crate::dht::DhtStatus>, Option<crate::torrent::TorrentStatus>) {
+        let dht = self.inner.dht.lock().ok().and_then(|node| node.as_ref().map(|node| node.status()));
+        let torrent = self.inner.torrent.as_ref().map(|node| node.status());
+        (dht, torrent)
+    }
+
     /// Attach the local identity so the transport can publish signed BEP-44
     /// mailbox/feed descriptors. The secret key never leaves the DHT node.
     pub fn set_identity(&self, keypair: &KeyPair) {
@@ -326,23 +332,7 @@ impl TcpSwarmTransport {
         ) {
             let legacy = crate::protocol::SignedEnvelope::from_signed_message(message);
             if let Ok(envelope) = crate::protocol::SignedEnvelope::sign(legacy.envelope, &keypair) {
-                let object_id = format!("message-{}", message.message.id);
-                if let Ok(magnet) =
-                    torrent.publish(&object_id, &envelope.to_json().unwrap_or_default())
-                {
-                    if let Ok(value) = serde_json::to_vec(
-                        &serde_json::json!({"magnet": magnet, "object_id": object_id}),
-                    ) {
-                        let _ = dht.publish(
-                            "snartnet/mailbox",
-                            &[
-                                &message.message.sender_fingerprint,
-                                &message.message.recipient_fingerprint,
-                            ],
-                            &value,
-                        );
-                    }
-                }
+                let _ = self.publish_mailbox_manifest(torrent, &dht, &keypair, message, &envelope);
             }
         }
         self.fanout_put(&TransportRequest::PutInbox {
@@ -352,6 +342,114 @@ impl TcpSwarmTransport {
                 updated_at: lan_unix_secs(),
             },
         }) > 0
+    }
+
+    fn publish_mailbox_manifest(
+        &self,
+        torrent: &TorrentNode,
+        dht: &DhtNode,
+        keypair: &KeyPair,
+        message: &SignedMessage,
+        envelope: &crate::protocol::SignedEnvelope,
+    ) -> Result<(), String> {
+        let sender = &message.message.sender_fingerprint;
+        let recipient = &message.message.recipient_fingerprint;
+        let object_id = format!("message-{}", message.message.id);
+        let magnet = torrent.publish(&object_id, &envelope.to_json()?)?;
+        let now = chrono::Utc::now();
+        let current = dht
+            .get_for(&keypair.public_key, "snartnet/mailbox", &[sender, recipient])?
+            .and_then(|value| serde_json::from_slice::<serde_json::Value>(&value).ok())
+            .and_then(|value| Some((
+                value.get("magnet")?.as_str()?.to_owned(),
+                value.get("object_id")?.as_str()?.to_owned(),
+            )));
+        let current_pointer = current.clone();
+        let mut manifest = if let Some((manifest_magnet, manifest_id)) = current {
+            torrent.fetch(&manifest_magnet, &manifest_id).ok()
+                .and_then(|bytes| serde_json::from_slice::<crate::protocol::MailboxManifest>(&bytes).ok())
+                .filter(|manifest| manifest.sender == *sender && manifest.recipient == *recipient
+                    && manifest.verify(&keypair.public_key, now).unwrap_or(false))
+        } else { None }.unwrap_or(crate::protocol::MailboxManifest {
+            v: crate::protocol::WIRE_VERSION,
+            kind: crate::protocol::ObjectType::MailboxManifest,
+            sender: sender.clone(), recipient: recipient.clone(), sequence: 0,
+            batches: Vec::new(), previous: None, signature: String::new(),
+        });
+        manifest.sequence = manifest.sequence.saturating_add(1);
+        if manifest.batches.len() >= 4 {
+            manifest.previous = current_pointer.map(|(magnet, object_id)| crate::protocol::TorrentDescriptor {
+                magnet, object_id, created_at: now,
+                expires_at: Some(now + chrono::Duration::days(30)),
+            });
+            manifest.batches.clear();
+        }
+        manifest.batches.push(crate::protocol::TorrentDescriptor {
+            magnet, object_id, created_at: now,
+            expires_at: Some(now + chrono::Duration::days(30)),
+        });
+        let manifest = manifest.sign(keypair)?;
+        let manifest_id = format!("mailbox-{sender}-{recipient}-{}", manifest.sequence);
+        let manifest_bytes = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
+        let manifest_magnet = torrent.publish(&manifest_id, &manifest_bytes)?;
+        let value = serde_json::to_vec(&serde_json::json!({"magnet": manifest_magnet, "object_id": manifest_id}))
+            .map_err(|e| e.to_string())?;
+        dht.publish("snartnet/mailbox", &[sender, recipient], &value)?;
+        Ok(())
+    }
+
+    /// Resolve immutable mailbox batches directly from the DHT and torrent swarms.
+    /// No application relay is involved; failure simply returns no distributed items.
+    pub fn load_distributed_messages(
+        &self,
+        sender: &Contact,
+        recipient_fingerprint: &str,
+    ) -> Vec<SignedMessage> {
+        let Some(public_key) = sender.known_public_key.as_deref() else { return Vec::new() };
+        let Some(torrent) = &self.inner.torrent else { return Vec::new() };
+        let Some(dht) = self.inner.dht.lock().ok().and_then(|dht| dht.clone()) else { return Vec::new() };
+        let Ok(Some(value)) = dht.get_for(
+            public_key,
+            "snartnet/mailbox",
+            &[&sender.fingerprint, recipient_fingerprint],
+        ) else { return Vec::new() };
+        let Ok(pointer) = serde_json::from_slice::<serde_json::Value>(&value) else { return Vec::new() };
+        let Some(mut magnet) = pointer.get("magnet").and_then(|value| value.as_str()).map(str::to_owned) else { return Vec::new() };
+        let Some(mut object_id) = pointer.get("object_id").and_then(|value| value.as_str()).map(str::to_owned) else { return Vec::new() };
+        let mut output = Vec::new();
+        for _ in 0..16 {
+            let Ok(bytes) = torrent.fetch(&magnet, &object_id) else { break };
+            let Ok(manifest) = serde_json::from_slice::<crate::protocol::MailboxManifest>(&bytes) else { break };
+            if manifest.sender != sender.fingerprint
+                || manifest.recipient != recipient_fingerprint
+                || !manifest.verify(public_key, chrono::Utc::now()).unwrap_or(false)
+            { break; }
+            for batch in &manifest.batches {
+                let Ok(message_bytes) = torrent.fetch(&batch.magnet, &batch.object_id) else { continue };
+                let Ok(envelope) = crate::protocol::SignedEnvelope::from_json(&message_bytes) else { continue };
+                if !envelope.verify(public_key, Some(recipient_fingerprint)).unwrap_or(false) { continue; }
+                let Some(content) = envelope.envelope.body.as_str() else { continue };
+                output.push(SignedMessage {
+                    message: Message {
+                        id: envelope.envelope.id,
+                        sender_fingerprint: envelope.envelope.from,
+                        recipient_fingerprint: recipient_fingerprint.to_owned(),
+                        content: content.to_owned(),
+                        created_at: envelope.envelope.created_at,
+                        encrypted: true,
+                        body_enc: envelope.envelope.body_enc,
+                        nonce_b64: envelope.envelope.nonce,
+                        message_type: MessageType::Direct,
+                    },
+                    signature: envelope.signature,
+                });
+            }
+            let Some(previous) = manifest.previous else { break };
+            if previous.magnet.is_empty() { break; }
+            magnet = previous.magnet;
+            object_id = previous.object_id;
+        }
+        output
     }
 
     fn handle_request(&self, req: TransportRequest) -> TransportResponse {
