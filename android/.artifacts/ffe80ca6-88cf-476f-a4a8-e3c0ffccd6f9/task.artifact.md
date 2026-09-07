@@ -1,0 +1,6 @@
+- [x] Update `app/build.gradle.kts`
+    - [x] Add `ndkVersion` to `android` block
+    - [x] Update `buildRustBridge` to use AGP's NDK resolution
+- [x] Verify build configuration
+    - [x] Run `./gradlew :app:copyRustBridge --dry-run` (Verified it now detects NDK via AGP)
+- [x] Update README.md documentation

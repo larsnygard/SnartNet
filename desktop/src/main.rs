@@ -21,8 +21,7 @@ use iced::{
     Alignment, Element, Length, Subscription, Task,
 };
 use snartnet_core::{
-    profile_fingerprint_from_magnet_uri, ContactInvite, FileStorage, KeyPair,
-    Message as CoreMessage, Post, Profile, SignedMessage, SignedPost, SignedProfile,
+    ContactInvite, FileStorage, KeyPair, SignedMessage, SignedPost, SignedProfile,
 };
 use std::{
     collections::HashSet,
@@ -971,10 +970,6 @@ impl App {
 
         self.transport.set_peers(peers);
     }
-}
-
-fn default_trust() -> u8 {
-    20
 }
 
 fn non_empty(value: String) -> Option<String> {

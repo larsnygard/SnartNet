@@ -10,6 +10,7 @@ name = "snartnet-desktop"
 path = "src/main.rs"
 
 [dependencies]
+snartnet-client = { path = "../client" }
 snartnet-core = { path = "../core" }
 iced = { version = "0.13", features = ["tokio", "svg", "image"] }
 serde = { workspace = true }

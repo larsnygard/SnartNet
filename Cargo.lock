@@ -4242,9 +4242,14 @@ dependencies = [
 name = "snartnet-android-bridge"
 version = "0.1.1"
 dependencies = [
+ "base64 0.21.7",
+ "image 0.25.10",
  "jni 0.21.1",
+ "qrcode",
+ "rqrr",
  "serde",
  "serde_json",
+ "snartnet-client",
  "snartnet-core",
 ]
 
@@ -4254,6 +4259,20 @@ version = "0.1.1"
 dependencies = [
  "chrono",
  "clap",
+ "serde_json",
+ "snartnet-core",
+ "tempfile",
+]
+
+[[package]]
+name = "snartnet-client"
+version = "0.1.1"
+dependencies = [
+ "base64 0.21.7",
+ "blake3",
+ "chrono",
+ "futures",
+ "serde",
  "serde_json",
  "snartnet-core",
  "tempfile",
@@ -4299,6 +4318,7 @@ dependencies = [
  "rqrr",
  "serde",
  "serde_json",
+ "snartnet-client",
  "snartnet-core",
  "tempfile",
  "tokio",

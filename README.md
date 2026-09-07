@@ -2,7 +2,7 @@
 
 A native, peer-to-peer space for your people. Create an identity, exchange invitations, and have direct, encrypted conversations without a central account service.
 
-SnartNet is experimental. The active client is the **Rust + iced desktop app**. Android is a small JNI shell; the older web client is archived in `legacy/PWA`.
+SnartNet is experimental. The desktop and Android clients share the Rust client protocol and encrypted sync implementation. The older web client is archived in `legacy/PWA`.
 
 ## Run the desktop app
 
@@ -68,7 +68,7 @@ See [Invitations and connectivity](docs/QR_AND_LAN_DISCOVERY.md) for the full wo
 | `desktop/src/transport.rs`, `discovery.rs` | TCP cache exchange and optional UDP presence |
 | `desktop/src/tests.rs` | Chat, persistence, QR, and loopback integration regressions |
 | `cli/` | Developer CLI |
-| `android/`, `android-bridge/` | Android shell and JNI adapter; see [Android setup](android/README.md) |
+| `android/`, `android-bridge/`, `client/` | Android client, JNI adapter, and shared native client session; see [Android setup](android/README.md) |
 | `legacy/PWA/` | Archived web reference with its own npm manifest |
 | `RFC`, `specs/`, `docs/ROADMAP.md` | Protocol proposals and future work, not a list of shipped features |
 
