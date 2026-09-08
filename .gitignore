@@ -25,3 +25,5 @@
 /android/app/build/
 /android/build/
 /android/.idea/
+/android/*.keystore
+/android/*.jks
