@@ -2,6 +2,7 @@
 pub mod actions;
 pub mod dht;
 pub mod discovery;
+pub mod gossip;
 pub mod model;
 pub mod protocol;
 pub mod session;

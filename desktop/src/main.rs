@@ -4,6 +4,7 @@
 mod actions;
 mod design;
 mod discovery;
+mod gossip;
 mod media;
 mod model;
 mod sync;
@@ -27,11 +28,13 @@ use std::{
     collections::HashSet,
     io::Cursor,
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use transport::{NetworkTransport, SwarmPostsBlob, SwarmProfileBlob, TcpSwarmTransport};
 
 use discovery::{DiscoveredPeer, LanAnnounce, LanDiscovery};
+use gossip::{GossipNode, GossipPresence, UpdateKind};
 
 const STORAGE_KEYPAIR: &str = "keypair";
 const STORAGE_PROFILE: &str = "profile";
@@ -106,8 +109,13 @@ struct App {
     storage: FileStorage,
     transport: TcpSwarmTransport,
     lan_discovery: LanDiscovery,
+    /// Internet-wide discovery/sync-trigger node (iroh + iroh-gossip), opened
+    /// lazily once a keypair is available.
+    gossip: Option<Arc<GossipNode>>,
     /// Snapshot of LAN-discovered peers, refreshed on every tick.
     discovered_peers: Vec<DiscoveredPeer>,
+    /// Snapshot of gossip-discovered peers, refreshed on every tick.
+    gossip_peers: Vec<DiscoveredPeer>,
     /// Message IDs currently shown as decrypted; runtime only, never persisted.
     revealed_message_ids: HashSet<String>,
     status_line: String,
@@ -138,7 +146,9 @@ impl App {
             storage,
             transport,
             lan_discovery: LanDiscovery::new(),
+            gossip: None,
             discovered_peers: Vec::new(),
+            gossip_peers: Vec::new(),
             revealed_message_ids: HashSet::new(),
             status_line: "Loading local state...".to_string(),
             syncing: false,
@@ -215,6 +225,7 @@ impl App {
                     self.publish_local_profile_to_swarm();
                     self.publish_local_posts_to_swarm();
                     self.start_lan_discovery();
+                    self.start_gossip();
                 }
 
                 self.recalculate_network();
@@ -222,9 +233,15 @@ impl App {
                 self.run_peer_sync()
             }
             Message::Tick(_instant) => {
-                // Refresh the LAN peer snapshot so the UI stays current.
+                // Refresh the LAN and gossip peer snapshots so the UI stays current.
                 self.discovered_peers = self.lan_discovery.get_discovered();
-                self.network.discovered_peer_count = self.discovered_peers.len();
+                self.gossip_peers = self
+                    .gossip
+                    .as_ref()
+                    .map(|g| g.get_discovered())
+                    .unwrap_or_default();
+                self.network.discovered_peer_count =
+                    self.discovered_peers.len() + self.gossip_peers.len();
                 self.refresh_transport_peers_from_discovery();
                 self.run_peer_sync()
             }
@@ -385,6 +402,7 @@ impl App {
                         self.publish_local_profile_to_swarm();
                         self.recalculate_network();
                         self.start_lan_discovery();
+                        self.start_gossip();
                         return self.run_peer_sync();
                     }
                     Err(e) => {
@@ -709,15 +727,20 @@ impl App {
             Message::LanDiscoveryToggle => {
                 if self.lan_discovery.is_active() {
                     self.lan_discovery.stop();
+                    if let Some(gossip) = &self.gossip {
+                        gossip.stop();
+                    }
                     self.discovered_peers.clear();
+                    self.gossip_peers.clear();
                     self.network.lan_discovery_active = false;
                     self.network.discovered_peer_count = 0;
                     self.refresh_transport_peers_from_discovery();
-                    self.status_line = "LAN discovery stopped".to_string();
+                    self.status_line = "Discovery stopped".to_string();
                 } else {
                     self.start_lan_discovery();
+                    self.start_gossip();
                     self.status_line = if self.network.lan_discovery_active {
-                        "LAN discovery started".to_string()
+                        "Discovery started".to_string()
                     } else {
                         "LAN discovery unavailable (port in use or firewall)".to_string()
                     };
@@ -921,6 +944,9 @@ impl App {
             {
                 self.status_line = format!("Profile publish failed: {e}");
             }
+            if let Some(gossip) = &self.gossip {
+                gossip.announce_update(UpdateKind::Profile, self.gossip_presence(profile));
+            }
         }
     }
 
@@ -935,6 +961,9 @@ impl App {
                 .save_posts(&profile.profile.fingerprint, &blob)
             {
                 self.status_line = format!("Post publish failed: {e}");
+            }
+            if let Some(gossip) = &self.gossip {
+                gossip.announce_update(UpdateKind::Post, self.gossip_presence(profile));
             }
         }
     }
@@ -961,6 +990,37 @@ impl App {
         self.refresh_transport_peers_from_discovery();
     }
 
+    /// Attempt to start internet-wide (iroh/iroh-gossip) discovery for the
+    /// current profile. Opens the underlying node lazily on first use.
+    fn start_gossip(&mut self) {
+        let Some(sp) = self.profile.clone() else {
+            return;
+        };
+        if self.gossip.is_none() {
+            if let Some(kp) = &self.keypair {
+                self.gossip = GossipNode::open(kp).ok().map(Arc::new);
+            }
+        }
+        let Some(gossip) = self.gossip.clone() else {
+            return;
+        };
+        let bootstrap = self
+            .contacts
+            .iter()
+            .filter_map(|c| c.known_public_key.clone())
+            .collect();
+        gossip.start(self.gossip_presence(&sp), bootstrap);
+    }
+
+    fn gossip_presence(&self, profile: &SignedProfile) -> GossipPresence {
+        GossipPresence {
+            fingerprint: profile.profile.fingerprint.clone(),
+            username: profile.profile.username.clone(),
+            display_name: profile.profile.display_name.clone(),
+            tcp_addr: self.transport.advertised_addr(),
+        }
+    }
+
     fn refresh_transport_peers_from_discovery(&self) {
         let mut peers = Vec::new();
 
@@ -975,7 +1035,7 @@ impl App {
                 }
             }
         }
-        for peer in &self.discovered_peers {
+        for peer in self.discovered_peers.iter().chain(self.gossip_peers.iter()) {
             if let Some(addr) = peer
                 .tcp_addr
                 .as_deref()

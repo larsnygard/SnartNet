@@ -14,6 +14,10 @@ chrono = { workspace = true }
 futures = "0.3"
 librqbit = { version = "9.0.1", default-features = false, features = ["rust-tls"] }
 mainline = "8.0.0"
+iroh = { version = "1.1.0", default-features = false, features = ["tls-ring", "metrics"] }
+iroh-gossip = { version = "0.101.0", default-features = false, features = ["net"] }
+n0-future = "0.3"
+bytes = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 tempfile = "3"

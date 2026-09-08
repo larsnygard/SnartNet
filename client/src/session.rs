@@ -1,7 +1,7 @@
 //! Durable Android host state. Commands commit before changing the visible state.
 use crate::{
-    actions::*, dht::DhtNode, discovery::*, model::*, protocol::*, torrent::TorrentNode,
-    transport::*, *,
+    actions::*, dht::DhtNode, discovery::*, gossip::{GossipNode, GossipPresence, UpdateKind},
+    model::*, protocol::*, torrent::TorrentNode, transport::*, *,
 };
 use futures::executor::block_on;
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,7 @@ pub struct Session {
     pub transport: TcpSwarmTransport,
     pub torrent: Option<Arc<TorrentNode>>,
     pub dht: Option<Arc<DhtNode>>,
+    pub gossip: Option<Arc<GossipNode>>,
     discovery: LanDiscovery,
     paused: bool,
     pub listener_error: Option<String>,
@@ -71,12 +72,18 @@ impl Session {
             .as_ref()
             .and_then(|keypair| DhtNode::open(keypair, bind.port().saturating_add(2)).ok())
             .map(Arc::new);
+        let gossip = state
+            .keypair
+            .as_ref()
+            .and_then(|keypair| GossipNode::open(keypair).ok())
+            .map(Arc::new);
         Ok(Self {
             state,
             storage,
             transport,
             torrent,
             dht,
+            gossip,
             discovery: LanDiscovery::new(),
             paused: false,
             listener_error: None,
@@ -107,6 +114,14 @@ impl Session {
                 .and_then(|keypair| DhtNode::open(keypair, 47473).ok())
                 .map(Arc::new);
         }
+        if self.gossip.is_none() {
+            self.gossip = self
+                .state
+                .keypair
+                .as_ref()
+                .and_then(|keypair| GossipNode::open(keypair).ok())
+                .map(Arc::new);
+        }
     }
 
     fn publish_profile_torrent(&mut self) -> Result<(), String> {
@@ -129,6 +144,9 @@ impl Session {
                 .map_err(|e| e.to_string())?;
             dht.publish("snartnet/profile", &[&profile.profile.fingerprint], &value)?;
         }
+        if let Some(gossip) = self.gossip.as_ref() {
+            gossip.announce_update(UpdateKind::Profile, self.gossip_presence(&profile));
+        }
         Ok(())
     }
 
@@ -143,6 +161,11 @@ impl Session {
             let value = serde_json::to_vec(&json!({"magnet": magnet, "object_id": object_id}))
                 .map_err(|e| e.to_string())?;
             dht.publish("snartnet/feed", &[&post.post.author_fingerprint], &value)?;
+        }
+        if let Some(gossip) = self.gossip.as_ref() {
+            if let Some(profile) = &self.state.profile {
+                gossip.announce_update(UpdateKind::Post, self.gossip_presence(profile));
+            }
         }
         Ok(())
     }
@@ -400,6 +423,24 @@ impl Session {
                 display_name: p.profile.display_name.clone(),
                 tcp_addr: self.transport.advertised_addr(),
             });
+            if let Some(gossip) = &self.gossip {
+                let bootstrap = self
+                    .state
+                    .contacts
+                    .iter()
+                    .filter_map(|c| c.known_public_key.clone())
+                    .collect();
+                gossip.start(self.gossip_presence(p), bootstrap);
+            }
+        }
+    }
+
+    fn gossip_presence(&self, profile: &SignedProfile) -> GossipPresence {
+        GossipPresence {
+            fingerprint: profile.profile.fingerprint.clone(),
+            username: profile.profile.username.clone(),
+            display_name: profile.profile.display_name.clone(),
+            tcp_addr: self.transport.advertised_addr(),
         }
     }
 
@@ -420,6 +461,14 @@ impl Session {
                 .iter()
                 .filter_map(|p| p.tcp_addr.as_ref()?.parse::<std::net::SocketAddr>().ok()),
         );
+        if let Some(gossip) = &self.gossip {
+            peers.extend(
+                gossip
+                    .get_discovered()
+                    .iter()
+                    .filter_map(|p| p.tcp_addr.as_ref()?.parse::<std::net::SocketAddr>().ok()),
+            );
+        }
         self.transport.set_peers(peers);
         let transport = self.transport.clone();
         let posts = self.state.posts.clone();
@@ -485,7 +534,15 @@ impl Session {
             }).collect();
             json!({"fingerprint": t.contact_fingerprint, "unread": t.unread_count, "messages": messages})
         }).collect();
-        let nearby: Vec<Value> = self.discovery.get_discovered().iter().map(|p| json!({
+        let mut nearby_peers = self.discovery.get_discovered();
+        if let Some(gossip) = &self.gossip {
+            for peer in gossip.get_discovered() {
+                if !nearby_peers.iter().any(|p| p.fingerprint == peer.fingerprint) {
+                    nearby_peers.push(peer);
+                }
+            }
+        }
+        let nearby: Vec<Value> = nearby_peers.iter().map(|p| json!({
             "fingerprint": p.fingerprint, "alias": p.display_name.as_ref().unwrap_or(&p.username), "address": p.tcp_addr
         })).collect();
         json!({"profile": self.state.profile.as_ref().map(|p| &p.profile),
@@ -497,7 +554,8 @@ impl Session {
             "discovery": self.discovery.is_active(), "lastSync": self.last_sync,
             "peers": self.transport.peer_snapshot().len(),
             "dht": self.dht.as_ref().map(|node| node.status()),
-            "torrent": self.torrent.as_ref().map(|node| node.status())})
+            "torrent": self.torrent.as_ref().map(|node| node.status()),
+            "gossip": self.gossip.as_ref().map(|node| node.status())})
     }
 
     pub fn invitation(&self) -> Result<String, String> {
@@ -634,6 +692,9 @@ impl Session {
                     self.start_discovery();
                 } else {
                     self.discovery.stop();
+                    if let Some(gossip) = &self.gossip {
+                        gossip.stop();
+                    }
                 }
                 return Ok(self.snapshot());
             }
