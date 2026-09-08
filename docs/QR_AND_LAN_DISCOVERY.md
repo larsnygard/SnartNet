@@ -26,6 +26,14 @@ After a profile is saved or loaded, the app announces its fingerprint, username,
 
 **Connection → Turn off discovery** stops announcements and clears the list. A listening socket may remain reserved until the app exits to support restarting discovery. Discovery depends on local broadcast support and firewall settings; a blocked or occupied port is reported as inactive. It does not traverse routers. Share an invitation directly if broadcast discovery is unavailable.
 
+## Internet-wide discovery
+
+Alongside the LAN broadcast, the app opens an [iroh](https://iroh.computer) endpoint and subscribes to an [iroh-gossip](https://github.com/n0-computer/iroh-gossip) topic shared by every SnartNet peer. This works across the internet, not just the local network, and does not require a relay operated by SnartNet: iroh's public relay and discovery infrastructure is used to establish direct, end-to-end encrypted peer connections whenever possible. The gossip endpoint reuses the same Ed25519 signing key as your profile, so no additional identity or key exchange is needed.
+
+The **Turn off/on discovery** button in **Connection** controls both LAN and internet-wide discovery together. Peers discovered this way appear in **Contacts → Nearby** alongside LAN peers, and their addresses are merged into the same sync peer list as saved contacts and BitTorrent/DHT peers.
+
+Only a small, unsigned presence notice (fingerprint, username, display name, and TCP address) is broadcast over gossip after saving a profile or publishing a post; it is a lightweight signal that new content is available, not a data channel. Bulk data (profiles, posts, and messages) is still exchanged through the existing direct TCP connections and BitTorrent/DHT swarm described below. **Across networks** in **Connection** shows whether the internet-wide gossip endpoint is active and how many peers it currently sees.
+
 ## Messaging and retry
 
 Keep both clients open for the initial profile exchange. Once the recipient's signed profile has been verified, the composer becomes available. Type a message and press Enter or **Send**.
