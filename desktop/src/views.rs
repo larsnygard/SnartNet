@@ -789,7 +789,7 @@ impl App {
             button(if self.network.lan_discovery_active { "Turn off discovery" } else { "Turn on discovery" }).padding(12).style(button::secondary).on_press(Message::LanDiscoveryToggle),
         ].spacing(16));
         scrollable(column![card(connection).width(Length::Fill), nearby,
-            card(column![text("Across networks").size(21), muted("Messages use direct torrent peers discovered through public DHT bootstrap nodes. IPv6 and UPnP are attempted automatically. If both peers are behind unreachable NAT, use a VPN or configure port forwarding; SnartNet does not operate a relay."), text(format!("Internet discovery (iroh gossip): {gossip_label}")).size(16), button("Edit invitation address").padding(12).style(button::secondary).on_press(Message::SwitchPanel(Panel::Profile))].spacing(16)),
+            card(column![text("Across networks").size(21), muted("Messages use direct torrent peers discovered through public DHT bootstrap nodes. IPv6 and UPnP are attempted automatically. If a direct or torrent path isn't available, queued chat messages also try a direct connection over iroh, which hole-punches through NAT or falls back to an iroh relay server (test relays by default) so both peers can be behind unreachable NAT without a VPN or port forwarding."), text(format!("Internet discovery (iroh gossip): {gossip_label}")).size(16), button("Edit invitation address").padding(12).style(button::secondary).on_press(Message::SwitchPanel(Panel::Profile))].spacing(16)),
             button("Clean unused cache files older than 7 days").style(button::text).on_press(Message::CleanupLocalFiles),
         ].spacing(20)).height(Length::Fill).into()
     }

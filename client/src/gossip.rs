@@ -1,4 +1,4 @@
-//! Internet-wide peer discovery and change notification via iroh + iroh-gossip.
+//! Internet-wide peer discovery, change notification, and direct chat via iroh.
 //!
 //! `discovery.rs` only finds peers on the local subnet. This module extends discovery
 //! beyond the LAN: each node opens an [`iroh`] `Endpoint` keyed on the profile's Ed25519
@@ -7,12 +7,24 @@
 //! single well-known [`iroh_gossip`] topic shared by every SnartNet peer.
 //!
 //! Gossip only ever carries small control-plane payloads: presence announcements and
-//! "something changed" notices. Profile, post, and message bytes still travel over the
-//! existing BitTorrent/DHT transport (see `torrent.rs` / `dht.rs`); gossip just lets
-//! peers learn about each other and react to updates without waiting for the next poll.
+//! "something changed" notices. Profile and post objects still travel over the existing
+//! BitTorrent/DHT transport (see `torrent.rs` / `dht.rs`).
+//!
+//! Chat messages are different: two peers that are both behind restrictive NATs may
+//! never become reachable over plain TCP or BitTorrent. The same iroh `Endpoint` used
+//! for gossip also accepts a second, dedicated ALPN ([`CHAT_ALPN`]) used to open a
+//! direct QUIC connection to a peer by node id. iroh transparently attempts NAT hole
+//! punching and falls back to relaying traffic through an iroh relay server when a
+//! direct path cannot be established, so a chat message can reach its recipient even
+//! when neither side has a port-forwarded, publicly reachable address. By default this
+//! uses iroh's *staging* (test) relay infrastructure; see [`relay_mode_from_env`].
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use bytes::Bytes;
-use iroh::{endpoint::presets, protocol::Router, Endpoint, PublicKey, SecretKey};
+use iroh::{
+    endpoint::{presets, Connection},
+    protocol::{AcceptError, ProtocolHandler, Router},
+    Endpoint, PublicKey, RelayMode, SecretKey,
+};
 use iroh_gossip::{
     api::{Event, GossipSender},
     net::{Gossip, GOSSIP_ALPN},
@@ -44,8 +56,71 @@ const SHUTDOWN_CHECK_INTERVAL_MS: u64 = 500;
 /// Seconds after last-seen before a gossip-discovered peer is considered gone.
 const PEER_EXPIRY_SECS: u64 = 180;
 
+/// ALPN identifying the direct peer-to-peer chat protocol carried over the same iroh
+/// endpoint used for gossip. Distinct from [`GOSSIP_ALPN`] so the two protocols can be
+/// dispatched independently by the [`Router`].
+pub const CHAT_ALPN: &[u8] = b"snartnet/chat/1";
+
+/// Largest chat envelope accepted over the direct iroh channel (1 MiB). Generous for a
+/// signed text message; guards a misbehaving peer from exhausting memory.
+const MAX_CHAT_MESSAGE_BYTES: usize = 1024 * 1024;
+
+/// How long to wait for a chat connection, send, and acknowledgement before giving up.
+const CHAT_SEND_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Environment variable selecting which iroh relay infrastructure to use. One of
+/// `staging` (default; iroh's test relays), `prod`/`production`, or `off`/`disabled`.
+pub const ENV_RELAY_MODE: &str = "SNARTNET_IROH_RELAY";
+
+/// Picks the iroh [`RelayMode`] for our endpoint from [`ENV_RELAY_MODE`].
+///
+/// Direct NAT-to-NAT connections frequently need a relay to punch through, so this
+/// defaults to iroh's staging (test) relay servers rather than disabling relays. Set
+/// `SNARTNET_IROH_RELAY=prod` to use n0's production relays instead, or `off` to
+/// disable relaying entirely (only same-network/directly-reachable peers will connect).
+pub fn relay_mode_from_env() -> RelayMode {
+    match std::env::var(ENV_RELAY_MODE) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "prod" | "production" | "default" => RelayMode::Default,
+            "off" | "disabled" | "none" => RelayMode::Disabled,
+            _ => RelayMode::Staging,
+        },
+        Err(_) => RelayMode::Staging,
+    }
+}
+
 fn topic_id() -> TopicId {
     TopicId::from_bytes(*blake3::hash(GOSSIP_NAMESPACE.as_bytes()).as_bytes())
+}
+
+/// Decodes a base64-encoded Ed25519 public key (as stored on `Contact`/`Profile`) into
+/// the iroh node id used to dial that peer directly.
+pub fn public_key_from_base64(key: &str) -> Option<PublicKey> {
+    let bytes = STANDARD.decode(key).ok()?;
+    let bytes: [u8; 32] = bytes.try_into().ok()?;
+    PublicKey::from_bytes(&bytes).ok()
+}
+
+/// Accept-side handler for [`CHAT_ALPN`]: reads one length-bounded message per
+/// connection into `inbox` and sends back a small acknowledgement.
+#[derive(Debug, Clone)]
+struct ChatProtocol {
+    inbox: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl ProtocolHandler for ChatProtocol {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let (mut send, mut recv) = connection.accept_bi().await?;
+        let data = recv
+            .read_to_end(MAX_CHAT_MESSAGE_BYTES)
+            .await
+            .map_err(AcceptError::from_err)?;
+        self.inbox.lock().unwrap().push(data);
+        send.write_all(b"OK").await.map_err(AcceptError::from_err)?;
+        send.finish().map_err(AcceptError::from_err)?;
+        connection.closed().await;
+        Ok(())
+    }
 }
 
 /// What kind of change a gossip announcement is reporting.
@@ -101,6 +176,8 @@ pub struct GossipNode {
     peers: Arc<Mutex<Vec<DiscoveredPeer>>>,
     active: Arc<AtomicBool>,
     status: Mutex<GossipStatus>,
+    /// Raw payloads received over [`CHAT_ALPN`], awaiting pickup by `drain_chat_inbox`.
+    chat_inbox: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 impl GossipNode {
@@ -121,18 +198,26 @@ impl GossipNode {
                 .build()
                 .map_err(|e| format!("gossip runtime failed: {e}"))?,
         );
-        let (endpoint, router, gossip) = runtime.block_on(async {
+        let (endpoint, router, gossip, chat_inbox) = runtime.block_on(async {
             let endpoint = Endpoint::builder(presets::N0)
                 .secret_key(secret_key)
-                .alpns(vec![GOSSIP_ALPN.to_vec()])
+                .relay_mode(relay_mode_from_env())
+                .alpns(vec![GOSSIP_ALPN.to_vec(), CHAT_ALPN.to_vec()])
                 .bind()
                 .await
                 .map_err(|e| format!("iroh endpoint bind failed: {e}"))?;
             let gossip = Gossip::builder().spawn(endpoint.clone());
+            let chat_inbox = Arc::new(Mutex::new(Vec::new()));
             let router = Router::builder(endpoint.clone())
                 .accept(GOSSIP_ALPN, gossip.clone())
+                .accept(
+                    CHAT_ALPN,
+                    ChatProtocol {
+                        inbox: chat_inbox.clone(),
+                    },
+                )
                 .spawn();
-            Ok::<_, String>((endpoint, router, gossip))
+            Ok::<_, String>((endpoint, router, gossip, chat_inbox))
         })?;
         let node_id = endpoint.id().to_string();
         Ok(Self {
@@ -149,6 +234,7 @@ impl GossipNode {
                 peer_count: 0,
                 last_error: None,
             }),
+            chat_inbox,
         })
     }
 
@@ -173,9 +259,7 @@ impl GossipNode {
 
         let bootstrap_ids: Vec<PublicKey> = bootstrap
             .iter()
-            .filter_map(|key| STANDARD.decode(key).ok())
-            .filter_map(|bytes| <[u8; 32]>::try_from(bytes).ok())
-            .filter_map(|bytes| PublicKey::from_bytes(&bytes).ok())
+            .filter_map(|key| public_key_from_base64(key))
             .collect();
 
         let this = self.clone();
@@ -327,6 +411,39 @@ impl GossipNode {
             .map(|status| status.clone())
             .unwrap_or_default()
     }
+
+    /// Dial `target` directly over iroh (using NAT hole punching, or the configured
+    /// relay as a fallback) and hand it `payload` on a fresh bidirectional stream.
+    ///
+    /// This does not require the gossip topic to be joined; it works as soon as the
+    /// endpoint is open. Blocks the calling thread until the peer acknowledges receipt
+    /// or [`CHAT_SEND_TIMEOUT`] elapses. Returns `true` only once the peer has
+    /// acknowledged the message.
+    pub fn send_chat(&self, target: PublicKey, payload: Vec<u8>) -> bool {
+        let endpoint = self.endpoint.clone();
+        self.runtime.block_on(async move {
+            tokio::time::timeout(CHAT_SEND_TIMEOUT, async move {
+                let connection = endpoint
+                    .connect(target, CHAT_ALPN)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let (mut send, mut recv) = connection.open_bi().await.map_err(|e| e.to_string())?;
+                send.write_all(&payload).await.map_err(|e| e.to_string())?;
+                send.finish().map_err(|e| e.to_string())?;
+                let ack = recv.read_to_end(64).await.map_err(|e| e.to_string())?;
+                connection.close(0u32.into(), b"done");
+                Ok::<_, String>(!ack.is_empty())
+            })
+            .await
+            .unwrap_or(Ok(false))
+            .unwrap_or(false)
+        })
+    }
+
+    /// Take and clear all chat payloads received over [`CHAT_ALPN`] since the last call.
+    pub fn drain_chat_inbox(&self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut *self.chat_inbox.lock().unwrap())
+    }
 }
 
 #[inline]
@@ -367,5 +484,60 @@ mod tests {
     #[test]
     fn topic_id_is_deterministic() {
         assert_eq!(topic_id(), topic_id());
+    }
+
+    #[test]
+    fn public_key_from_base64_matches_node_id() {
+        let keypair = KeyPair::generate().unwrap();
+        let node = GossipNode::open(&keypair).unwrap();
+        let decoded = public_key_from_base64(&keypair.public_key).expect("valid key");
+        assert_eq!(decoded.to_string(), node.node_id());
+    }
+
+    #[test]
+    fn public_key_from_base64_rejects_garbage() {
+        assert!(public_key_from_base64("not-base64!!").is_none());
+        assert!(public_key_from_base64("").is_none());
+    }
+
+    #[test]
+    fn relay_mode_env_defaults_to_staging_test_relays() {
+        // SAFETY: tests run single-threaded per-process for env-var mutation here isn't
+        // guaranteed, but this only reads/restores a var private to this test's checks.
+        let previous = std::env::var(ENV_RELAY_MODE).ok();
+        std::env::remove_var(ENV_RELAY_MODE);
+        assert_eq!(relay_mode_from_env(), RelayMode::Staging);
+
+        std::env::set_var(ENV_RELAY_MODE, "prod");
+        assert_eq!(relay_mode_from_env(), RelayMode::Default);
+
+        std::env::set_var(ENV_RELAY_MODE, "off");
+        assert_eq!(relay_mode_from_env(), RelayMode::Disabled);
+
+        std::env::set_var(ENV_RELAY_MODE, "staging");
+        assert_eq!(relay_mode_from_env(), RelayMode::Staging);
+
+        match previous {
+            Some(value) => std::env::set_var(ENV_RELAY_MODE, value),
+            None => std::env::remove_var(ENV_RELAY_MODE),
+        }
+    }
+
+    /// End-to-end proof that two independent nodes can exchange a chat message purely
+    /// over iroh (no shared process state, no LAN broadcast). Requires real network
+    /// egress to iroh's relay/discovery infrastructure, so it's ignored by default;
+    /// run explicitly with `cargo test -p snartnet-client -- --ignored`.
+    #[test]
+    #[ignore = "requires network access to iroh's staging relay/discovery infrastructure"]
+    fn two_nodes_exchange_a_direct_chat_message_via_iroh() {
+        let alice = GossipNode::open(&KeyPair::generate().unwrap()).unwrap();
+        let bob = GossipNode::open(&KeyPair::generate().unwrap()).unwrap();
+        let bob_id: PublicKey = bob.node_id().parse().expect("valid node id");
+
+        let delivered = alice.send_chat(bob_id, b"hello from alice".to_vec());
+        assert!(delivered, "message should be acknowledged by the peer");
+
+        let inbox = bob.drain_chat_inbox();
+        assert_eq!(inbox, vec![b"hello from alice".to_vec()]);
     }
 }

@@ -7471,7 +7471,7 @@ dependencies = [
 
 [[package]]
 name = "snartnet-android-bridge"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "base64 0.21.7",
  "image 0.25.10",
@@ -7486,7 +7486,7 @@ dependencies = [
 
 [[package]]
 name = "snartnet-cli"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "chrono",
  "clap",
@@ -7497,7 +7497,7 @@ dependencies = [
 
 [[package]]
 name = "snartnet-client"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "base64 0.21.7",
  "blake3",
@@ -7518,7 +7518,7 @@ dependencies = [
 
 [[package]]
 name = "snartnet-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "base64 0.21.7",
  "blake3",
@@ -7544,7 +7544,7 @@ dependencies = [
 
 [[package]]
 name = "snartnet-desktop"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "base64 0.21.7",
  "blake3",

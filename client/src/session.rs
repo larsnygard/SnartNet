@@ -481,7 +481,8 @@ impl Session {
             .filter(|m| !m.incoming && m.delivery == DeliveryState::Queued)
             .filter_map(|m| m.envelope.clone())
             .collect();
-        Some(move || sync::exchange(transport, profile, posts, contacts, pending))
+        let gossip = self.gossip.clone();
+        Some(move || sync::exchange(transport, profile, posts, contacts, pending, gossip))
     }
 
     pub fn apply_sync(&mut self, result: sync::SyncResult) -> Result<(), String> {

@@ -21,10 +21,11 @@ impl App {
             .filter(|m| !m.incoming && m.delivery == DeliveryState::Queued)
             .filter_map(|m| m.envelope.clone())
             .collect();
+        let gossip = self.gossip.clone();
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    exchange(transport, profile, posts, contacts, pending)
+                    exchange(transport, profile, posts, contacts, pending, gossip)
                 })
                 .await
                 .map_err(|e| e.to_string())

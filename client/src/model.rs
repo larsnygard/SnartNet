@@ -112,6 +112,10 @@ pub struct ChatItem {
     #[serde(default)]
     pub nonce_b64: Option<String>,
     pub pushed_via_bittorrent: bool,
+    /// Set when this message arrived over a direct iroh chat connection rather than
+    /// through the BitTorrent/DHT mailbox or an inbox pull.
+    #[serde(default)]
+    pub pushed_via_iroh: bool,
     pub created_label: String,
     #[serde(default)]
     pub verified_sender: bool,
@@ -209,6 +213,7 @@ impl ChatItem {
             encryption_alg: message.body_enc.clone(),
             nonce_b64: message.nonce_b64.clone(),
             pushed_via_bittorrent: false,
+            pushed_via_iroh: false,
             created_label: message.created_at.format("%d %b · %H:%M UTC").to_string(),
             verified_sender: true,
             delivery: DeliveryState::Queued,

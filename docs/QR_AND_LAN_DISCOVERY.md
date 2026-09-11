@@ -32,13 +32,19 @@ Alongside the LAN broadcast, the app opens an [iroh](https://iroh.computer) endp
 
 The **Turn off/on discovery** button in **Connection** controls both LAN and internet-wide discovery together. Peers discovered this way appear in **Contacts → Nearby** alongside LAN peers, and their addresses are merged into the same sync peer list as saved contacts and BitTorrent/DHT peers.
 
-Only a small, unsigned presence notice (fingerprint, username, display name, and TCP address) is broadcast over gossip after saving a profile or publishing a post; it is a lightweight signal that new content is available, not a data channel. Bulk data (profiles, posts, and messages) is still exchanged through the existing direct TCP connections and BitTorrent/DHT swarm described below. **Across networks** in **Connection** shows whether the internet-wide gossip endpoint is active and how many peers it currently sees.
+Only a small, unsigned presence notice (fingerprint, username, display name, and TCP address) is broadcast over gossip after saving a profile or publishing a post; it is a lightweight signal that new content is available, not a data channel. Bulk data (profiles, posts) is still exchanged through the existing direct TCP connections and BitTorrent/DHT swarm described below. **Across networks** in **Connection** shows whether the internet-wide gossip endpoint is active and how many peers it currently sees.
+
+### Direct chat over iroh (NAT-to-NAT)
+
+Chat messages are the one payload that needs to reach a specific peer promptly, so they get an additional delivery path: the same iroh endpoint used for gossip also opens a dedicated connection to the recipient's node id (which is the same key as their SnartNet fingerprint) whenever a queued message can't be relayed over TCP or BitTorrent. iroh attempts to hole-punch a direct path through NAT and, if that fails, falls back to relaying the encrypted stream through an iroh relay server. This lets two clients that are both behind restrictive/unreachable NAT still start a chat with no VPN, port forwarding, or manual endpoint sharing, as long as both processes are online.
+
+By default this uses iroh's staging (test) relay infrastructure rather than its production relays. Set the `SNARTNET_IROH_RELAY` environment variable to change this: `prod`/`production` to use n0's production relays, or `off`/`disabled` to rely only on directly reachable/hole-punched paths.
 
 ## Messaging and retry
 
 Keep both clients open for the initial profile exchange. Once the recipient's signed profile has been verified, the composer becomes available. Type a message and press Enter or **Send**.
 
-The signed ciphertext is persisted before the draft is cleared. Outgoing messages remain **Queued** until a peer accepts them. Sync retries queued messages every four seconds when enabled, including after restart. **Relayed** acknowledges peer storage only; it does not mean the recipient read or received the message. Peers can also pull the inbox from the sender.
+The signed ciphertext is persisted before the draft is cleared. Outgoing messages remain **Queued** until a peer accepts them, whether over TCP, BitTorrent, or the direct iroh chat channel above. Sync retries queued messages every four seconds when enabled, including after restart. **Relayed** acknowledges peer storage/acknowledgement only; it does not mean the recipient read the message. Peers can also pull the inbox from the sender.
 
 Inbox updates merge under a write lock and replace the cache atomically. Duplicate envelopes do not produce repeated chat entries or unread counts. Received messages must match both the selected contact's signing identity and the local recipient fingerprint. Invalid signatures are excluded.
 
@@ -48,7 +54,7 @@ Plaintext is derived for display and is not stored in newly created chat records
 
 ## Remote setup
 
-The native protocol keeps direct TCP as a fallback, while profile, post, and message objects use direct BitTorrent peers discovered through signed DHT descriptors. IPv6 and UPnP port forwarding are attempted automatically. If both participants are behind unreachable NAT, a VPN or manual port forwarding may be needed; there is no managed SnartNet relay service.
+The native protocol keeps direct TCP as a fallback, while profile and post objects use direct BitTorrent peers discovered through signed DHT descriptors. IPv6 and UPnP port forwarding are attempted automatically. Chat messages additionally fall back to a direct iroh connection (see [Direct chat over iroh](#direct-chat-over-iroh-nat-to-nat) above), so two clients behind unreachable NAT can still chat without a VPN or manual port forwarding; SnartNet itself does not operate a relay, but relies on iroh's public relay infrastructure for that fallback path.
 
 ```bash
 # First instance; choose another root and port for the second instance.

@@ -97,6 +97,7 @@ fn two_clients_exchange_encrypted_messages_and_refresh_cached_profiles() {
         vec![],
         vec![contact(&bob_profile)],
         vec![first.clone()],
+        None,
     );
     assert!(sent.relayed_ids.contains(&first.message.id));
     let received = sync::exchange(
@@ -105,6 +106,7 @@ fn two_clients_exchange_encrypted_messages_and_refresh_cached_profiles() {
         vec![],
         vec![contact(&alice_profile)],
         vec![],
+        None,
     );
     assert_eq!(received.incoming.len(), 1);
     assert_eq!(
@@ -123,6 +125,7 @@ fn two_clients_exchange_encrypted_messages_and_refresh_cached_profiles() {
         vec![],
         vec![contact(&alice_profile)],
         vec![reply],
+        None,
     );
     let received = sync::exchange(
         a.clone(),
@@ -130,6 +133,7 @@ fn two_clients_exchange_encrypted_messages_and_refresh_cached_profiles() {
         vec![],
         vec![contact(&bob_profile)],
         vec![],
+        None,
     );
     assert_eq!(
         decrypt_for_display(
@@ -255,6 +259,7 @@ fn queued_ciphertext_survives_restart_and_retries_when_a_peer_appears() {
         vec![],
         app.contacts.clone(),
         vec![restored[0].messages[0].envelope.clone().unwrap()],
+        None,
     );
     let _ = app.apply_sync(result);
     assert_eq!(app.threads[0].messages[0].delivery, DeliveryState::Relayed);

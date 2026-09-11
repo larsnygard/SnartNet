@@ -1,6 +1,8 @@
 //! Blocking transport work runs on a worker. The UI applies a delta, so messages and
 //! contacts added while a sync is running cannot be replaced by an older snapshot.
 use super::*;
+use crate::gossip::{self, GossipNode};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncResult {
@@ -16,6 +18,7 @@ pub fn exchange(
     posts: Vec<SignedPost>,
     mut contacts: Vec<Contact>,
     pending: Vec<SignedMessage>,
+    gossip: Option<Arc<GossipNode>>,
 ) -> SyncResult {
     // Announce our signed key before sending envelopes. This also enables replies
     // when only one side has a reachable TCP endpoint.
@@ -70,11 +73,25 @@ pub fn exchange(
             messages: vec![message.clone()],
             updated_at: unix_secs(),
         };
-        if transport
+        let mut relayed = transport
             .save_inbox(&message.message.recipient_fingerprint, &inbox)
             .is_ok()
-            && transport.relay_message(&message)
-        {
+            && transport.relay_message(&message);
+        // Fall back to a direct iroh connection (hole-punched, or relayed through an
+        // iroh relay server as a last resort) when the recipient isn't reachable over
+        // plain TCP/BitTorrent, e.g. because both peers are behind restrictive NATs.
+        if !relayed {
+            if let Some(gossip) = &gossip {
+                relayed = contacts
+                    .iter()
+                    .find(|c| c.fingerprint == message.message.recipient_fingerprint)
+                    .and_then(|c| c.known_public_key.as_deref())
+                    .and_then(gossip::public_key_from_base64)
+                    .and_then(|node_id| serde_json::to_vec(&message).ok().map(|b| (node_id, b)))
+                    .is_some_and(|(node_id, bytes)| gossip.send_chat(node_id, bytes));
+            }
+        }
+        if relayed {
             result.relayed_ids.insert(message.message.id);
         }
     }
@@ -94,6 +111,35 @@ pub fn exchange(
                         ),
                     ));
                 }
+            }
+        }
+    }
+    // Chat messages that arrived over the direct iroh channel while we weren't
+    // reachable any other way.
+    if let Some(gossip) = &gossip {
+        for payload in gossip.drain_chat_inbox() {
+            let Ok(signed) = serde_json::from_slice::<SignedMessage>(&payload) else {
+                continue;
+            };
+            let Some(contact) = contacts
+                .iter()
+                .find(|c| c.fingerprint == signed.message.sender_fingerprint)
+            else {
+                continue;
+            };
+            if accepts_message(&signed, contact, &profile.profile.fingerprint)
+                && !result
+                    .incoming
+                    .iter()
+                    .any(|(_, item)| item.id == signed.message.id)
+            {
+                let mut item = ChatItem::from_signed(
+                    signed,
+                    true,
+                    contact.known_encryption_public_key.clone(),
+                );
+                item.pushed_via_iroh = true;
+                result.incoming.push((contact.fingerprint.clone(), item));
             }
         }
     }
