@@ -144,6 +144,18 @@ impl App {
                 })
                 .size(11)
                 .color(Color::from_rgb8(162, 237, 209)),
+            )
+            .push(
+                text(concat!(
+                    "v",
+                    env!("CARGO_PKG_VERSION"),
+                    " · ",
+                    env!("SNARTNET_BUILD_PROFILE"),
+                    "\nBuild ",
+                    env!("SNARTNET_BUILD")
+                ))
+                .size(11)
+                .color(Color::from_rgb8(170, 189, 213)),
             );
         container(navigation)
             .padding(22)
@@ -599,6 +611,14 @@ impl App {
             )
             .push(
                 row![
+                    button("Choose photo…")
+                        .padding(10)
+                        .style(button::secondary)
+                        .on_press(Message::BrowseForAvatar),
+                    button("Use camera")
+                        .padding(10)
+                        .style(button::secondary)
+                        .on_press(Message::CaptureAvatarFromCamera),
                     button("Load photo")
                         .padding(10)
                         .style(button::secondary)

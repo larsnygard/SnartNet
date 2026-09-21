@@ -60,6 +60,10 @@ enum Message {
     BioChanged(String),
     AvatarPathChanged(String),
     LoadAvatarFromPath,
+    BrowseForAvatar,
+    AvatarFileSelected(Result<Option<PathBuf>, String>),
+    CaptureAvatarFromCamera,
+    AvatarCaptured(Result<String, String>),
     ClearAvatar,
     SaveProfile,
     ProfileSaved(Result<(KeyPair, SignedProfile), String>),
@@ -314,6 +318,59 @@ impl App {
                     Err(e) => {
                         self.status_line = format!("Profile picture load failed: {e}");
                     }
+                }
+                Task::none()
+            }
+            Message::BrowseForAvatar => Task::perform(
+                async {
+                    tokio::task::spawn_blocking(|| {
+                        rfd::FileDialog::new()
+                            .add_filter("Profile pictures", &["png", "jpg", "jpeg", "webp"])
+                            .pick_file()
+                    })
+                    .await
+                    .map_err(|error| error.to_string())
+                },
+                Message::AvatarFileSelected,
+            ),
+            Message::AvatarFileSelected(result) => {
+                match result {
+                    Ok(Some(path)) => {
+                        self.forms.avatar_path_input = path.display().to_string();
+                        match load_avatar_data_url_from_path(&self.forms.avatar_path_input) {
+                            Ok(data_url) => {
+                                self.forms.avatar_data_url = Some(data_url);
+                                self.status_line = "Profile picture selected".to_string();
+                            }
+                            Err(error) => {
+                                self.status_line = format!("Profile picture load failed: {error}");
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        self.status_line = "Profile picture selection cancelled".to_string()
+                    }
+                    Err(error) => {
+                        self.status_line = format!("Could not open the photo picker: {error}");
+                    }
+                }
+                Task::none()
+            }
+            Message::CaptureAvatarFromCamera => Task::perform(
+                async {
+                    tokio::task::spawn_blocking(capture_avatar_from_default_camera)
+                        .await
+                        .map_err(|error| error.to_string())?
+                },
+                Message::AvatarCaptured,
+            ),
+            Message::AvatarCaptured(result) => {
+                match result {
+                    Ok(data_url) => {
+                        self.forms.avatar_data_url = Some(data_url);
+                        self.status_line = "Profile picture captured from camera".to_string();
+                    }
+                    Err(error) => self.status_line = format!("Camera capture failed: {error}"),
                 }
                 Task::none()
             }

@@ -82,6 +82,30 @@ pub(crate) fn load_avatar_data_url_from_path(path: &str) -> Result<String, Strin
     }
 
     let img = ::image::open(path).map_err(|e| format!("open failed: {e}"))?;
+    avatar_data_url_from_image(img)
+}
+
+pub(crate) fn capture_avatar_from_default_camera() -> Result<String, String> {
+    use nokhwa::{
+        pixel_format::RgbFormat,
+        utils::{CameraIndex, RequestedFormat, RequestedFormatType},
+        Camera,
+    };
+
+    let format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestResolution);
+    let mut camera = Camera::new(CameraIndex::Index(0), format)
+        .map_err(|error| format!("could not access the default camera: {error}"))?;
+    camera
+        .open_stream()
+        .map_err(|error| format!("could not start the camera: {error}"))?;
+    let frame = camera
+        .frame()
+        .and_then(|frame| frame.decode_image::<RgbFormat>())
+        .map_err(|error| format!("could not read a camera frame: {error}"))?;
+    avatar_data_url_from_image(::image::DynamicImage::ImageRgb8(frame))
+}
+
+fn avatar_data_url_from_image(img: ::image::DynamicImage) -> Result<String, String> {
     let resized = img.resize(256, 256, ::image::imageops::FilterType::Lanczos3);
     let mut png = Vec::new();
     resized

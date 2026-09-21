@@ -83,8 +83,7 @@ impl LanDiscovery {
         let listener = match &self.socket {
             Some(socket) => socket.clone(),
             None => {
-                let Ok(socket) = std::net::UdpSocket::bind(format!("0.0.0.0:{LAN_DISCOVERY_PORT}"))
-                else {
+                let Ok(socket) = bind_reusable_udp(LAN_DISCOVERY_PORT) else {
                     return false;
                 };
                 let socket = Arc::new(socket);
@@ -204,6 +203,21 @@ pub fn lan_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Bind a UDP socket for the discovery listener with `SO_REUSEADDR` (and
+/// `SO_REUSEPORT` where supported) set, so a lingering socket from a
+/// previous run or another local instance doesn't make the port appear
+/// permanently unavailable.
+fn bind_reusable_udp(port: u16) -> std::io::Result<std::net::UdpSocket> {
+    use socket2::{Domain, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
+    socket.set_reuse_address(true)?;
+    #[cfg(unix)]
+    socket.set_reuse_port(true)?;
+    let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
+    socket.bind(&addr.into())?;
+    Ok(socket.into())
 }
 
 /// Best-effort attempt to find this host's primary LAN IP address.
