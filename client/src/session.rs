@@ -6,30 +6,19 @@ use crate::{
     gossip::{GossipNode, GossipPresence, UpdateKind},
     model::*,
     protocol::*,
+    repository::{CanonicalState as State, IndexedStore},
     torrent::TorrentNode,
     transport::*,
     *,
 };
 use futures::executor::block_on;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use snartnet_core::{Message, MessageType};
 use std::{path::Path, sync::Arc};
 
-#[derive(Clone, Default, Serialize, Deserialize)]
-struct State {
-    keypair: Option<KeyPair>,
-    profile: Option<SignedProfile>,
-    posts: Vec<SignedPost>,
-    contacts: Vec<Contact>,
-    threads: Vec<ChatThread>,
-    #[serde(default)]
-    address: String,
-}
-
 pub struct Session {
     state: State,
-    storage: FileStorage,
+    repository: IndexedStore,
     pub transport: TcpSwarmTransport,
     pub torrent: Option<Arc<TorrentNode>>,
     pub dht: Option<Arc<DhtNode>>,
@@ -42,34 +31,8 @@ pub struct Session {
 
 impl Session {
     pub fn open(root: &Path, bind: std::net::SocketAddr) -> Result<Self, String> {
-        let storage = FileStorage::new(root.join("data")).map_err(|e| e.to_string())?;
-        let state = match storage
-            .get_json::<State>("client_state")
-            .map_err(|e| e.to_string())?
-        {
-            Some(state) => state,
-            None => {
-                let old = load_startup(&storage)?;
-                State {
-                    keypair: old.keypair,
-                    profile: old.profile,
-                    posts: old.local_posts,
-                    contacts: old.contacts,
-                    threads: old.threads,
-                    address: String::new(),
-                }
-            }
-        };
-        if let Some(profile) = &state.profile {
-            if !profile.verify().unwrap_or(false)
-                || state.keypair.as_ref().map(|k| &k.fingerprint)
-                    != Some(&profile.profile.fingerprint)
-            {
-                return Err(
-                    "Stored identity is invalid; restore a backup before continuing".into(),
-                );
-            }
-        }
+        let repository = IndexedStore::open(root)?;
+        let state = repository.load_state()?;
         let transport = TcpSwarmTransport::new(&root.join("swarm"), bind)?;
         let torrent = TorrentNode::open(root.join("torrent"), bind.port().saturating_add(1))
             .ok()
@@ -86,7 +49,7 @@ impl Session {
             .map(Arc::new);
         Ok(Self {
             state,
-            storage,
+            repository,
             transport,
             torrent,
             dht,
@@ -411,9 +374,7 @@ impl Session {
     }
 
     fn commit(&mut self, next: State) -> Result<(), String> {
-        self.storage
-            .set_json("client_state", &next)
-            .map_err(|e| e.to_string())?;
+        self.repository.save_state(&next)?;
         self.state = next;
         Ok(())
     }
@@ -933,7 +894,7 @@ mod tests {
         assert!(s.state.profile.as_ref().unwrap().verify().unwrap());
     }
     #[test]
-    fn failed_commit_preserves_state_and_concurrent_sync_keeps_new_contacts() {
+    fn canonical_commit_survives_a_broken_legacy_mirror_and_keeps_new_contacts() {
         let dir = tempfile::tempdir().unwrap();
         let peer_dir = tempfile::tempdir().unwrap();
         let mut s = client(dir.path(), "alice");
@@ -945,9 +906,8 @@ mod tests {
         assert_eq!(s.state.contacts.len(), 1);
         std::fs::remove_dir_all(dir.path().join("data")).unwrap();
         std::fs::write(dir.path().join("data"), "block writes").unwrap();
-        assert!(s
-            .command(json!({"op":"post", "content":"Must not appear"}))
-            .is_err());
-        assert!(s.state.posts.is_empty());
+        s.command(json!({"op":"post", "content":"Canonical state wins"}))
+            .unwrap();
+        assert_eq!(s.state.posts.len(), 1);
     }
 }

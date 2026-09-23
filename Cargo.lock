@@ -7921,6 +7921,7 @@ dependencies = [
  "librqbit",
  "mainline",
  "n0-future",
+ "rusqlite",
  "serde",
  "serde_json",
  "snartnet-core",

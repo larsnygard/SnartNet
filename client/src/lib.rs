@@ -5,6 +5,7 @@ pub mod discovery;
 pub mod gossip;
 pub mod model;
 pub mod protocol;
+pub mod repository;
 pub mod session;
 pub mod sync;
 pub mod torrent;

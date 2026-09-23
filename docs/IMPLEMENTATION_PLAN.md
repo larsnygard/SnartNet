@@ -8,9 +8,9 @@ roadmap.
 ## Status
 
 - **Status:** Active
-- **Current milestone:** M1 — Canonical indexed storage
-- **Last updated:** 2026-09-23
-- **Last completed:** M0.5 — v0.3.3 baseline validated
+- **Current milestone:** M2 — Persistent local daemon
+- **Last updated:** 2026-09-24
+- **Last completed:** M1.7 — storage migration coverage validated
 - **Known blockers:** None
 
 ## Working agreement
@@ -34,14 +34,14 @@ roadmap.
 
 ## M1 — Canonical indexed storage
 
-- [ ] **M1.1** Define the SQLite schema and migration framework.
-- [ ] **M1.2** Index immutable objects by signed ID, creation time, ingestion
+- [x] **M1.1** Define the SQLite schema and migration framework.
+- [x] **M1.2** Index immutable objects by signed ID, creation time, ingestion
   sequence, type, owner, and torrent descriptor.
-- [ ] **M1.3** Make the backend the exclusive writer of identity records.
-- [ ] **M1.4** Implement atomic transactions and migration rollback.
-- [ ] **M1.5** Import and verify v0.3.3 JSON and `client_state.json` data.
-- [ ] **M1.6** Back up imported data and reject conflicting identities.
-- [ ] **M1.7** Test migrations, deduplication, cursors, corruption, and clock
+- [x] **M1.3** Make the backend the exclusive writer of identity records.
+- [x] **M1.4** Implement atomic transactions and migration rollback.
+- [x] **M1.5** Import and verify v0.3.3 JSON and `client_state.json` data.
+- [x] **M1.6** Back up imported data and reject conflicting identities.
+- [x] **M1.7** Test migrations, deduplication, cursors, corruption, and clock
   skew.
 
 ## M2 — Persistent local daemon
@@ -142,4 +142,17 @@ roadmap.
 - Validation: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo build --workspace` pass after baseline formatting.
 - Decisions: daemon ownership, BitTorrent/Iroh separation, per-device Iroh identities, and the local API are captured in ADRs 0001–0004.
 - Next: M1.1 — define the SQLite schema and migration framework.
+- Blockers: none.
+
+### 2026-09-24
+
+- Completed: M1.1–M1.7.
+- Delivered: a versioned SQLite canonical store with immutable object indexing,
+  resumable cursors, transactional writes, v0.3.3 JSON import, conflict
+  rejection, and legacy-file backups. `Session` now uses this store as its
+  authoritative state writer; legacy JSON is a best-effort compatibility mirror.
+- Validation: focused repository and session tests cover migration, backup,
+  conflict rollback, deduplication, torrent descriptors, corrupt records, and
+  signed-clock skew.
+- Next: M2.1 — move storage and network ownership into one backend service.
 - Blockers: none.
