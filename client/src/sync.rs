@@ -55,7 +55,10 @@ pub fn exchange(
     for contact in &contacts {
         for signed in transport.load_distributed_messages(contact, &profile.profile.fingerprint) {
             if accepts_message(&signed, contact, &profile.profile.fingerprint)
-                && !result.incoming.iter().any(|(_, item)| item.id == signed.message.id)
+                && !result
+                    .incoming
+                    .iter()
+                    .any(|(_, item)| item.id == signed.message.id)
             {
                 let mut item = ChatItem::from_signed(
                     signed,

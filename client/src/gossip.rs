@@ -305,8 +305,7 @@ impl GossipNode {
                         if !send_this.active.load(Ordering::Relaxed) {
                             return;
                         }
-                        tokio::time::sleep(Duration::from_millis(SHUTDOWN_CHECK_INTERVAL_MS))
-                            .await;
+                        tokio::time::sleep(Duration::from_millis(SHUTDOWN_CHECK_INTERVAL_MS)).await;
                     }
                 }
             };

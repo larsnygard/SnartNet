@@ -430,12 +430,15 @@ impl App {
                             Ok(magnet) => {
                                 sp.profile.magnet_uri = Some(magnet);
                                 if let Err(error) = self.storage.set_json(STORAGE_PROFILE, &sp) {
-                                    self.status_line = format!("Profile saved; magnet could not be saved: {error}");
+                                    self.status_line = format!(
+                                        "Profile saved; magnet could not be saved: {error}"
+                                    );
                                 }
                             }
                             Err(error) => {
                                 publication_pending = true;
-                                self.status_line = format!("Profile saved; torrent publication pending: {error}");
+                                self.status_line =
+                                    format!("Profile saved; torrent publication pending: {error}");
                             }
                         }
                         self.forms.avatar_data_url = sp.profile.avatar_data_url.clone();

@@ -126,15 +126,13 @@ impl<S: StorageBackend> CoreService<S> {
 
     /// Return the current profile envelope (if any).
     pub fn get_profile(&self) -> Option<ProfileEnvelope> {
-        self.current_profile.as_ref().map(|signed| {
-            ProfileEnvelope {
-                profile: signed.profile.clone(),
-                signature: signed.signature.clone(),
-                magnet_uri: signed.profile.magnet_uri.clone(),
-                identity_uri: signed.profile.identity_uri(),
-                api: "profile-json-v1".to_string(),
-                version: signed.profile.version,
-            }
+        self.current_profile.as_ref().map(|signed| ProfileEnvelope {
+            profile: signed.profile.clone(),
+            signature: signed.signature.clone(),
+            magnet_uri: signed.profile.magnet_uri.clone(),
+            identity_uri: signed.profile.identity_uri(),
+            api: "profile-json-v1".to_string(),
+            version: signed.profile.version,
         })
     }
 

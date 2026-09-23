@@ -1,5 +1,7 @@
 # SnartNet Implementation Roadmap
 
+> Active, mergeable work is tracked in the [implementation plan](IMPLEMENTATION_PLAN.md). This document remains the product-level roadmap.
+
 Renamed from PeerSocial (original working title). Historical references to PeerSocial map to SnartNet.
 
 ## Overview

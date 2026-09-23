@@ -77,7 +77,6 @@ impl Profile {
             .unwrap_or_else(|_| percent_encode(&self.fingerprint));
         format!("snartnet://profile/{fingerprint}")
     }
-
 }
 
 pub fn profile_fingerprint_from_identity_uri(uri: &str) -> Result<String, String> {
@@ -182,8 +181,8 @@ fn percent_decode(value: &str) -> Result<String, String> {
             }
             let hex = std::str::from_utf8(&raw[index + 1..index + 3])
                 .map_err(|_| "invalid percent-encoding".to_string())?;
-            let byte = u8::from_str_radix(hex, 16)
-                .map_err(|_| "invalid percent-encoding".to_string())?;
+            let byte =
+                u8::from_str_radix(hex, 16).map_err(|_| "invalid percent-encoding".to_string())?;
             bytes.push(byte);
             index += 3;
         } else {
@@ -367,15 +366,15 @@ mod tests {
         let fingerprint = "ab/c+d=";
         let uri = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=snartnet-profile-ab%2Fc%2Bd%3D&x.snartnet.fp=ab%2Fc%2Bd%3D".to_string();
         validate_torrent_magnet_uri(&uri).unwrap();
-        assert_eq!(profile_fingerprint_from_magnet_uri(&uri).unwrap(), fingerprint);
+        assert_eq!(
+            profile_fingerprint_from_magnet_uri(&uri).unwrap(),
+            fingerprint
+        );
         validate_torrent_magnet_uri(
             "magnet:?xt=urn:btmh:12200123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         .unwrap();
-        assert!(validate_torrent_magnet_uri(
-            "magnet:?xt=urn:btih:0123456789abcdef"
-        )
-        .is_err());
+        assert!(validate_torrent_magnet_uri("magnet:?xt=urn:btih:0123456789abcdef").is_err());
     }
     #[test]
     fn a_valid_signature_cannot_claim_someone_elses_fingerprint() {

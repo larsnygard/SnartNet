@@ -779,10 +779,27 @@ impl App {
             .unwrap_or_else(|| "Unavailable".into());
         let (dht_status, torrent_status) = self.transport.distributed_status();
         let dht_label = dht_status
-            .map(|status| if status.bootstrapped { "bootstrapped" } else { "starting" })
+            .map(|status| {
+                if status.bootstrapped {
+                    "bootstrapped"
+                } else {
+                    "starting"
+                }
+            })
             .unwrap_or("disabled");
         let torrent_label = torrent_status
-            .map(|status| format!("{} ({}, {} peers)", if status.listening { "listening" } else { "stopped" }, status.reachability, status.peer_count))
+            .map(|status| {
+                format!(
+                    "{} ({}, {} peers)",
+                    if status.listening {
+                        "listening"
+                    } else {
+                        "stopped"
+                    },
+                    status.reachability,
+                    status.peer_count
+                )
+            })
             .unwrap_or_else(|| "disabled".into());
         let gossip_label = self
             .gossip

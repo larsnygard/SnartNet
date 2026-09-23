@@ -92,7 +92,11 @@ impl TorrentNode {
     }
 
     pub fn status(&self) -> TorrentStatus {
-        let mut status = self.status.lock().map(|status| status.clone()).unwrap_or_default();
+        let mut status = self
+            .status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_default();
         let peers = self.session.stats_snapshot().peers;
         status.peer_count = u64::from(peers.live_tcp + peers.live_utp + peers.live_socks);
         status
@@ -168,16 +172,18 @@ impl TorrentNode {
             })?
             .into_handle()
             .ok_or("torrent was not added")?;
-        self.runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(120), handle.wait_until_completed())
-                .await
-                .map_err(|_| "torrent download timed out".to_string())?
-                .map_err(|e| format!("torrent completion failed: {e:#}"))
-        })
-        .inspect_err(|error| {
-            self.record_error(error.clone());
-        })?;
-        let bytes = std::fs::read(path).map_err(|e| format!("downloaded torrent object missing: {e}"))?;
+        self.runtime
+            .block_on(async {
+                tokio::time::timeout(Duration::from_secs(120), handle.wait_until_completed())
+                    .await
+                    .map_err(|_| "torrent download timed out".to_string())?
+                    .map_err(|e| format!("torrent completion failed: {e:#}"))
+            })
+            .inspect_err(|error| {
+                self.record_error(error.clone());
+            })?;
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("downloaded torrent object missing: {e}"))?;
         if let Ok(mut status) = self.status.lock() {
             status.last_fetch = Some(chrono::Utc::now().to_rfc3339());
             status.reachability = "direct".into();
@@ -221,7 +227,7 @@ mod tests {
     fn published_magnets_are_valid_bit_torrent_v1_uris() {
         let root = tempfile::tempdir().unwrap();
         let node = TorrentNode::open(root.path(), 0).unwrap();
-        let magnet = node.publish("profile-test", br"{}" ).unwrap();
+        let magnet = node.publish("profile-test", br"{}").unwrap();
         validate_torrent_magnet_uri(&magnet).unwrap();
         assert!(magnet.contains("dn=snartnet-profile-test"));
     }

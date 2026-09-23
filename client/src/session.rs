@@ -1,7 +1,14 @@
 //! Durable Android host state. Commands commit before changing the visible state.
 use crate::{
-    actions::*, dht::DhtNode, discovery::*, gossip::{GossipNode, GossipPresence, UpdateKind},
-    model::*, protocol::*, torrent::TorrentNode, transport::*, *,
+    actions::*,
+    dht::DhtNode,
+    discovery::*,
+    gossip::{GossipNode, GossipPresence, UpdateKind},
+    model::*,
+    protocol::*,
+    torrent::TorrentNode,
+    transport::*,
+    *,
 };
 use futures::executor::block_on;
 use serde::{Deserialize, Serialize};
@@ -240,16 +247,12 @@ impl Session {
         }
         manifest.batches.push(batch);
         let manifest = manifest.sign(keypair)?;
-        let manifest_id = format!(
-            "mailbox-{}-{}-{}",
-            sender, recipient, manifest.sequence
-        );
+        let manifest_id = format!("mailbox-{}-{}-{}", sender, recipient, manifest.sequence);
         let manifest_bytes = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
         let manifest_magnet = torrent.publish(&manifest_id, &manifest_bytes)?;
-        let value = serde_json::to_vec(
-            &json!({"magnet": manifest_magnet, "object_id": manifest_id}),
-        )
-        .map_err(|e| e.to_string())?;
+        let value =
+            serde_json::to_vec(&json!({"magnet": manifest_magnet, "object_id": manifest_id}))
+                .map_err(|e| e.to_string())?;
         dht.publish("snartnet/mailbox", &[sender, recipient], &value)?;
         Ok(())
     }
@@ -538,7 +541,10 @@ impl Session {
         let mut nearby_peers = self.discovery.get_discovered();
         if let Some(gossip) = &self.gossip {
             for peer in gossip.get_discovered() {
-                if !nearby_peers.iter().any(|p| p.fingerprint == peer.fingerprint) {
+                if !nearby_peers
+                    .iter()
+                    .any(|p| p.fingerprint == peer.fingerprint)
+                {
                     nearby_peers.push(peer);
                 }
             }

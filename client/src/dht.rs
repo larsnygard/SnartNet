@@ -3,7 +3,10 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use mainline::{Dht, MutableItem, SigningKey};
 use snartnet_core::KeyPair;
-use std::{net::Ipv4Addr, sync::{Arc, Mutex}};
+use std::{
+    net::Ipv4Addr,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct DhtStatus {
@@ -47,7 +50,10 @@ impl DhtNode {
     }
 
     pub fn status(&self) -> DhtStatus {
-        self.status.lock().map(|status| status.clone()).unwrap_or_default()
+        self.status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_default()
     }
 
     pub fn salt(namespace: &str, parts: &[&str]) -> Vec<u8> {

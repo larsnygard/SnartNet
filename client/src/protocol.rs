@@ -211,11 +211,11 @@ impl MailboxManifest {
         if self.v != WIRE_VERSION || self.kind != ObjectType::MailboxManifest {
             return Err("unsupported mailbox manifest".into());
         }
-        if self.batches.iter().any(|batch| {
-            batch
-                .expires_at
-                .is_some_and(|expires_at| expires_at <= now)
-        }) {
+        if self
+            .batches
+            .iter()
+            .any(|batch| batch.expires_at.is_some_and(|expires_at| expires_at <= now))
+        {
             return Err("mailbox manifest contains an expired batch".into());
         }
         snartnet_core::verify_signature(&self.canonical_json()?, &self.signature, public_key)

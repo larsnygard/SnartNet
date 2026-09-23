@@ -60,6 +60,8 @@ See [Invitations and connectivity](docs/QR_AND_LAN_DISCOVERY.md) for the full wo
 
 ## Repository structure
 
+The active delivery work is tracked in the [implementation plan](docs/IMPLEMENTATION_PLAN.md). Architectural decisions are recorded in [`docs/adr/`](docs/adr/).
+
 | Path | Responsibility |
 | --- | --- |
 | `core/` | Signed identities, cryptography, invitations, posts, messages, storage, shared service API |
