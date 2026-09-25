@@ -1,57 +1,68 @@
-//! SnartNet desktop host: event handling and persistence. Screens, transport,
-//! invitation helpers, and background synchronization live in dedicated modules.
+//! SnartNet desktop host: rendering, input, and daemon supervision only.
+//!
+//! Every piece of state and every action is served by the local daemon through
+//! `snartnet-sdk` (ADR 0001, `docs/LOCAL_API.md`). This process owns no
+//! identity, database, or peer listener, so closing the window never stops
+//! background work.
 
-mod actions;
+mod backend;
 mod design;
-mod discovery;
-mod gossip;
 mod media;
 mod model;
-mod sync;
-mod transport;
+mod state;
+mod tray;
 mod views;
 
-use actions::*;
+#[cfg(test)]
+mod tests;
+
+use backend::{Backend, Invite};
+use base64::{engine::general_purpose, Engine as _};
 use media::*;
 use model::*;
+use snartnet_core::ContactInvite;
+use state::DaemonState;
 
-use base64::{engine::general_purpose, Engine as _};
 use iced::{
     time,
     widget::{button, container, image, row, scrollable, svg, text, text_input},
-    Alignment, Element, Length, Subscription, Task,
+    window, Alignment, Element, Length, Subscription, Task,
 };
-use snartnet_core::{
-    ContactInvite, FileStorage, KeyPair, SignedMessage, SignedPost, SignedProfile,
-};
+use snartnet_sdk::{Command, SyncMode};
 use std::{
     collections::HashSet,
     io::Cursor,
     path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use transport::{NetworkTransport, SwarmPostsBlob, SwarmProfileBlob, TcpSwarmTransport};
 
-use discovery::{DiscoveredPeer, LanAnnounce, LanDiscovery};
-use gossip::{GossipNode, GossipPresence, UpdateKind};
-
-const STORAGE_KEYPAIR: &str = "keypair";
-const STORAGE_PROFILE: &str = "profile";
-const STORAGE_POSTS: &str = "local_posts";
-const STORAGE_CONTACTS: &str = "contacts";
-const STORAGE_THREADS: &str = "threads";
-const LOCAL_SWARM_FILE_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+/// Close enough to the daemon's scheduler to feel live without busy waiting.
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 enum Message {
-    StartupLoaded(Result<StartupData, String>),
-    Tick(Instant),
+    /// First snapshot after launch; drives the loading screen.
+    Started(Result<DaemonState, String>),
+    /// Periodic and post-action refresh.
+    Refreshed(Result<DaemonState, String>),
+    /// Ticks carry no data; the poll interval is the whole schedule.
+    Tick,
+    StartDaemon,
     RunSyncNow,
-    SyncFinished(Result<sync::SyncResult, String>),
+    SyncFinished(Result<usize, String>),
+    /// Result of one daemon command, labelled for the status line.
+    ActionFinished {
+        done: &'static str,
+        failed: &'static str,
+        result: Result<(), String>,
+    },
+    SyncModeChanged(SyncMode),
+
     SearchChanged(String),
     QrPathChanged(String),
     ImportQr,
+    QrImported(Result<String, String>),
     AdvertiseAddrChanged(String),
     SwitchPanel(Panel),
 
@@ -66,9 +77,12 @@ enum Message {
     AvatarCaptured(Result<String, String>),
     ClearAvatar,
     SaveProfile,
-    ProfileSaved(Result<(KeyPair, SignedProfile), String>),
+    ProfileSaved(Result<(), String>),
     CopyInviteCode,
     CopyMagnetUri,
+    /// Daemon-generated invitation link, cached for QR rendering.
+    InviteRefreshed(Result<Invite, String>),
+    InviteCopied(Result<Invite, String>),
     SaveQrSvg,
     SaveQrPng,
     SaveQrJpg,
@@ -80,188 +94,269 @@ enum Message {
     MagnetUriChanged(String),
     AddContact,
     ImportFromInvite,
-    InviteImported(Result<Contact, String>),
     ImportFromMagnet,
-    MagnetImported(Result<Contact, String>),
     AddDiscoveredPeer(String),
-    ContactAdded(Result<Contact, String>),
     SelectChatContact(String),
+    /// Result of one contact import, whichever flow started it.
+    ContactAdded(Result<(), String>),
 
     ComposePostChanged(String),
     CreatePost,
-    PostCreated(Result<SignedPost, String>),
+    PostPublished(Result<(), String>),
 
     ComposeMessageChanged(String),
     ToggleMessageView(String),
     SendChat,
-    ChatCreated(Result<SignedMessage, String>),
+    ChatSent(Result<(), String>),
 
-    ToggleBittorrent,
     LanDiscoveryToggle,
     CleanupLocalFiles,
+
+    /// Window close button: hide instead of exiting; the daemon keeps running.
+    CloseRequested(window::Id),
+    /// Menu click forwarded from the tray's own thread.
+    Tray(tray::TrayCommand),
+    /// A tray request to stop the daemon first finished; `None` means clean.
+    Stopped(Option<String>),
 }
 
 struct App {
+    backend: Arc<Backend>,
+    tray: Option<tray::TrayHandle>,
+    state: DaemonState,
     panel: Panel,
-    keypair: Option<KeyPair>,
-    profile: Option<SignedProfile>,
-    local_posts: Vec<SignedPost>,
-    contacts: Vec<Contact>,
-    threads: Vec<ChatThread>,
-    network: NetworkState,
     forms: FormState,
-    storage: FileStorage,
-    transport: TcpSwarmTransport,
-    lan_discovery: LanDiscovery,
-    /// Internet-wide discovery/sync-trigger node (iroh + iroh-gossip), opened
-    /// lazily once a keypair is available.
-    gossip: Option<Arc<GossipNode>>,
-    /// Snapshot of LAN-discovered peers, refreshed on every tick.
-    discovered_peers: Vec<DiscoveredPeer>,
-    /// Snapshot of gossip-discovered peers, refreshed on every tick.
-    gossip_peers: Vec<DiscoveredPeer>,
-    /// Message IDs currently shown as decrypted; runtime only, never persisted.
+    /// Message IDs currently shown as stored ciphertext; runtime only.
     revealed_message_ids: HashSet<String>,
     status_line: String,
     syncing: bool,
     loaded: bool,
+    /// The daemon is missing, so the loader offers to start it explicitly.
+    daemon_unreachable: bool,
+    refreshing: bool,
     saving_profile: bool,
     sending: Option<(String, String)>,
-    listener_error: Option<String>,
+    /// Latest daemon invitation link; the key never reaches this process.
+    invite: Option<Invite>,
+    forms_seeded: bool,
+    /// Contact whose import is in flight, so its chat opens when it lands.
+    pending_contact: Option<String>,
+    /// Main window id, needed to show the window again from the tray.
+    window: Option<window::Id>,
 }
 
 impl App {
-    fn new() -> (Self, Task<Message>) {
-        let storage = FileStorage::open_default().expect(
-            "Cannot open SnartNet storage; check directory permissions or set SNARTNET_HOME",
-        );
-        let transport = TcpSwarmTransport::from_env().expect("transport init failed");
-        let listener_error = transport.start_server().err();
-
+    fn with_backend(
+        backend: Arc<Backend>,
+        tray: Option<tray::TrayHandle>,
+    ) -> (Self, Task<Message>) {
         let app = Self {
+            backend: backend.clone(),
+            state: DaemonState::default(),
             panel: Panel::Messages,
-            keypair: None,
-            profile: None,
-            local_posts: Vec::new(),
-            contacts: Vec::new(),
-            threads: Vec::new(),
-            network: NetworkState::default(),
             forms: FormState::default(),
-            storage,
-            transport,
-            lan_discovery: LanDiscovery::new(),
-            gossip: None,
-            discovered_peers: Vec::new(),
-            gossip_peers: Vec::new(),
             revealed_message_ids: HashSet::new(),
-            status_line: "Loading local state...".to_string(),
+            status_line: "Connecting to the SnartNet daemon…".to_string(),
             syncing: false,
             loaded: false,
+            daemon_unreachable: false,
+            refreshing: true,
             saving_profile: false,
             sending: None,
-            listener_error,
+            invite: None,
+            tray,
+            forms_seeded: false,
+            pending_contact: None,
+            window: None,
         };
+        (app, Task::perform(snapshot_task(backend), Message::Started))
+    }
 
-        (
-            app,
-            Task::perform(load_startup_async(), Message::StartupLoaded),
+    /// Request the authoritative snapshot off the UI thread.
+    fn refresh(&self) -> Task<Message> {
+        Task::perform(snapshot_task(self.backend.clone()), Message::Refreshed)
+    }
+
+    /// The runtime consumes the `Task` a reducer returns; tests only assert on
+    /// state, so they go through this to drop it deliberately.
+    #[cfg(test)]
+    pub(crate) fn dispatch(&mut self, message: Message) {
+        let _ = self.handle_message(message);
+    }
+
+    /// Send one daemon command, then pick up whatever the daemon committed.
+    fn run_command(
+        &self,
+        done: &'static str,
+        failed: &'static str,
+        command: Command,
+    ) -> Task<Message> {
+        let backend = self.backend.clone();
+        Task::perform(
+            async move { backend.command(command).map(|_| ()) },
+            move |result| Message::ActionFinished {
+                done,
+                failed,
+                result,
+            },
         )
     }
 
+    fn refresh_invite(&self) -> Task<Message> {
+        let backend = self.backend.clone();
+        Task::perform(async move { backend.invite() }, Message::InviteRefreshed)
+    }
+
+    fn apply_state(&mut self, state: DaemonState) {
+        self.state = state;
+        // Seed the profile form once so typing is never overwritten by a poll.
+        if !self.forms_seeded {
+            if let Some(profile) = &self.state.profile {
+                self.forms.username_input = profile.username.clone();
+                self.forms.display_name_input = profile.display_name.clone().unwrap_or_default();
+                self.forms.bio_input = profile.bio.clone().unwrap_or_default();
+                self.forms.avatar_data_url = profile.avatar_data_url.clone();
+                self.forms.advertise_addr = self.state.network.address_override.clone();
+                self.forms_seeded = true;
+            }
+        }
+    }
+
+    fn after_startup(&mut self) {
+        self.loaded = true;
+        self.status_line = if self.state.profile.is_some() {
+            "Connected to the daemon.".to_string()
+        } else {
+            "Create a profile to start connecting.".to_string()
+        };
+    }
+
+    /// Invitation links are daemon-generated; this only reports the cache.
+    fn invite_uri(&self) -> Result<String, String> {
+        self.invite
+            .as_ref()
+            .map(|invite| invite.uri.clone())
+            .ok_or_else(|| {
+                "The invitation link is not ready yet. Try again in a moment.".to_string()
+            })
+    }
+
+    fn total_unread_count(&self) -> u32 {
+        self.state.total_unread()
+    }
+
+    /// iced entry point: run the reducer, then mirror the status into the tray.
     fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle_message(message);
+        if let Some(tray) = &self.tray {
+            tray.set_status(&self.status_line);
+        }
+        task
+    }
+
+    /// Every state change happens here, so the tray tooltip and the window can
+    /// never disagree about what the daemon is doing.
+    fn handle_message(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::StartupLoaded(result) => {
-                let data = match result {
-                    Ok(data) => data,
+            Message::Started(result) | Message::Refreshed(result) => {
+                self.refreshing = false;
+                match result {
+                    Ok(state) => {
+                        let first = !self.loaded;
+                        let had_profile = self.state.profile.is_some();
+                        self.daemon_unreachable = false;
+                        self.apply_state(state);
+                        if first {
+                            self.after_startup();
+                        }
+                        if self.state.profile.is_some() && (!had_profile || self.invite.is_none()) {
+                            return self.refresh_invite();
+                        }
+                    }
                     Err(error) => {
-                        self.status_line = format!("Could not load local data: {error}");
-                        return Task::none();
+                        self.status_line = if self.loaded {
+                            error
+                        } else {
+                            self.daemon_unreachable = true;
+                            format!("{error} Start it with the button below, then retry.")
+                        };
                     }
-                };
-                self.loaded = true;
-                self.keypair = data.keypair;
-                if let Some(kp) = &mut self.keypair {
-                    let had_keys = kp.enc_public_key.is_some() && kp.enc_secret_key.is_some();
-                    kp.ensure_encryption_keys();
-                    if !had_keys {
-                        let _ = self.storage.set_json(STORAGE_KEYPAIR, kp);
-                    }
-                    self.transport.set_identity(kp);
                 }
-                self.profile = data.profile;
-                self.local_posts = data.local_posts;
-                self.contacts = data.contacts;
-                self.threads = data.threads;
-                self.forms.advertise_addr = self
-                    .storage
-                    .get_json::<String>("advertise_addr")
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
-                self.forms.selected_contact_for_chat =
-                    self.contacts.first().map(|c| c.fingerprint.clone());
-                // CLI arguments accept the exact same invitation links as paste and QR import.
-                if let Some(invite) = std::env::args()
-                    .skip(1)
-                    .find(|arg| arg.starts_with("snartnet://invite/"))
-                {
-                    self.forms.invite_code_input = invite;
-                    self.panel = Panel::Contacts;
-                }
-
-                if let Some(sp) = &self.profile {
-                    self.forms.username_input = sp.profile.username.clone();
-                    self.forms.display_name_input =
-                        sp.profile.display_name.clone().unwrap_or_default();
-                    self.forms.bio_input = sp.profile.bio.clone().unwrap_or_default();
-                    self.forms.avatar_data_url = sp.profile.avatar_data_url.clone();
-                }
-
-                if self.profile.is_none() {
-                    self.panel = Panel::Profile;
-                    self.status_line = "Create your profile to begin".to_string();
-                } else {
-                    self.status_line = format!(
-                        "Ready. {} contacts, {} local posts",
-                        self.contacts.len(),
-                        self.local_posts.len()
-                    );
-                    self.publish_local_profile_to_swarm();
-                    self.publish_local_posts_to_swarm();
-                    self.start_lan_discovery();
-                    self.start_gossip();
-                }
-
-                self.recalculate_network();
-                self.refresh_transport_peers_from_discovery();
-                self.run_peer_sync()
+                Task::none()
             }
-            Message::Tick(_instant) => {
-                // Refresh the LAN and gossip peer snapshots so the UI stays current.
-                self.discovered_peers = self.lan_discovery.get_discovered();
-                self.gossip_peers = self
-                    .gossip
-                    .as_ref()
-                    .map(|g| g.get_discovered())
-                    .unwrap_or_default();
-                self.network.discovered_peer_count =
-                    self.discovered_peers.len() + self.gossip_peers.len();
-                self.refresh_transport_peers_from_discovery();
-                self.run_peer_sync()
+            Message::Tick => {
+                if self.refreshing || !self.loaded {
+                    return Task::none();
+                }
+                self.refreshing = true;
+                self.refresh()
             }
-            Message::RunSyncNow => self.run_peer_sync(),
+            Message::StartDaemon => {
+                self.status_line = "Starting the SnartNet daemon…".to_string();
+                let backend = self.backend.clone();
+                Task::perform(
+                    async move {
+                        backend.ensure_running()?;
+                        backend
+                            .snapshot()
+                            .and_then(|snapshot| DaemonState::from_snapshot(&snapshot))
+                    },
+                    Message::Started,
+                )
+            }
+            Message::RunSyncNow => {
+                if self.syncing {
+                    return Task::none();
+                }
+                self.syncing = true;
+                self.status_line = "Syncing with peers…".to_string();
+                let backend = self.backend.clone();
+                Task::perform(async move { backend.sync() }, Message::SyncFinished)
+            }
             Message::SyncFinished(result) => {
                 self.syncing = false;
                 match result {
-                    Ok(result) => self.apply_sync(result),
+                    Ok(received) => {
+                        self.status_line =
+                            format!("Sync complete. Received {received} new item(s).");
+                        self.refresh()
+                    }
                     Err(error) => {
                         self.status_line = format!("Sync failed: {error}");
                         Task::none()
                     }
                 }
             }
+            Message::ActionFinished {
+                done,
+                failed,
+                result,
+            } => match result {
+                Ok(()) => {
+                    self.status_line = done.to_string();
+                    self.refresh()
+                }
+                Err(error) => {
+                    self.status_line = format!("{failed}: {error}");
+                    Task::none()
+                }
+            },
+            Message::SyncModeChanged(mode) => self.set_sync_mode(
+                mode,
+                match mode {
+                    SyncMode::AlwaysOn => "Sync mode: always on.",
+                    SyncMode::Balanced => "Sync mode: balanced.",
+                    SyncMode::Paused => {
+                        "Sync paused. The daemon keeps seeding what it already has."
+                    }
+                },
+            ),
             Message::SearchChanged(value) => {
                 self.forms.search = value;
+                Task::none()
+            }
+            Message::SwitchPanel(panel) => {
+                self.panel = panel;
                 Task::none()
             }
             Message::QrPathChanged(value) => {
@@ -270,403 +365,357 @@ impl App {
             }
             Message::ImportQr => {
                 let path = self.forms.qr_path.trim().to_string();
+                if path.is_empty() {
+                    self.status_line = "Choose a QR image first".to_string();
+                    return Task::none();
+                }
                 Task::perform(
-                    async move {
-                        let code = tokio::task::spawn_blocking(move || read_qr_file(&path))
-                            .await
-                            .map_err(|e| e.to_string())??;
-                        import_invite_async(code).await
+                    async move { tokio::task::spawn_blocking(move || read_qr_file(&path)).await },
+                    |joined| match joined {
+                        Ok(result) => Message::QrImported(result),
+                        Err(error) => Message::QrImported(Err(error.to_string())),
                     },
-                    Message::InviteImported,
                 )
             }
+            Message::QrImported(result) => match result {
+                Ok(code) => self.import_contact(
+                    "Invitation imported. Syncing the new contact…",
+                    code,
+                    "invite",
+                    String::new(),
+                    String::new(),
+                ),
+                Err(error) => {
+                    self.status_line = format!("Could not read that QR image: {error}");
+                    Task::none()
+                }
+            },
             Message::AdvertiseAddrChanged(value) => {
                 self.forms.advertise_addr = value;
                 Task::none()
             }
-            Message::SwitchPanel(panel) => {
-                self.panel = panel;
-                if panel == Panel::Messages {
-                    self.mark_selected_thread_read();
-                    return scroll_to_latest();
-                }
+            Message::UsernameChanged(value) => {
+                self.forms.username_input = value;
                 Task::none()
             }
-
-            Message::UsernameChanged(v) => {
-                self.forms.username_input = v;
+            Message::DisplayNameChanged(value) => {
+                self.forms.display_name_input = value;
                 Task::none()
             }
-            Message::DisplayNameChanged(v) => {
-                self.forms.display_name_input = v;
+            Message::BioChanged(value) => {
+                self.forms.bio_input = value;
                 Task::none()
             }
-            Message::BioChanged(v) => {
-                self.forms.bio_input = v;
-                Task::none()
-            }
-            Message::AvatarPathChanged(v) => {
-                self.forms.avatar_path_input = v;
+            Message::AvatarPathChanged(value) => {
+                self.forms.avatar_path_input = value;
                 Task::none()
             }
             Message::LoadAvatarFromPath => {
-                match load_avatar_data_url_from_path(&self.forms.avatar_path_input) {
-                    Ok(data_url) => {
-                        self.forms.avatar_data_url = Some(data_url);
-                        self.status_line = "Profile picture loaded".to_string();
-                    }
-                    Err(e) => {
-                        self.status_line = format!("Profile picture load failed: {e}");
-                    }
-                }
-                Task::none()
+                let path = self.forms.avatar_path_input.trim().to_string();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || load_avatar_data_url_from_path(&path))
+                            .await
+                    },
+                    |joined| match joined {
+                        Ok(result) => Message::AvatarCaptured(result),
+                        Err(error) => Message::AvatarCaptured(Err(error.to_string())),
+                    },
+                )
             }
             Message::BrowseForAvatar => Task::perform(
                 async {
-                    tokio::task::spawn_blocking(|| {
-                        rfd::FileDialog::new()
-                            .add_filter("Profile pictures", &["png", "jpg", "jpeg", "webp"])
-                            .pick_file()
-                    })
-                    .await
-                    .map_err(|error| error.to_string())
+                    let selected = rfd::AsyncFileDialog::new()
+                        .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+                        .pick_file()
+                        .await
+                        .map(|handle| handle.path().to_path_buf());
+                    // iced tasks need one concrete return type, and the picker
+                    // itself cannot fail, so the error arm stays unused.
+                    Ok::<_, String>(selected)
                 },
                 Message::AvatarFileSelected,
             ),
-            Message::AvatarFileSelected(result) => {
-                match result {
-                    Ok(Some(path)) => {
-                        self.forms.avatar_path_input = path.display().to_string();
-                        match load_avatar_data_url_from_path(&self.forms.avatar_path_input) {
-                            Ok(data_url) => {
-                                self.forms.avatar_data_url = Some(data_url);
-                                self.status_line = "Profile picture selected".to_string();
-                            }
-                            Err(error) => {
-                                self.status_line = format!("Profile picture load failed: {error}");
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        self.status_line = "Profile picture selection cancelled".to_string()
-                    }
-                    Err(error) => {
-                        self.status_line = format!("Could not open the photo picker: {error}");
-                    }
+            Message::AvatarFileSelected(result) => match result {
+                Ok(Some(path)) => {
+                    let path = path.to_string_lossy().into_owned();
+                    self.forms.avatar_path_input = path.clone();
+                    Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                load_avatar_data_url_from_path(&path)
+                            })
+                            .await
+                        },
+                        |joined| match joined {
+                            Ok(result) => Message::AvatarCaptured(result),
+                            Err(error) => Message::AvatarCaptured(Err(error.to_string())),
+                        },
+                    )
                 }
-                Task::none()
-            }
+                Ok(None) => Task::none(),
+                Err(error) => {
+                    self.status_line = format!("Could not open the image picker: {error}");
+                    Task::none()
+                }
+            },
             Message::CaptureAvatarFromCamera => Task::perform(
-                async {
-                    tokio::task::spawn_blocking(capture_avatar_from_default_camera)
-                        .await
-                        .map_err(|error| error.to_string())?
+                async { tokio::task::spawn_blocking(capture_avatar_from_default_camera).await },
+                |joined| match joined {
+                    Ok(result) => Message::AvatarCaptured(result),
+                    Err(error) => Message::AvatarCaptured(Err(error.to_string())),
                 },
-                Message::AvatarCaptured,
             ),
             Message::AvatarCaptured(result) => {
                 match result {
                     Ok(data_url) => {
                         self.forms.avatar_data_url = Some(data_url);
-                        self.status_line = "Profile picture captured from camera".to_string();
+                        self.status_line = "Profile picture ready to save".to_string();
                     }
-                    Err(error) => self.status_line = format!("Camera capture failed: {error}"),
+                    Err(error) => self.status_line = format!("Could not load that image: {error}"),
                 }
                 Task::none()
             }
             Message::ClearAvatar => {
                 self.forms.avatar_data_url = None;
-                self.status_line = "Profile picture cleared".to_string();
+                self.status_line = "Profile picture cleared. Save to apply it.".to_string();
                 Task::none()
             }
             Message::SaveProfile => {
                 if self.saving_profile {
                     return Task::none();
                 }
-                if !self.forms.advertise_addr.trim().is_empty() {
-                    if let Err(error) = validate_endpoint(self.forms.advertise_addr.trim()) {
-                        self.status_line = error;
-                        return Task::none();
-                    }
+                let address = self.forms.advertise_addr.trim().to_string();
+                if let Err(error) = validate_endpoint(&address) {
+                    self.status_line = error;
+                    return Task::none();
                 }
                 self.saving_profile = true;
-                let username = self.forms.username_input.clone();
-                let display = non_empty(self.forms.display_name_input.clone());
-                let bio = non_empty(self.forms.bio_input.clone());
-                let avatar_data_url = self.forms.avatar_data_url.clone();
-                let keypair = self.keypair.clone();
-                let existing_profile = self.profile.clone();
-
+                let command = Command::Profile {
+                    username: self.forms.username_input.trim().to_string(),
+                    display_name: self.forms.display_name_input.clone(),
+                    bio: self.forms.bio_input.clone(),
+                    avatar: self.forms.avatar_data_url.clone().unwrap_or_default(),
+                    address,
+                };
+                let backend = self.backend.clone();
                 Task::perform(
-                    create_profile_async(
-                        username,
-                        display,
-                        bio,
-                        avatar_data_url,
-                        keypair,
-                        existing_profile,
-                    ),
+                    async move { backend.command(command).map(|_| ()) },
                     Message::ProfileSaved,
                 )
             }
             Message::ProfileSaved(result) => {
                 self.saving_profile = false;
                 match result {
-                    Ok((kp, sp)) => {
-                        // Persist identity before publishing it or accepting chat input.
-                        if let Err(error) = self
-                            .storage
-                            .set_json(STORAGE_KEYPAIR, &kp)
-                            .and_then(|_| self.storage.set_json(STORAGE_PROFILE, &sp))
-                        {
-                            self.status_line = format!("Could not save profile: {error}");
-                            return Task::none();
-                        }
-                        self.keypair = Some(kp.clone());
-                        self.transport.set_identity(&kp);
-                        let mut sp = sp;
-                        let mut publication_pending = false;
-                        match self.transport.publish_profile_torrent(&sp) {
-                            Ok(magnet) => {
-                                sp.profile.magnet_uri = Some(magnet);
-                                if let Err(error) = self.storage.set_json(STORAGE_PROFILE, &sp) {
-                                    self.status_line = format!(
-                                        "Profile saved; magnet could not be saved: {error}"
-                                    );
-                                }
-                            }
-                            Err(error) => {
-                                publication_pending = true;
-                                self.status_line =
-                                    format!("Profile saved; torrent publication pending: {error}");
-                            }
-                        }
-                        self.forms.avatar_data_url = sp.profile.avatar_data_url.clone();
-                        self.profile = Some(sp.clone());
-
-                        if let Err(error) = self
-                            .storage
-                            .set_json("advertise_addr", &self.forms.advertise_addr)
-                        {
-                            self.status_line = format!(
-                                "Profile saved; connection address could not be saved: {error}"
-                            );
-                        } else {
-                            self.status_line = if publication_pending {
-                                "Profile saved. Share the identity link now; the torrent magnet is pending.".into()
-                            } else {
-                                "Profile saved. Your invitation is ready to share.".into()
-                            };
-                        }
-
-                        self.publish_local_profile_to_swarm();
-                        self.recalculate_network();
-                        self.start_lan_discovery();
-                        self.start_gossip();
-                        return self.run_peer_sync();
+                    Ok(()) => {
+                        self.status_line =
+                            "Profile saved. Your invitation is ready to share.".to_string();
+                        Task::batch([self.refresh(), self.refresh_invite()])
                     }
-                    Err(e) => {
-                        self.status_line = format!("Profile error: {e}");
+                    Err(error) => {
+                        self.status_line = format!("Could not save the profile: {error}");
+                        Task::none()
                     }
                 }
-                Task::none()
             }
-
             Message::CopyInviteCode => {
-                match self.invite_uri() {
-                    Ok(uri) => {
-                        self.status_line = "Invitation link copied. Share it with a friend.".into();
-                        return iced::clipboard::write(uri);
-                    }
+                let backend = self.backend.clone();
+                Task::perform(async move { backend.invite() }, Message::InviteCopied)
+            }
+            Message::InviteRefreshed(result) => {
+                match result {
+                    Ok(invite) => self.invite = Some(invite),
                     Err(error) => self.status_line = error,
                 }
                 Task::none()
             }
-            Message::CopyMagnetUri => {
-                if let Some(uri) = self
-                    .profile
-                    .as_ref()
-                    .and_then(|p| p.profile.magnet_uri.clone())
-                {
-                    self.status_line = "Profile magnet copied".into();
-                    return iced::clipboard::write(uri);
+            Message::InviteCopied(result) => match result {
+                Ok(invite) => {
+                    self.status_line =
+                        "Invitation link copied. Share it with a friend.".to_string();
+                    self.invite = Some(invite.clone());
+                    iced::clipboard::write(invite.uri)
                 }
+                Err(error) => {
+                    self.status_line = error;
+                    Task::none()
+                }
+            },
+            Message::CopyMagnetUri => {
+                let magnet = self
+                    .invite
+                    .as_ref()
+                    .and_then(|invite| invite.magnet.clone())
+                    .or_else(|| {
+                        self.state
+                            .profile
+                            .as_ref()
+                            .and_then(|profile| profile.magnet_uri.clone())
+                    });
+                match magnet {
+                    Some(uri) => {
+                        self.status_line = "Profile magnet copied".to_string();
+                        iced::clipboard::write(uri)
+                    }
+                    None => {
+                        self.status_line =
+                            "No profile magnet yet. Save your profile and sync again.".to_string();
+                        Task::none()
+                    }
+                }
+            }
+            Message::ContactFingerprintChanged(value) => {
+                self.forms.contact_fingerprint_input = value;
                 Task::none()
             }
-            Message::SaveQrSvg | Message::SaveQrPng | Message::SaveQrJpg => {
-                let result = self.invite_uri().and_then(|uri| match message {
-                    Message::SaveQrSvg => save_qr_svg(&uri),
-                    Message::SaveQrPng => save_qr_png(&uri),
-                    _ => save_qr_jpg(&uri),
-                });
-                self.status_line = match result {
-                    Ok(path) => format!("QR saved to {}", path.display()),
-                    Err(error) => format!("Could not save QR: {error}"),
-                };
-                Task::none()
-            }
-
-            Message::ContactFingerprintChanged(v) => {
-                self.forms.contact_fingerprint_input = v;
-                Task::none()
-            }
-            Message::ContactAliasChanged(v) => {
-                self.forms.contact_alias_input = v;
+            Message::ContactAliasChanged(value) => {
+                self.forms.contact_alias_input = value;
                 Task::none()
             }
             Message::AddContactModeChanged(mode) => {
                 self.forms.add_contact_mode = mode;
                 Task::none()
             }
-            Message::InviteCodeChanged(v) => {
-                self.forms.invite_code_input = v;
+            Message::InviteCodeChanged(value) => {
+                self.forms.invite_code_input = value;
                 Task::none()
             }
-            Message::MagnetUriChanged(v) => {
-                self.forms.magnet_uri_input = v;
+            Message::MagnetUriChanged(value) => {
+                self.forms.magnet_uri_input = value;
                 Task::none()
             }
             Message::AddContact => {
-                let fp = self.forms.contact_fingerprint_input.clone();
-                let alias = self.forms.contact_alias_input.clone();
-                Task::perform(add_contact_async(fp, alias), Message::ContactAdded)
+                let fingerprint = self.forms.contact_fingerprint_input.trim().to_string();
+                let alias = self.forms.contact_alias_input.trim().to_string();
+                if fingerprint.is_empty() {
+                    self.status_line = "Enter the contact's fingerprint".to_string();
+                    return Task::none();
+                }
+                self.import_contact(
+                    "Contact added. Syncing their profile…",
+                    fingerprint,
+                    "manual",
+                    alias,
+                    String::new(),
+                )
             }
             Message::ImportFromInvite => {
-                let code = self.forms.invite_code_input.clone();
-                Task::perform(import_invite_async(code), Message::InviteImported)
-            }
-            Message::InviteImported(result) => {
-                match result {
-                    Ok(contact) => {
-                        self.forms.invite_code_input.clear();
-                        return self.update(Message::ContactAdded(Ok(contact)));
-                    }
-                    Err(e) => {
-                        self.status_line = format!("Import failed: {e}");
-                    }
+                let code = self.forms.invite_code_input.trim().to_string();
+                if code.is_empty() {
+                    self.status_line = "Paste an invitation code first".to_string();
+                    return Task::none();
                 }
-                Task::none()
+                let alias = self.forms.contact_alias_input.trim().to_string();
+                self.import_contact(
+                    "Invitation imported. Syncing the new contact…",
+                    code,
+                    "invite",
+                    alias,
+                    String::new(),
+                )
             }
             Message::ImportFromMagnet => {
-                let uri = self.forms.magnet_uri_input.clone();
-                Task::perform(import_magnet_async(uri), Message::MagnetImported)
-            }
-            Message::MagnetImported(result) => {
-                match result {
-                    Ok(contact) => {
-                        self.forms.magnet_uri_input.clear();
-                        return self.update(Message::ContactAdded(Ok(contact)));
-                    }
-                    Err(e) => {
-                        self.status_line = format!("Import failed: {e}");
-                    }
+                let uri = self.forms.magnet_uri_input.trim().to_string();
+                if uri.is_empty() {
+                    self.status_line = "Paste a profile magnet URI first".to_string();
+                    return Task::none();
                 }
-                Task::none()
+                // The daemon recognises magnet inputs from their prefix.
+                self.import_contact(
+                    "Profile link imported. Syncing the new contact…",
+                    uri,
+                    "invite",
+                    String::new(),
+                    String::new(),
+                )
             }
-            Message::AddDiscoveredPeer(fp) => {
-                self.refresh_transport_peers_from_discovery();
-                let peer = self
-                    .discovered_peers
+            Message::AddDiscoveredPeer(fingerprint) => {
+                let address = self
+                    .state
+                    .nearby
                     .iter()
-                    .find(|p| p.fingerprint == fp)
-                    .cloned();
-                if let Some(peer) = peer {
-                    let alias = peer
-                        .display_name
-                        .filter(|d| !d.is_empty())
-                        .unwrap_or_else(|| peer.username.clone());
-                    Task::perform(
-                        async move {
-                            let mut contact = add_contact_async(peer.fingerprint, alias).await?;
-                            contact.transport_addr = peer.tcp_addr;
-                            Ok(contact)
-                        },
-                        Message::ContactAdded,
-                    )
-                } else {
-                    Task::none()
-                }
+                    .find(|peer| peer.fingerprint == fingerprint)
+                    .and_then(|peer| peer.address.clone())
+                    .unwrap_or_default();
+                self.import_contact(
+                    "Contact added from discovery. Syncing their profile…",
+                    fingerprint,
+                    "manual",
+                    String::new(),
+                    address,
+                )
             }
             Message::ContactAdded(result) => {
+                let fingerprint = self.pending_contact.take();
                 match result {
-                    Ok(contact) => {
-                        if self
-                            .profile
-                            .as_ref()
-                            .is_some_and(|p| p.profile.fingerprint == contact.fingerprint)
-                        {
-                            self.status_line =
-                                "This is your own invitation. Share it with a friend.".into();
-                            return Task::none();
+                    Ok(()) => {
+                        if let Some(fingerprint) = fingerprint {
+                            self.forms.contact_fingerprint_input.clear();
+                            self.forms.contact_alias_input.clear();
+                            self.forms.invite_code_input.clear();
+                            self.forms.magnet_uri_input.clear();
+                            self.select_chat(fingerprint);
+                            return Task::batch([self.refresh(), scroll_to_latest()]);
                         }
-                        let previous = self.contacts.clone();
-                        let fp = contact.fingerprint.clone();
-                        if let Some(existing) =
-                            self.contacts.iter_mut().find(|c| c.fingerprint == fp)
-                        {
-                            if contact.transport_addr.is_some() {
-                                existing.transport_addr = contact.transport_addr;
-                            }
-                            self.status_line =
-                                format!("Opened existing contact: {}", existing.alias);
-                        } else {
-                            self.status_line = format!("Added {}. Connecting…", contact.alias);
-                            self.contacts.push(contact);
-                        }
-                        if let Err(error) = self.storage.set_json(STORAGE_CONTACTS, &self.contacts)
-                        {
-                            self.contacts = previous;
-                            self.status_line = format!("Could not save contact: {error}");
-                            return Task::none();
-                        }
-                        self.forms.contact_fingerprint_input.clear();
-                        self.forms.contact_alias_input.clear();
-                        self.ensure_thread(&fp);
-                        self.select_chat(fp);
-                        return Task::batch([self.run_peer_sync(), scroll_to_latest()]);
+                        self.refresh()
                     }
-                    Err(error) => self.status_line = format!("Could not add contact: {error}"),
+                    Err(error) => {
+                        self.status_line = format!("Could not add the contact: {error}");
+                        Task::none()
+                    }
                 }
-                Task::none()
             }
-            Message::SelectChatContact(fp) => {
-                self.select_chat(fp);
-                scroll_to_latest()
+            Message::SelectChatContact(fingerprint) => {
+                self.select_chat(fingerprint.clone());
+                let backend = self.backend.clone();
+                let mark_read = Task::perform(
+                    async move {
+                        backend
+                            .command(Command::Read {
+                                recipient: fingerprint,
+                            })
+                            .map(|_| ())
+                    },
+                    |result| Message::ActionFinished {
+                        done: "",
+                        failed: "Could not mark the conversation read",
+                        result,
+                    },
+                );
+                Task::batch([mark_read, scroll_to_latest()])
             }
-
-            Message::ComposePostChanged(v) => {
-                self.forms.compose_post_input = v;
+            Message::ComposePostChanged(value) => {
+                self.forms.compose_post_input = value;
                 Task::none()
             }
             Message::CreatePost => {
-                let kp = self.keypair.clone();
-                let author = self
-                    .profile
-                    .as_ref()
-                    .map(|p| p.profile.fingerprint.clone())
-                    .unwrap_or_default();
                 let content = self.forms.compose_post_input.clone();
-                Task::perform(create_post_async(author, content, kp), Message::PostCreated)
-            }
-            Message::PostCreated(result) => {
-                match result {
-                    Ok(post) => {
-                        self.local_posts.insert(0, post.clone());
-                        self.forms.compose_post_input.clear();
-                        self.persist_posts();
-                        self.publish_local_posts_to_swarm();
-                        self.status_line = "Post published to peer swarm".to_string();
-                    }
-                    Err(e) => {
-                        self.status_line = format!("Post failed: {e}");
-                    }
+                if content.trim().is_empty() {
+                    return Task::none();
                 }
-                self.recalculate_network();
-                Task::none()
+                let backend = self.backend.clone();
+                Task::perform(
+                    async move { backend.command(Command::Post { content }).map(|_| ()) },
+                    Message::PostPublished,
+                )
             }
-
-            Message::ComposeMessageChanged(v) => {
-                self.forms.compose_message_input = v;
+            Message::PostPublished(result) => match result {
+                Ok(()) => {
+                    self.forms.compose_post_input.clear();
+                    self.status_line =
+                        "Post published. Peers pick it up on the next sync.".to_string();
+                    self.refresh()
+                }
+                Err(error) => {
+                    self.status_line = format!("Post failed: {error}");
+                    Task::none()
+                }
+            },
+            Message::ComposeMessageChanged(value) => {
+                self.forms.compose_message_input = value.clone();
+                if let Some(fingerprint) = self.forms.selected_contact_for_chat.clone() {
+                    self.forms.drafts.insert(fingerprint, value);
+                }
                 Task::none()
             }
             Message::ToggleMessageView(message_id) => {
@@ -679,504 +728,174 @@ impl App {
                 if self.sending.is_some() {
                     return Task::none();
                 }
-                let recipient = self.forms.selected_contact_for_chat.clone();
-                let content = self.forms.compose_message_input.clone();
-                let kp = self.keypair.clone();
-                let sender = self
-                    .profile
-                    .as_ref()
-                    .map(|p| p.profile.fingerprint.clone())
-                    .unwrap_or_default();
-
-                if recipient.is_none() {
+                let Some(recipient) = self.forms.selected_contact_for_chat.clone() else {
                     self.status_line = "Select a contact before messaging".to_string();
                     return Task::none();
-                }
-
-                let recipient = recipient.unwrap_or_default();
-                let recipient_enc_public = self
-                    .contacts
-                    .iter()
-                    .find(|c| {
-                        c.fingerprint == recipient && c.verification == VerificationState::Verified
-                    })
-                    .and_then(|c| c.known_encryption_public_key.clone());
-
-                if recipient_enc_public.is_none() {
-                    self.status_line =
-                        "Recipient profile missing encryption key. Run sync and try again."
-                            .to_string();
-                    return Task::none();
-                }
-
+                };
+                let content = self.forms.compose_message_input.clone();
                 if content.trim().is_empty() {
                     return Task::none();
                 }
                 self.sending = Some((recipient.clone(), content.clone()));
+                let backend = self.backend.clone();
                 Task::perform(
-                    create_message_async(
-                        sender,
-                        recipient,
-                        content,
-                        kp,
-                        recipient_enc_public.unwrap_or_default(),
-                    ),
-                    Message::ChatCreated,
+                    async move {
+                        backend
+                            .command(Command::Message { recipient, content })
+                            .map(|_| ())
+                    },
+                    Message::ChatSent,
                 )
             }
-            Message::ChatCreated(result) => {
+            Message::ChatSent(result) => {
                 let draft = self.sending.take();
                 match result {
-                    Ok(signed) => {
-                        let recipient = signed.message.recipient_fingerprint.clone();
-                        self.ensure_thread(&recipient);
-                        let peer_key = self
-                            .contacts
-                            .iter()
-                            .find(|c| c.fingerprint == recipient)
-                            .and_then(|c| c.known_encryption_public_key.clone());
-                        let thread = self
-                            .threads
-                            .iter_mut()
-                            .find(|t| t.contact_fingerprint == recipient)
-                            .unwrap();
-                        thread
-                            .messages
-                            .push(ChatItem::from_signed(signed, false, peer_key));
-                        // Save the signed outbox before clearing the draft or touching the network.
-                        if let Err(error) = self.storage.set_json(STORAGE_THREADS, &self.threads) {
-                            self.threads
-                                .iter_mut()
-                                .find(|t| t.contact_fingerprint == recipient)
-                                .unwrap()
-                                .messages
-                                .pop();
-                            self.status_line = format!("Message not queued: {error}");
-                            return Task::none();
-                        }
-                        if let Some((fp, sent_text)) = draft {
-                            if self.forms.selected_contact_for_chat.as_ref() == Some(&fp)
+                    Ok(()) => {
+                        if let Some((fingerprint, sent_text)) = draft {
+                            if self.forms.selected_contact_for_chat.as_ref() == Some(&fingerprint)
                                 && self.forms.compose_message_input == sent_text
                             {
                                 self.forms.compose_message_input.clear();
                             }
-                            if self.forms.drafts.get(&fp) == Some(&sent_text) {
-                                self.forms.drafts.remove(&fp);
+                            if self.forms.drafts.get(&fingerprint) == Some(&sent_text) {
+                                self.forms.drafts.remove(&fingerprint);
                             }
                         }
                         self.status_line =
                             "Message queued. It will retry until a peer accepts it.".into();
-                        return Task::batch([self.run_peer_sync(), scroll_to_latest()]);
+                        Task::batch([self.refresh(), scroll_to_latest()])
                     }
-                    Err(error) => self.status_line = format!("Message failed: {error}"),
+                    Err(error) => {
+                        // The daemon committed nothing, so the draft stays editable.
+                        self.status_line = format!("Message failed: {error}");
+                        Task::none()
+                    }
                 }
-                Task::none()
             }
-
-            Message::ToggleBittorrent => {
-                self.network.bittorrent_running = !self.network.bittorrent_running;
-                self.status_line = if self.network.bittorrent_running {
-                    "Sync resumed".to_string()
-                } else {
-                    "Sync paused. Messages remain queued; the listener still receives peers."
-                        .to_string()
+            Message::SaveQrSvg | Message::SaveQrPng | Message::SaveQrJpg => {
+                let result = self.invite_uri().and_then(|uri| match message {
+                    Message::SaveQrSvg => save_qr_svg(&uri),
+                    Message::SaveQrPng => save_qr_png(&uri),
+                    _ => save_qr_jpg(&uri),
+                });
+                self.status_line = match result {
+                    Ok(path) => format!("QR code saved to {}", path.display()),
+                    Err(error) => format!("Could not save the QR code: {error}"),
                 };
-                self.recalculate_network();
-                self.run_peer_sync()
+                Task::none()
             }
             Message::LanDiscoveryToggle => {
-                if self.lan_discovery.is_active() {
-                    self.lan_discovery.stop();
-                    if let Some(gossip) = &self.gossip {
-                        gossip.stop();
-                    }
-                    self.discovered_peers.clear();
-                    self.gossip_peers.clear();
-                    self.network.lan_discovery_active = false;
-                    self.network.discovered_peer_count = 0;
-                    self.refresh_transport_peers_from_discovery();
-                    self.status_line = "Discovery stopped".to_string();
-                } else {
-                    self.start_lan_discovery();
-                    self.start_gossip();
-                    self.status_line = if self.network.lan_discovery_active {
-                        "Discovery started".to_string()
+                let enabled = !self.state.network.discovery;
+                self.run_command(
+                    if enabled {
+                        "Discovery turned on."
                     } else {
-                        "LAN discovery unavailable (port in use or firewall)".to_string()
-                    };
+                        "Discovery turned off."
+                    },
+                    "Could not change discovery",
+                    Command::Discovery { enabled },
+                )
+            }
+            Message::CleanupLocalFiles => self.run_command(
+                "Local file caches cleaned up.",
+                "Could not clean up local files",
+                Command::Cleanup,
+            ),
+            Message::CloseRequested(id) => {
+                self.window = Some(id);
+                self.status_line = "SnartNet keeps syncing in the tray.".to_string();
+                window::change_mode(id, window::Mode::Hidden)
+            }
+            Message::Tray(tray::TrayCommand::Show) => match self.window {
+                Some(id) => Task::batch([
+                    window::change_mode(id, window::Mode::Windowed),
+                    window::gain_focus(id),
+                ]),
+                None => Task::none(),
+            },
+            Message::Tray(tray::TrayCommand::Quit) => iced::exit(),
+            Message::Tray(tray::TrayCommand::StopDaemonAndQuit) => {
+                self.status_line = "Stopping the SnartNet daemon…".to_string();
+                let backend = self.backend.clone();
+                Task::perform(
+                    // Report the daemon's answer, then leave either way: a
+                    // frontend must never trap the user in a broken shutdown.
+                    async move { backend.stop().err() },
+                    Message::Stopped,
+                )
+            }
+            Message::Stopped(error) => {
+                if let Some(error) = error {
+                    eprintln!("SnartNet daemon did not stop cleanly: {error}");
                 }
-                Task::none()
-            }
-            Message::CleanupLocalFiles => {
-                self.cleanup_local_swarm_files();
-                Task::none()
+                iced::exit()
             }
         }
     }
 
-    fn subscription(&self) -> Subscription<Message> {
-        time::every(Duration::from_secs(self.network.poll_interval_secs)).map(Message::Tick)
+    /// Pausing only changes how much the daemon does, never whether it runs.
+    fn set_sync_mode(&self, mode: SyncMode, done: &'static str) -> Task<Message> {
+        let backend = self.backend.clone();
+        Task::perform(
+            async move { backend.set_sync_mode(mode).map(|_| ()) },
+            move |result| Message::ActionFinished {
+                done,
+                failed: "Could not change the sync mode",
+                result,
+            },
+        )
     }
 
+    /// Contacts belong to the daemon; this only reports the import result.
+    fn import_contact(
+        &mut self,
+        started: &'static str,
+        input: String,
+        mode: &'static str,
+        alias: String,
+        address: String,
+    ) -> Task<Message> {
+        self.status_line = started.to_string();
+        self.pending_contact = Some(input.clone());
+        let backend = self.backend.clone();
+        Task::perform(
+            async move {
+                backend
+                    .command(Command::Contact {
+                        input,
+                        mode: mode.to_string(),
+                        alias,
+                        address,
+                    })
+                    .map(|_| ())
+            },
+            Message::ContactAdded,
+        )
+    }
+
+    /// Drafts follow the conversation, so switching contacts never mixes them up.
     fn select_chat(&mut self, fingerprint: String) {
-        if let Some(previous) = self.forms.selected_contact_for_chat.take() {
-            self.forms.drafts.insert(
-                previous,
-                std::mem::take(&mut self.forms.compose_message_input),
-            );
-        }
         self.forms.compose_message_input = self
             .forms
             .drafts
             .get(&fingerprint)
             .cloned()
             .unwrap_or_default();
-        self.forms.selected_contact_for_chat = Some(fingerprint.clone());
+        self.forms.selected_contact_for_chat = Some(fingerprint);
         self.panel = Panel::Messages;
-        self.mark_thread_read(&fingerprint);
     }
 
-    fn invite_uri(&self) -> Result<String, String> {
-        let profile = self.profile.as_ref().ok_or("Create your profile first")?;
-        let address = if self.forms.advertise_addr.trim().is_empty() {
-            self.transport.advertised_addr()
-        } else {
-            let value = self.forms.advertise_addr.trim();
-            validate_endpoint(value)?;
-            Some(value.to_string())
-        };
-        ContactInvite::from_signed_profile(profile, address).to_uri()
-    }
-
-    fn cleanup_local_swarm_files(&mut self) {
-        let swarm_dir = self.transport.swarm_dir().to_path_buf();
-
-        let active_files = self.active_swarm_filenames();
-        let now = SystemTime::now();
-        let mut removed = 0usize;
-        let mut skipped_recent = 0usize;
-        let mut errors = 0usize;
-
-        let entries = match std::fs::read_dir(&swarm_dir) {
-            Ok(entries) => entries,
-            Err(e) => {
-                self.status_line = format!("Cleanup failed to read swarm dir: {e}");
-                return;
-            }
-        };
-
-        for entry in entries {
-            let Ok(entry) = entry else {
-                errors = errors.saturating_add(1);
-                continue;
-            };
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-
-            let Some(file_name) = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string())
-            else {
-                continue;
-            };
-
-            let is_swarm_json = (file_name.starts_with("profile_")
-                || file_name.starts_with("posts_")
-                || file_name.starts_with("inbox_"))
-                && file_name.ends_with(".json");
-            if !is_swarm_json || active_files.contains(&file_name) {
-                continue;
-            }
-
-            let modified = match entry.metadata().and_then(|m| m.modified()) {
-                Ok(modified) => modified,
-                Err(_) => {
-                    errors = errors.saturating_add(1);
-                    continue;
-                }
-            };
-
-            let age_secs = now
-                .duration_since(modified)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            if age_secs < LOCAL_SWARM_FILE_RETENTION_SECS {
-                skipped_recent = skipped_recent.saturating_add(1);
-                continue;
-            }
-
-            match std::fs::remove_file(&path) {
-                Ok(_) => removed = removed.saturating_add(1),
-                Err(_) => errors = errors.saturating_add(1),
-            }
-        }
-
-        self.status_line = format!(
-            "Cleanup complete: removed {removed}, kept recent inactive {skipped_recent}, errors {errors}"
-        );
-    }
-
-    fn active_swarm_filenames(&self) -> HashSet<String> {
-        let mut active = HashSet::new();
-
-        if let Some(profile) = &self.profile {
-            let fp = transport::sanitize_component(&profile.profile.fingerprint);
-            active.insert(format!("profile_{fp}.json"));
-            active.insert(format!("posts_{fp}.json"));
-            active.insert(format!("inbox_{fp}.json"));
-        }
-
-        for contact in &self.contacts {
-            let fp = transport::sanitize_component(&contact.fingerprint);
-            active.insert(format!("profile_{fp}.json"));
-            active.insert(format!("posts_{fp}.json"));
-            active.insert(format!("inbox_{fp}.json"));
-        }
-
-        active
-    }
-
-    fn persist_posts(&mut self) {
-        if let Err(e) = self.storage.set_json(STORAGE_POSTS, &self.local_posts) {
-            self.status_line = format!("Persist posts failed: {e}");
-        }
-    }
-
-    fn persist_contacts(&mut self) {
-        if let Err(e) = self.storage.set_json(STORAGE_CONTACTS, &self.contacts) {
-            self.status_line = format!("Persist contacts failed: {e}");
-        }
-    }
-
-    fn persist_threads(&mut self) {
-        if let Err(e) = self.storage.set_json(STORAGE_THREADS, &self.threads) {
-            self.status_line = format!("Persist threads failed: {e}");
-        }
-    }
-
-    fn ensure_thread(&mut self, fingerprint: &str) {
-        if !self
-            .threads
-            .iter()
-            .any(|t| t.contact_fingerprint == fingerprint)
-        {
-            self.threads.push(ChatThread {
-                contact_fingerprint: fingerprint.to_string(),
-                messages: Vec::new(),
-                unread_count: 0,
-            });
-        }
-    }
-
-    fn mark_thread_read(&mut self, fingerprint: &str) {
-        if let Some(thread) = self
-            .threads
-            .iter_mut()
-            .find(|t| t.contact_fingerprint == fingerprint)
-        {
-            thread.unread_count = 0;
-            self.persist_threads();
-        }
-    }
-
-    fn mark_selected_thread_read(&mut self) {
-        if let Some(fp) = self.forms.selected_contact_for_chat.clone() {
-            self.mark_thread_read(&fp);
-        }
-    }
-
-    fn total_unread_count(&self) -> u32 {
-        self.threads.iter().map(|t| t.unread_count).sum()
-    }
-
-    fn publish_local_profile_to_swarm(&mut self) {
-        if let Some(profile) = &self.profile {
-            let blob = SwarmProfileBlob {
-                profile: profile.clone(),
-                updated_at: unix_secs(),
-            };
-            if let Err(e) = self
-                .transport
-                .save_profile(&profile.profile.fingerprint, &blob)
-            {
-                self.status_line = format!("Profile publish failed: {e}");
-            }
-            if let Some(gossip) = &self.gossip {
-                gossip.announce_update(UpdateKind::Profile, self.gossip_presence(profile));
-            }
-        }
-    }
-
-    fn publish_local_posts_to_swarm(&mut self) {
-        if let Some(profile) = &self.profile {
-            let blob = SwarmPostsBlob {
-                posts: self.local_posts.clone(),
-                updated_at: unix_secs(),
-            };
-            if let Err(e) = self
-                .transport
-                .save_posts(&profile.profile.fingerprint, &blob)
-            {
-                self.status_line = format!("Post publish failed: {e}");
-            }
-            if let Some(gossip) = &self.gossip {
-                gossip.announce_update(UpdateKind::Post, self.gossip_presence(profile));
-            }
-        }
-    }
-
-    fn recalculate_network(&mut self) {
-        self.network.peers = self.transport.peer_snapshot().len() as u32;
-    }
-
-    /// Attempt to start LAN discovery for the current profile.
-    /// Sets `network.lan_discovery_active` to reflect the outcome.
-    fn start_lan_discovery(&mut self) {
-        let Some(sp) = &self.profile else { return };
-        // Use the actual LAN IP of this host rather than 0.0.0.0 so that
-        // peers receiving the broadcast can actually connect back.
-        let tcp_addr = self.transport.advertised_addr();
-        let announce = LanAnnounce {
-            fingerprint: sp.profile.fingerprint.clone(),
-            username: sp.profile.username.clone(),
-            display_name: sp.profile.display_name.clone(),
-            tcp_addr,
-        };
-        let started = self.lan_discovery.start(announce);
-        self.network.lan_discovery_active = started;
-        self.refresh_transport_peers_from_discovery();
-    }
-
-    /// Attempt to start internet-wide (iroh/iroh-gossip) discovery for the
-    /// current profile. Opens the underlying node lazily on first use.
-    fn start_gossip(&mut self) {
-        let Some(sp) = self.profile.clone() else {
-            return;
-        };
-        if self.gossip.is_none() {
-            if let Some(kp) = &self.keypair {
-                self.gossip = GossipNode::open(kp).ok().map(Arc::new);
-            }
-        }
-        let Some(gossip) = self.gossip.clone() else {
-            return;
-        };
-        let bootstrap = self
-            .contacts
-            .iter()
-            .filter_map(|c| c.known_public_key.clone())
-            .collect();
-        gossip.start(self.gossip_presence(&sp), bootstrap);
-    }
-
-    fn gossip_presence(&self, profile: &SignedProfile) -> GossipPresence {
-        GossipPresence {
-            fingerprint: profile.profile.fingerprint.clone(),
-            username: profile.profile.username.clone(),
-            display_name: profile.profile.display_name.clone(),
-            tcp_addr: self.transport.advertised_addr(),
-        }
-    }
-
-    fn refresh_transport_peers_from_discovery(&self) {
-        let mut peers = Vec::new();
-
-        for contact in &self.contacts {
-            if let Some(addr) = contact
-                .transport_addr
-                .as_deref()
-                .and_then(|value| value.parse().ok())
-            {
-                if !peers.contains(&addr) {
-                    peers.push(addr);
-                }
-            }
-        }
-        for peer in self.discovered_peers.iter().chain(self.gossip_peers.iter()) {
-            if let Some(addr) = peer
-                .tcp_addr
-                .as_deref()
-                .and_then(|value| value.parse().ok())
-            {
-                if !peers.contains(&addr) {
-                    peers.push(addr);
-                }
-            }
-        }
-
-        self.transport.set_peers(peers);
+    /// Snapshots keep the window live; the daemon does all of the work.
+    fn subscription(&self) -> Subscription<Message> {
+        Subscription::batch([
+            time::every(POLL_INTERVAL).map(|_| Message::Tick),
+            window::close_requests().map(Message::CloseRequested),
+            Subscription::run(tray::commands).map(Message::Tray),
+        ])
     }
 }
 
-fn non_empty(value: String) -> Option<String> {
-    let trimmed = value.trim().to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
-fn short_fp(fp: &str) -> String {
-    if fp.chars().count() <= 12 {
-        return fp.into();
-    }
-    format!(
-        "{}…{}",
-        fp.chars().take(8).collect::<String>(),
-        fp.chars()
-            .rev()
-            .take(4)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<String>()
-    )
-}
-
-fn decrypt_for_display(
-    item: &ChatItem,
-    keypair: Option<&KeyPair>,
-    peer_enc_public_key: Option<&str>,
-) -> Result<String, String> {
-    if !item.encrypted {
-        return Ok(item.content.clone());
-    }
-
-    if !item.verified_sender {
-        return Err("sender signature not verified".to_string());
-    }
-
-    if item.encryption_alg.as_deref() != Some("chacha20poly1305-x25519-v1") {
-        return Err("unsupported encryption format".into());
-    }
-    let kp = keypair.ok_or_else(|| "missing local keypair".to_string())?;
-    let peer_key = item
-        .peer_encryption_key
-        .as_deref()
-        .or(peer_enc_public_key)
-        .ok_or_else(|| "missing peer encryption key".to_string())?;
-    let nonce = item
-        .nonce_b64
-        .as_deref()
-        .ok_or_else(|| "missing nonce".to_string())?;
-    kp.decrypt_from_peer(peer_key, nonce, &item.content)
-}
-
-fn ts_label() -> String {
-    chrono::Utc::now().format("%H:%M:%S UTC").to_string()
-}
-
-fn unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
+/// The daemon needs a dialable address, not a hostname, to advertise itself.
 fn validate_endpoint(value: &str) -> Result<(), String> {
     let endpoint: std::net::SocketAddr = value
         .parse()
@@ -1185,6 +904,34 @@ fn validate_endpoint(value: &str) -> Result<(), String> {
         return Err("Use a reachable IP address and a nonzero port".into());
     }
     Ok(())
+}
+
+/// Fingerprints are long, so lists only show enough to tell contacts apart.
+pub(crate) fn short_fp(fp: &str) -> String {
+    if fp.len() <= 12 {
+        fp.to_string()
+    } else {
+        format!("{}…{}", &fp[..8], &fp[fp.len() - 4..])
+    }
+}
+
+/// Seconds since the Unix epoch, used for exported-file names and cache stamps.
+pub(crate) fn unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// One authoritative snapshot, decoded into view models off the UI thread.
+async fn snapshot_task(backend: Arc<Backend>) -> Result<DaemonState, String> {
+    tokio::task::spawn_blocking(move || {
+        backend
+            .snapshot()
+            .and_then(|snapshot| DaemonState::from_snapshot(&snapshot))
+    })
+    .await
+    .map_err(|error| format!("Snapshot task failed: {error}"))?
 }
 
 fn scroll_to_latest() -> Task<Message> {
@@ -1200,16 +947,32 @@ fn main() -> iced::Result {
     // `wgpu-core`'s surface creation on systems where the GL/EGL instance fails to
     // initialize (its GL instance ends up `None`, which the crate unconditionally
     // unwraps). Users who need a specific backend can still set `WGPU_BACKEND`.
+    match Backend::connect() {
+        Ok(backend) => run(backend),
+        // Without runtime paths there is no daemon to talk to and no state to
+        // show, so say so in a dialog instead of opening a permanently empty window.
+        Err(error) => {
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("SnartNet")
+                .set_description(&error)
+                .show();
+            std::process::exit(1)
+        }
+    }
+}
+
+fn run(backend: Arc<Backend>) -> iced::Result {
     iced::application("SnartNet", App::update, App::view)
         .subscription(App::subscription)
         .theme(|_| design::theme())
+        // The window is disposable and the daemon is not (ADR 0001): closing it
+        // hides the window and keeps background syncing alive.
+        .exit_on_close_request(false)
         .window(iced::window::Settings {
             size: (1180.0, 800.0).into(),
             min_size: Some((1080.0, 680.0).into()),
             ..Default::default()
         })
-        .run_with(App::new)
+        .run_with(move || App::with_backend(backend, tray::spawn()))
 }
-
-#[cfg(test)]
-mod tests;

@@ -10,17 +10,26 @@ use iced::{
 impl App {
     pub(crate) fn view(&self) -> Element<'_, Message> {
         if !self.loaded {
-            return container(
-                column![
-                    mark(72.0),
-                    text("Opening your space").size(26),
-                    text(self.status_line.clone()).size(15)
-                ]
-                .spacing(20),
-            )
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into();
+            let mut loader = column![
+                mark(72.0),
+                text("Opening your space").size(26),
+                text(self.status_line.clone()).size(15)
+            ]
+            .spacing(20);
+            // The status line promises this button, and a frontend that cannot
+            // reach its daemon must always offer a way back in.
+            if self.daemon_unreachable {
+                loader = loader.push(
+                    button("Start the daemon")
+                        .padding([12, 20])
+                        .style(button::primary)
+                        .on_press(Message::StartDaemon),
+                );
+            }
+            return container(loader)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into();
         }
         let content = match self.panel {
             Panel::Messages => self.view_messages(),
@@ -128,16 +137,17 @@ impl App {
             )
             .push(vertical_space().height(24));
         let name = self
+            .state
             .profile
             .as_ref()
-            .map(|p| format!("@{}", p.profile.username))
+            .map(|p| format!("@{}", p.username))
             .unwrap_or_else(|| "Welcome to SnartNet".into());
         navigation = navigation
             .push(text(name).size(13).color(Color::WHITE))
             .push(
                 text(if self.syncing {
                     "Syncing with peers…"
-                } else if self.network.bittorrent_running {
+                } else if !self.state.network.paused {
                     "Peer sync enabled"
                 } else {
                     "Peer sync paused"
@@ -170,12 +180,14 @@ impl App {
 
     fn view_messages(&self) -> Element<'_, Message> {
         let selected = self.forms.selected_contact_for_chat.as_ref();
-        let contact = selected.and_then(|fp| self.contacts.iter().find(|c| &c.fingerprint == fp));
+        let contact = selected.and_then(|fp| self.state.contact(fp));
         let mut people = column![
             row![
                 text("Conversations").size(18),
                 horizontal_space(),
-                text(self.contacts.len().to_string()).size(13).color(MUTED)
+                text(self.state.contacts.len().to_string())
+                    .size(13)
+                    .color(MUTED)
             ]
             .align_y(Alignment::Center),
             text_input("Find a conversation", &self.forms.search)
@@ -186,26 +198,29 @@ impl App {
         let query = self.forms.search.to_lowercase();
         let mut matches = 0;
         for person in self
+            .state
             .contacts
             .iter()
             .filter(|c| c.alias.to_lowercase().contains(&query))
         {
             matches += 1;
-            let thread = self
-                .threads
-                .iter()
-                .find(|t| t.contact_fingerprint == person.fingerprint);
+            let thread = self.state.thread(&person.fingerprint);
             let count = thread.map(|t| t.unread_count).unwrap_or(0);
+            // The daemon already decrypted for this frontend, so the newest
+            // readable line is also the most useful preview.
             let preview = thread
                 .and_then(|t| t.messages.last())
                 .map(|m| {
                     if !m.incoming && m.delivery == DeliveryState::Queued {
-                        "Waiting to send"
+                        "Waiting to send".to_string()
                     } else {
-                        "Encrypted conversation"
+                        match &m.plaintext {
+                            Ok(body) => body.chars().take(60).collect::<String>(),
+                            Err(_) => "Encrypted conversation".to_string(),
+                        }
                     }
                 })
-                .unwrap_or("Say hello");
+                .unwrap_or_else(|| "Say hello".to_string());
             let mut content = row![
                 contact_avatar(person, 38.0),
                 column![text(person.alias.clone()).size(15), muted(preview)].spacing(5)
@@ -233,7 +248,7 @@ impl App {
             );
         }
         if matches == 0 {
-            people = people.push(muted(if self.contacts.is_empty() {
+            people = people.push(muted(if self.state.contacts.is_empty() {
                 "Your first conversation starts with an invitation."
             } else {
                 "No matching conversations."
@@ -249,9 +264,9 @@ impl App {
         .spacing(16);
         let sidebar = card(people).width(275).height(Length::Fill);
         let conversation: Element<'_, Message> = if let Some(contact) = contact {
-            let ready = self.keypair.is_some()
-                && contact.verification == VerificationState::Verified
-                && contact.known_encryption_public_key.is_some();
+            // The daemon holds every key; a verified peer key is all this
+            // frontend needs to know that sending can succeed.
+            let ready = self.state.is_ready_to_message(&contact.fingerprint);
             let header = row![
                 contact_avatar(contact, 44.0),
                 column![
@@ -268,25 +283,17 @@ impl App {
             .spacing(12)
             .align_y(Alignment::Center);
             let mut messages = column![].spacing(14).width(Length::Fill);
-            if let Some(thread) = self
-                .threads
-                .iter()
-                .find(|t| t.contact_fingerprint == contact.fingerprint)
-            {
+            if let Some(thread) = self.state.thread(&contact.fingerprint) {
                 for item in &thread.messages {
+                    // The daemon decrypted this for the local frontend, so the
+                    // only failure left is a changed or unverified peer key.
                     let hidden = self.revealed_message_ids.contains(&item.id);
                     let body = if hidden {
-                        item.content.clone()
+                        item.ciphertext.clone()
                     } else {
-                        decrypt_for_display(
-                            item,
-                            self.keypair.as_ref(),
-                            contact.known_encryption_public_key.as_deref(),
-                        )
-                        .unwrap_or_else(|_| {
-                            "Unable to decrypt this message. Check the contact's verified profile."
-                                .into()
-                        })
+                        item.plaintext
+                            .clone()
+                            .unwrap_or_else(|error| format!("Unable to read this message: {error}"))
                     };
                     let meta = if item.incoming {
                         item.created_label.clone()
@@ -301,25 +308,25 @@ impl App {
                             }
                         )
                     };
-                    let bubble = column![
-                        text(body).size(16),
-                        row![
-                            muted(meta),
-                            horizontal_space(),
+                    let mut meta_row = row![muted(meta), horizontal_space()];
+                    // Only an encrypted payload has ciphertext worth revealing;
+                    // a plaintext message has nothing to hide behind.
+                    if item.encrypted {
+                        meta_row = meta_row.push(
                             button(
                                 text(if hidden {
                                     "Read message"
                                 } else {
                                     "View ciphertext"
                                 })
-                                .size(10)
+                                .size(10),
                             )
                             .style(button::text)
-                            .on_press(Message::ToggleMessageView(item.id.clone()))
-                        ]
-                        .align_y(Alignment::Center)
-                    ]
-                    .spacing(9);
+                            .on_press(Message::ToggleMessageView(item.id.clone())),
+                        );
+                    }
+                    let bubble = column![text(body).size(16), meta_row.align_y(Alignment::Center)]
+                        .spacing(9);
                     let incoming = item.incoming;
                     messages =
                         messages.push(
@@ -509,27 +516,28 @@ impl App {
                     );
             }
             AddContactMode::LanPeer => {
-                if self.discovered_peers.is_empty() {
+                if self.state.nearby.is_empty() {
                     form = form.push(muted(
                         "No one nearby yet. Open SnartNet on another device on the same network.",
                     ));
                 }
-                if !self.network.lan_discovery_active {
+                if !self.state.network.discovery {
                     form = form.push(
                         button("Enable nearby discovery")
                             .padding(12)
                             .on_press(Message::LanDiscoveryToggle),
                     );
                 }
-                for peer in &self.discovered_peers {
+                for peer in &self.state.nearby {
                     let known = self
+                        .state
                         .contacts
                         .iter()
                         .any(|c| c.fingerprint == peer.fingerprint);
                     form = form.push(
                         row![
-                            avatar(&peer.username, 40.0),
-                            text(peer.username.clone()),
+                            avatar(&peer.alias, 40.0),
+                            text(peer.alias.clone()),
                             horizontal_space(),
                             button(if known { "Added" } else { "Connect" })
                                 .padding(10)
@@ -545,10 +553,10 @@ impl App {
         }
         let mut page = column![
             card(form).width(Length::Fill),
-            text(format!("Your contacts · {}", self.contacts.len())).size(19)
+            text(format!("Your contacts · {}", self.state.contacts.len())).size(19)
         ]
         .spacing(22);
-        for contact in &self.contacts {
+        for contact in &self.state.contacts {
             page = page.push(card(
                 row![
                     contact_avatar(contact, 44.0),
@@ -654,9 +662,10 @@ impl App {
         let share: Element<'_, Message> = match self.invite_uri() {
             Ok(uri) => {
                 let fp = self
+                    .state
                     .profile
                     .as_ref()
-                    .map(|p| p.profile.fingerprint.clone())
+                    .map(|p| p.fingerprint.clone())
                     .unwrap_or_default();
                 card(
                     column![
@@ -687,6 +696,15 @@ impl App {
                         muted("Your friend can paste the link or import the QR image in Contacts."),
                         text("YOUR FINGERPRINT").size(10).color(MUTED),
                         text(fp).size(12),
+                        text("YOUR IDENTITY LINK").size(10).color(MUTED),
+                        text(
+                            self.state
+                                .identity_uri
+                                .clone()
+                                .unwrap_or_else(|| "Not published yet".to_string()),
+                        )
+                        .size(12),
+                        muted("Identity links carry no address, so they work from any network."),
                         button("Copy profile magnet")
                             .style(button::text)
                             .on_press(Message::CopyMagnetUri),
@@ -700,7 +718,7 @@ impl App {
                 column![
                     mark(72.0),
                     text("Make it yours.").size(23),
-                    muted(if self.profile.is_none() {
+                    muted(if self.state.profile.is_none() {
                         "Save your profile to create a shareable invitation and QR code."
                             .to_string()
                     } else {
@@ -728,14 +746,15 @@ impl App {
                 .padding(15)
                 .on_input(Message::ComposePostChanged),
                 button("Publish update").padding([12, 18]).on_press_maybe(
-                    (self.profile.is_some() && !self.forms.compose_post_input.trim().is_empty())
-                        .then_some(Message::CreatePost)
+                    (self.state.profile.is_some()
+                        && !self.forms.compose_post_input.trim().is_empty())
+                    .then_some(Message::CreatePost)
                 )
             ]
             .spacing(16)
         )]
         .spacing(18);
-        for post in &self.local_posts {
+        for post in &self.state.posts {
             feed = feed.push(
                 card(
                     column![
@@ -750,7 +769,7 @@ impl App {
                 .width(Length::Fill),
             );
         }
-        for contact in &self.contacts {
+        for contact in &self.state.contacts {
             if contact.synced_post_count > 0 && !contact.latest_post_preview.is_empty() {
                 feed = feed.push(
                     card(
@@ -764,7 +783,7 @@ impl App {
                 );
             }
         }
-        if self.local_posts.is_empty() {
+        if self.state.posts.is_empty() {
             feed = feed.push(muted(
                 "A space for the things you want to share. Your updates will appear here.",
             ));
@@ -773,61 +792,120 @@ impl App {
     }
 
     fn view_network(&self) -> Element<'_, Message> {
-        let endpoint = self
-            .transport
-            .advertised_addr()
+        let network = &self.state.network;
+        let endpoint = network
+            .listening
+            .clone()
             .unwrap_or_else(|| "Unavailable".into());
-        let (dht_status, torrent_status) = self.transport.distributed_status();
-        let dht_label = dht_status
-            .map(|status| {
-                if status.bootstrapped {
-                    "bootstrapped"
+        let dht_label = match &network.dht {
+            Some(status) if status.bootstrapped => "bootstrapped".to_string(),
+            Some(_) => "starting".to_string(),
+            None => "disabled".to_string(),
+        };
+        let torrent_label = match &network.torrent {
+            Some(status) => format!(
+                "{} ({}, {} peers)",
+                if status.listening {
+                    "listening"
                 } else {
-                    "starting"
-                }
-            })
-            .unwrap_or("disabled");
-        let torrent_label = torrent_status
-            .map(|status| {
-                format!(
-                    "{} ({}, {} peers)",
-                    if status.listening {
-                        "listening"
-                    } else {
-                        "stopped"
-                    },
-                    status.reachability,
-                    status.peer_count
-                )
-            })
-            .unwrap_or_else(|| "disabled".into());
-        let gossip_label = self
-            .gossip
-            .as_ref()
-            .map(|g| g.status())
-            .filter(|status| status.active)
-            .map(|status| format!("active ({} peers)", status.peer_count))
-            .unwrap_or_else(|| "disabled".into());
+                    "stopped"
+                },
+                status.reachability,
+                status.peer_count
+            ),
+            None => "disabled".to_string(),
+        };
+        let gossip_label = match &network.gossip {
+            Some(status) if status.active => format!("active ({} peers)", status.peer_count),
+            Some(_) => "idle".to_string(),
+            None => "disabled".to_string(),
+        };
         let mut connection = column![text("Connected on your terms").size(24),
-            muted("SnartNet exchanges signed profiles and encrypted messages directly over DHT-discovered torrent peers."),
+            muted("SnartNet exchanges signed profiles and encrypted messages directly over DHT-discovered torrent peers. The daemon owns the network; this window just shows what it reports."),
             text(format!("Your address: {endpoint}")).size(16),
-            text(format!("Known peer addresses: {}", self.transport.peer_snapshot().len())).size(16),
+            text(format!("Known peer addresses: {}", network.peers)).size(16),
             text(format!("DHT: {dht_label} · Torrent: {torrent_label}")).size(16),
-            text(format!("Last sync: {}", self.network.last_poll_label)).size(16),
-            row![button(if self.syncing { "Syncing…" } else { "Sync now" }).padding(12).on_press_maybe((!self.syncing && self.network.bittorrent_running).then_some(Message::RunSyncNow)),
-                button(if self.network.bittorrent_running { "Pause sync" } else { "Resume sync" }).padding(12).style(button::secondary).on_press(Message::ToggleBittorrent)].spacing(10),
-            muted("Pausing sync keeps outgoing messages queued. The TCP listener remains available to peers."),
-        ].spacing(17);
-        if let Some(error) = &self.listener_error {
+            text(format!("Last sync: {}", network.last_sync)).size(16),
+            self.sync_mode_row(),
+            row![button(if self.syncing { "Syncing…" } else { "Sync now" }).padding(12).on_press_maybe((!self.syncing && !network.paused).then_some(Message::RunSyncNow))].spacing(10),
+            muted("Pausing sync keeps outgoing messages queued. The daemon keeps its listener open for peers."),
+        ];
+        for note in self.subsystem_notes() {
+            connection = connection.push(text(note).size(13).color(MUTED));
+        }
+        connection = connection.spacing(17);
+        if let Some(error) = &network.listener_error {
             connection = connection.push(text(error.clone()).color(Color::from_rgb8(184, 53, 70)));
         }
         let nearby = card(column![text("Discover people nearby").size(21), muted("Discovery announces your name, fingerprint, and connection address on your local network."),
-            text(format!("{} nearby · {}", self.discovered_peers.len(), if self.network.lan_discovery_active { "Discovery active" } else { "Discovery inactive" })),
-            button(if self.network.lan_discovery_active { "Turn off discovery" } else { "Turn on discovery" }).padding(12).style(button::secondary).on_press(Message::LanDiscoveryToggle),
+            text(format!("{} nearby · {}", self.state.nearby.len(), if network.discovery { "Discovery active" } else { "Discovery inactive" })),
+            button(if network.discovery { "Turn off discovery" } else { "Turn on discovery" }).padding(12).style(button::secondary).on_press(Message::LanDiscoveryToggle),
         ].spacing(16));
         scrollable(column![card(connection).width(Length::Fill), nearby,
             card(column![text("Across networks").size(21), muted("Messages use direct torrent peers discovered through public DHT bootstrap nodes. IPv6 and UPnP are attempted automatically. If a direct or torrent path isn't available, queued chat messages also try a direct connection over iroh, which hole-punches through NAT or falls back to an iroh relay server (test relays by default) so both peers can be behind unreachable NAT without a VPN or port forwarding."), text(format!("Internet discovery (iroh gossip): {gossip_label}")).size(16), button("Edit invitation address").padding(12).style(button::secondary).on_press(Message::SwitchPanel(Panel::Profile))].spacing(16)),
             button("Clean unused cache files older than 7 days").style(button::text).on_press(Message::CleanupLocalFiles),
         ].spacing(20)).height(Length::Fill).into()
+    }
+
+    /// The daemon's scheduler mode as an explicit choice: a frontend must be
+    /// able to pick always-on or balanced again, not only toggle a pause.
+    fn sync_mode_row(&self) -> Element<'_, Message> {
+        let current = self.state.network.sync_mode;
+        let mut modes = row![text("Sync mode").size(16)].spacing(10);
+        for (mode, label) in [
+            (SyncMode::AlwaysOn, "Always on"),
+            (SyncMode::Balanced, "Balanced"),
+            (SyncMode::Paused, "Paused"),
+        ] {
+            let active = mode == current;
+            modes = modes.push(
+                button(label)
+                    .padding([8, 14])
+                    .style(if active {
+                        button::primary
+                    } else {
+                        button::secondary
+                    })
+                    .on_press_maybe((!active).then_some(Message::SyncModeChanged(mode))),
+            );
+        }
+        modes.align_y(Alignment::Center).into()
+    }
+
+    /// Details behind the one-line summaries, so a stalled subsystem is visible
+    /// instead of looking healthy.
+    fn subsystem_notes(&self) -> Vec<String> {
+        let network = &self.state.network;
+        let label = |value: &Option<String>| value.clone().unwrap_or_else(|| "never".to_string());
+        let mut notes = Vec::new();
+        if let Some(dht) = &network.dht {
+            notes.push(format!(
+                "DHT last lookup {} · last publish {}",
+                label(&dht.last_lookup),
+                label(&dht.last_publish)
+            ));
+            if let Some(error) = &dht.last_error {
+                notes.push(format!("DHT error: {error}"));
+            }
+        }
+        if let Some(torrent) = &network.torrent {
+            notes.push(format!(
+                "Torrent last fetch {} · last publish {}",
+                label(&torrent.last_fetch),
+                label(&torrent.last_publish)
+            ));
+            if let Some(error) = &torrent.last_error {
+                notes.push(format!("Torrent error: {error}"));
+            }
+        }
+        if let Some(gossip) = &network.gossip {
+            if let Some(node) = &gossip.node_id {
+                notes.push(format!("Gossip node: {node}"));
+            }
+            if let Some(error) = &gossip.last_error {
+                notes.push(format!("Gossip error: {error}"));
+            }
+        }
+        notes
     }
 }

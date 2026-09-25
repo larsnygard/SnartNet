@@ -8,9 +8,10 @@ roadmap.
 ## Status
 
 - **Status:** Active
-- **Current milestone:** M4 — Desktop migration and tray (not started)
+- **Current milestone:** M5 — `snartnet-tui` (not started)
 - **Last updated:** 2026-09-25
-- **Last completed:** M3.4 — API compatibility checks and client integration tests added
+- **Last completed:** M4.1, M4.2, and M4.4 — the desktop frontend is daemon-backed
+  (M4.3 tray: Linux only)
 - **Known blockers:** None
 
 ## Working agreement
@@ -64,10 +65,15 @@ roadmap.
 
 ## M4 — Desktop migration and tray
 
-- [ ] **M4.1** Move desktop state and actions to the shared API client.
-- [ ] **M4.2** Preserve avatars, QR workflows, drafts, and ciphertext views.
+- [x] **M4.1** Move desktop state and actions to the shared API client.
+- [x] **M4.2** Preserve avatars, QR workflows, drafts, and ciphertext views.
 - [ ] **M4.3** Add tray controls without stopping the daemon on window close.
-- [ ] **M4.4** Port desktop tests to daemon-backed behavior.
+- [x] **M4.4** Port desktop tests to daemon-backed behavior.
+
+*M4.3 is Linux-only so far: the freedesktop StatusNotifierItem tray runs on its
+own thread through `ksni`. macOS and Windows need tray work on the platform
+event loop that iced owns on the main thread; those targets currently compile
+with the tray disabled.*
 
 ## M5 — `snartnet-tui`
 
@@ -219,4 +225,44 @@ roadmap.
   `:47470` bind. One owner for auxiliary ports should be decided before the M7
   network work.
 - Next: M4.1 — move desktop state and actions to the shared API client.
+- Blockers: none.
+
+### 2026-09-25 — M4
+
+- Completed: M4.1, M4.2, and M4.4. M4.3 is partial (Linux only) and stays
+  unchecked; see the note below.
+- Delivered: the desktop window is now a pure daemon-backed frontend per ADR
+  0001. `desktop/src/backend.rs` wraps `snartnet_sdk::Client` behind an explicit
+  `DaemonPaths` seam, `desktop/src/state.rs` turns one snapshot into the view
+  models the window renders, and the old `transport`, `sync`, `discovery`,
+  `gossip`, and `actions` modules are gone. `snartnet-client` is no longer a
+  desktop dependency, so this process owns no identity, database, torrent
+  session, or peer listener and a window close can never stop background work.
+  Avatars, QR generation/scanning, per-conversation drafts, the ciphertext view,
+  and the identity link all still render, now sourced from daemon data; the
+  ciphertext toggle appears only for messages the daemon reports as encrypted.
+- Delivered: the daemon reports the scheduler-owned sync mode in
+  `extra["syncMode"]` alongside the session `paused` flag, so a frontend shows
+  the mode it is actually in; `snartnet_sdk` gains `SyncMode::default()`
+  (`Balanced`), the Network panel offers Always on / Balanced / Paused, and a
+  paused mode now propagates into the session through `Command::Pause` instead
+  of only stopping the scheduler. The loader explains an unreachable daemon and
+  offers an explicit start instead of only promising a button, and subsystem
+  errors (DHT, torrent, gossip) are rendered from snapshot extras.
+- Delivered: a Linux StatusNotifierItem tray (`desktop/src/tray.rs`, `ksni`)
+  with Show, Quit (daemon keeps running), and Stop the daemon and quit. Its
+  tooltip mirrors the same status line the window shows, and closing the window
+  hides it rather than exiting.
+- Validation: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+  -- -D warnings`, and `cargo test --workspace` pass. The desktop suite is
+  seventeen tests rewritten around daemon behavior, including one that starts a
+  real daemon (`snartnet_daemon::run_with`), drives onboarding, posts, chat,
+  invites, pausing, and shutdown through the SDK, and asserts the window renders
+  every panel before and after the daemon has answered. The daemon suite asserts
+  that pausing and resuming are both visible in the snapshot as `paused` plus
+  `syncMode`.
+- M4.3 partial: the tray is Linux-only. macOS and Windows need tray items on the
+  platform event loop that iced owns on the main thread; those targets compile
+  with the tray disabled and the work stays tracked under M4.3.
+- Next: M5.1 — add the Ratatui/Crossterm workspace crate and daemon client.
 - Blockers: none.

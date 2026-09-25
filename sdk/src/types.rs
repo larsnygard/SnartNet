@@ -19,10 +19,12 @@ pub struct RuntimeMetadata {
     pub started_at: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SyncMode {
     AlwaysOn,
+    /// The mode every daemon starts in, and the assumption for a missing value.
+    #[default]
     Balanced,
     Paused,
 }

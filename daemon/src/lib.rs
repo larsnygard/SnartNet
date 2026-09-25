@@ -13,8 +13,8 @@ use serde::Serialize;
 use serde_json::json;
 use snartnet_client::session::Session;
 use snartnet_sdk::types::{
-    Command, CommandResponse, ErrorResponse, Health, RuntimeMetadata, Snapshot, StateEvent,
-    StopResponse, SyncMode, SyncModeRequest, SyncResponse, API_VERSION,
+    ClientState, Command, CommandResponse, ErrorResponse, Health, RuntimeMetadata, Snapshot,
+    StateEvent, StopResponse, SyncMode, SyncModeRequest, SyncResponse, API_VERSION,
 };
 pub use snartnet_sdk::{Client as DaemonClient, DaemonPaths};
 use std::{
@@ -58,11 +58,30 @@ struct App {
 }
 type Shared = Arc<App>;
 
+/// Production listener for one `SNARTNET_HOME`.
+pub const DEFAULT_API_PORT: u16 = 47469;
+/// Production peer-facing bind for the torrent/DHT stack.
+pub const DEFAULT_PEER_BIND: &str = "127.0.0.1:47470";
+
 pub fn run(paths: DaemonPaths) -> Result<(), String> {
+    run_with(paths, DEFAULT_API_PORT, DEFAULT_PEER_BIND.parse().unwrap())
+}
+
+/// Explicit listener and peer bind, used by tests that must run side by side.
+///
+/// `api_port` 0 asks the OS for a free loopback port; the bound address is
+/// published in the runtime metadata, so clients still connect. Each distinct
+/// `bind` port also moves the derived torrent/DHT auxiliary ports, which keeps
+/// concurrent test daemons on separate sockets.
+pub fn run_with(
+    paths: DaemonPaths,
+    api_port: u16,
+    bind: std::net::SocketAddr,
+) -> Result<(), String> {
     fs::create_dir_all(paths.runtime_dir()).map_err(|e| e.to_string())?;
     let _lock = RuntimeLock::acquire(paths.lock())?;
     let token = load_or_create_token(&paths)?;
-    let mut session = Session::open(paths.data_dir(), "127.0.0.1:47470".parse().unwrap())?;
+    let mut session = Session::open(paths.data_dir(), bind)?;
     session.start();
     let (events_tx, _) = broadcast::channel(64);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -78,14 +97,15 @@ pub fn run(paths: DaemonPaths) -> Result<(), String> {
     });
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     // Keep the final backend reference on this synchronous stack, even on startup failure.
-    runtime.block_on(run_async(paths, app.clone(), shutdown_rx))
+    runtime.block_on(run_async(paths, app.clone(), api_port, shutdown_rx))
 }
 async fn run_async(
     paths: DaemonPaths,
     app: Shared,
+    api_port: u16,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), String> {
-    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 47469))
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, api_port))
         .await
         .map_err(|e| format!("bind loopback API: {e}"))?;
     let metadata = RuntimeMetadata {
@@ -183,11 +203,19 @@ async fn snapshot(State(app): State<Shared>) -> Result<Json<Snapshot>, ApiError>
             .session
             .lock()
             .map_err(|_| ApiError::internal("session lock poisoned"))?;
+        let mut state: ClientState = serde_json::from_value(session.snapshot())
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        // The scheduler lives in this process, so its mode is added here: a
+        // frontend that only reads the session must still see the real mode.
+        let mode = *app
+            .mode
+            .lock()
+            .map_err(|_| ApiError::internal("mode lock poisoned"))?;
+        state.extra.insert("syncMode".into(), json!(mode));
         Ok(Json(Snapshot {
             api_version: API_VERSION,
             revision: revision(&app),
-            state: serde_json::from_value(session.snapshot())
-                .map_err(|e| ApiError::internal(e.to_string()))?,
+            state,
         }))
     })
     .await
@@ -246,7 +274,24 @@ async fn sync_mode(
     *app.mode
         .lock()
         .map_err(|_| ApiError::internal("mode lock poisoned"))? = request.mode;
-    publish(&app, "sync-mode");
+    // The scheduler owns cadence while the session owns what a paused daemon
+    // still does, so the mode has to reach both. Frontends render the session's
+    // flag, and it must never disagree with what this process is doing.
+    let paused = matches!(request.mode, SyncMode::Paused);
+    let worker = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut session = worker
+            .session
+            .lock()
+            .map_err(|_| ApiError::internal("session lock poisoned"))?;
+        session
+            .command(json!({"op": "pause", "paused": paused}))
+            .map_err(ApiError::bad_request)?;
+        publish(&worker, "sync-mode");
+        Ok::<(), ApiError>(())
+    })
+    .await
+    .map_err(|_| ApiError::internal("sync-mode worker failed"))??;
     Ok(Json(state_summary(&app)))
 }
 async fn events(
@@ -477,6 +522,43 @@ mod tests {
             SyncMode::Paused
         );
         assert!(client.sync().is_err());
+        // A frontend only reads snapshots, so both the scheduler mode and the
+        // session's paused flag must be visible there.
+        let paused = client.snapshot().unwrap();
+        assert_eq!(
+            paused
+                .state
+                .extra
+                .get("paused")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            paused
+                .state
+                .extra
+                .get("syncMode")
+                .and_then(|value| value.as_str()),
+            Some("paused")
+        );
+        client.set_sync_mode(SyncMode::Balanced).unwrap();
+        let resumed = client.snapshot().unwrap();
+        assert_eq!(
+            resumed
+                .state
+                .extra
+                .get("paused")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            resumed
+                .state
+                .extra
+                .get("syncMode")
+                .and_then(|value| value.as_str()),
+            Some("balanced")
+        );
         client.stop().unwrap();
         // Keeping the subscription alive must not prevent graceful shutdown.
         server.join().unwrap();

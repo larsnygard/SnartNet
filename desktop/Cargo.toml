@@ -10,8 +10,8 @@ name = "snartnet-desktop"
 path = "src/main.rs"
 
 [dependencies]
-snartnet-client = { path = "../client" }
 snartnet-core = { path = "../core" }
+snartnet-sdk = { path = "../sdk" }
 iced = { version = "0.13", features = ["tokio", "svg", "image"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -25,3 +25,12 @@ tempfile = "3"
 rqrr = "0.10"
 rfd = "0.15"
 nokhwa = { version = "0.10", features = ["input-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# StatusNotifierItem D-Bus tray, which works from the worker thread iced already
+# owns. macOS and Windows need the platform event loop on the main thread and
+# are tracked as the remaining M4.3 item.
+ksni = { version = "0.2", default-features = false }
+
+[dev-dependencies]
+snartnet-daemon = { path = "../daemon" }
