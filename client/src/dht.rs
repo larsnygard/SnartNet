@@ -33,14 +33,22 @@ impl DhtNode {
             .map_err(|_| "invalid signing key length".to_string())?;
         let signing_key = SigningKey::from_bytes(&bytes);
         let mut builder = Dht::builder();
-        builder.port(port).bind_address(Ipv4Addr::UNSPECIFIED);
+        builder.bind_address(Ipv4Addr::UNSPECIFIED);
+        // A port that cannot be bound must not take the caller down. mainline 8.0
+        // answers the startup `Check` only if that message already reached its
+        // actor thread (`run` in mainline's `dht.rs`), so losing that race turns
+        // a bind error into a panic reading "actor thread unexpectedly shutdown".
+        // Probe the port first, and keep the remaining race from escaping.
+        if port != 0 && port_is_bindable(port) {
+            builder.port(port);
+        }
         if let Some(bootstrap) = configured_bootstrap("SNARTNET_DHT_BOOTSTRAP") {
             builder.bootstrap(&bootstrap);
         } else if let Some(extra) = configured_bootstrap("SNARTNET_DHT_EXTRA_BOOTSTRAP") {
             builder.extra_bootstrap(&extra);
         }
-        let node = builder
-            .build()
+        let node = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| builder.build()))
+            .map_err(|_| "DHT startup failed: port unavailable".to_string())?
             .map_err(|e| format!("DHT startup failed: {e}"))?;
         Ok(Self {
             node: Arc::new(node),
@@ -131,4 +139,26 @@ fn configured_bootstrap(name: &str) -> Option<Vec<String>> {
         .map(str::to_owned)
         .collect::<Vec<_>>();
     (!values.is_empty()).then_some(values)
+}
+
+/// Whether `port` is bindable on all interfaces right now. The probe socket is
+/// released again, so mainline binds the port itself when this returns `true`.
+fn port_is_bindable(port: u16) -> bool {
+    std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_port_that_is_already_taken_does_not_abort_startup() {
+        let holder = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let port = holder.local_addr().unwrap().port();
+        let keypair = KeyPair::generate().unwrap();
+        // Degrade instead of panicking: concurrent sessions and other SnartNet
+        // instances contend for the same auxiliary ports.
+        let node = DhtNode::open(&keypair, port).expect("startup must not abort");
+        assert!(!node.status().bootstrapped);
+    }
 }

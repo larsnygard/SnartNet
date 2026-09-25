@@ -1,5 +1,10 @@
 # SnartNet CLI Specification
 
+> Historical proposal. The shipped `snartnet` CLI now supports daemon
+> administration only: `daemon run/start/status/stop`. See
+> [the current local API guide](../docs/LOCAL_API.md). The `ps` commands below
+> are retained as design history and are not supported commands.
+
 ## Overview
 
 The SnartNet CLI (`ps`, with future alias `sn`) provides a command-line interface for all protocol operations including profile management, messaging, content creation, and network administration. This specification defines the complete command structure, options, and expected behaviors. (Project renamed from PeerSocial.)

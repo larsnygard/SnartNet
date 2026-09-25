@@ -10,10 +10,10 @@ name = "snartnet"
 path = "src/main.rs"
 
 [dependencies]
-snartnet-core = { path = "../core" }
+snartnet-sdk = { path = "../sdk" }
+snartnet-daemon = { path = "../daemon" }
 clap = { workspace = true }
 serde_json = { workspace = true }
-chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

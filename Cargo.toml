@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "cli", "desktop", "android-bridge", "client"]
+members = ["core", "cli", "desktop", "android-bridge", "client", "daemon", "sdk"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -14,6 +14,7 @@ blake3 = "1.0"
 base64 = "0.21"
 rusqlite = { version = "0.31", features = ["bundled"] }
 clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 
 [workspace.dependencies.wasm-bindgen]
 version = "0.2"

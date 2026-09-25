@@ -16,6 +16,20 @@ cargo run -p snartnet-desktop
 
 On Linux, the app needs a graphical session and the platform libraries used by iced (X11/Wayland and a working graphics backend). `./build.sh` builds the entire native workspace. The CLI is available with `cargo run -p snartnet-cli -- --help`.
 
+## Run the local daemon
+
+The persistent daemon owns a native profile's storage and network sessions.
+Start it with `cargo run -p snartnet-cli -- daemon start`, inspect it with
+`cargo run -p snartnet-cli -- daemon status`, and stop it with `... daemon
+stop`. It listens only on `127.0.0.1:47469`; its bearer token and runtime
+metadata live in `$SNARTNET_HOME/runtime/` (0600 files on Unix).
+
+The CLI now supports daemon administration only. Profile, post, and contact
+workflows belong to frontends. Rust frontends can use `snartnet-sdk`; see the
+[local API and SDK guide](docs/LOCAL_API.md) for types, compatibility, auto-start,
+and reconnect behavior. Desktop migration is still M4: use separate data homes
+for the current desktop and daemon during this transition.
+
 ## Start a conversation
 
 1. Open **My profile**, choose a username and display name, and save.
@@ -72,7 +86,9 @@ The active delivery work is tracked in the [implementation plan](docs/IMPLEMENTA
 | `desktop/src/sync.rs` | Background exchange and UI delta application |
 | `desktop/src/transport.rs`, `discovery.rs` | TCP cache exchange and optional UDP presence |
 | `desktop/src/tests.rs` | Chat, persistence, QR, and loopback integration regressions |
-| `cli/` | Developer CLI |
+| `cli/` | Daemon administration CLI |
+| `sdk/` | Shared local API contract and Rust frontend client |
+| `daemon/` | Persistent backend and authenticated loopback API |
 | `android/`, `android-bridge/`, `client/` | Android client, JNI adapter, and shared native client session; see [Android setup](android/README.md) |
 | `legacy/PWA/` | Archived web reference with its own npm manifest |
 | `RFC`, `specs/`, `docs/ROADMAP.md` | Protocol proposals and future work, not a list of shipped features |
@@ -101,7 +117,7 @@ SNARTNET_HOME=/tmp/snartnet-review cargo run -p snartnet-desktop
 
 The desktop implements Ed25519 signed identities and X25519 + ChaCha20-Poly1305 direct messages. Signatures are checked against the contact's public-key fingerprint before trusting profile keys or displaying incoming messages. Sync uses BitTorrent objects with signed DHT descriptors and retains bounded TCP as a fallback. It runs outside the UI thread.
 
-Private keys are stored locally and are not password-encrypted. Back up the complete `data/` directory securely. Messages use static X25519 keys; forward secrecy, Double Ratchet, group chat, attachments, and key recovery remain future work. The shared low-level service and CLI also expose legacy signed plaintext messages; the desktop chat always encrypts new messages.
+Private keys are stored locally and are not password-encrypted. Back up the complete `data/` directory securely. Messages use static X25519 keys; forward secrecy, Double Ratchet, group chat, attachments, and key recovery remain future work. The shared low-level service also exposes legacy signed plaintext messages; the desktop chat always encrypts new messages.
 
 Torrent and DHT exchange is best-effort and uses direct peer connections; there is no SnartNet-operated relay. IPv6 and UPnP port mapping are enabled when available. DHT records contain routing metadata only; downloaded objects and message envelopes are verified before use. If both peers are behind unreachable NAT, use IPv6, VPN, or port forwarding. The implementation is intended for experimentation and does not provide anonymity or forward secrecy yet.
 

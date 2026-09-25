@@ -8,9 +8,9 @@ roadmap.
 ## Status
 
 - **Status:** Active
-- **Current milestone:** M2 — Persistent local daemon
-- **Last updated:** 2026-09-24
-- **Last completed:** M1.7 — storage migration coverage validated
+- **Current milestone:** M4 — Desktop migration and tray (not started)
+- **Last updated:** 2026-09-25
+- **Last completed:** M3.4 — API compatibility checks and client integration tests added
 - **Known blockers:** None
 
 ## Working agreement
@@ -46,21 +46,21 @@ roadmap.
 
 ## M2 — Persistent local daemon
 
-- [ ] **M2.1** Move storage and network ownership into one backend service.
-- [ ] **M2.2** Implement daemon locking and runtime metadata.
-- [ ] **M2.3** Add `snartnet daemon run/start/status/stop`.
-- [ ] **M2.4** Add authenticated loopback HTTP and health/snapshot endpoints.
-- [ ] **M2.5** Add typed commands, manual sync, and SSE state events.
-- [ ] **M2.6** Add API revisions and reconnect recovery.
-- [ ] **M2.7** Implement Always-on, Balanced, and Paused sync modes.
-- [ ] **M2.8** Add lifecycle, authentication, and concurrent-client tests.
+- [x] **M2.1** Move storage and network ownership into one backend service.
+- [x] **M2.2** Implement daemon locking and runtime metadata.
+- [x] **M2.3** Add `snartnet daemon run/start/status/stop`.
+- [x] **M2.4** Add authenticated loopback HTTP and health/snapshot endpoints.
+- [x] **M2.5** Add typed commands, manual sync, and SSE state events.
+- [x] **M2.6** Add API revisions and reconnect recovery.
+- [x] **M2.7** Implement Always-on, Balanced, and Paused sync modes.
+- [x] **M2.8** Add lifecycle, authentication, and concurrent-client tests.
 
 ## M3 — Shared frontend SDK
 
-- [ ] **M3.1** Define the versioned API types and Rust client.
-- [ ] **M3.2** Add authentication, retry, SSE reconnect, and auto-start.
-- [ ] **M3.3** Restrict `snartnet` to daemon administration.
-- [ ] **M3.4** Add API compatibility checks and client integration tests.
+- [x] **M3.1** Define the versioned API types and Rust client.
+- [x] **M3.2** Add authentication, retry, SSE reconnect, and auto-start.
+- [x] **M3.3** Restrict `snartnet` to daemon administration.
+- [x] **M3.4** Add API compatibility checks and client integration tests.
 
 ## M4 — Desktop migration and tray
 
@@ -155,4 +155,68 @@ roadmap.
   conflict rollback, deduplication, torrent descriptors, corrupt records, and
   signed-clock skew.
 - Next: M2.1 — move storage and network ownership into one backend service.
+- Blockers: none.
+
+### 2026-09-25 — M2
+
+- Completed: M2.1–M2.8.
+- Delivered: `snartnet-daemon`, the exclusive native `Session` owner, with a
+  private runtime lock/token/metadata record, an authenticated loopback JSON
+  API, revisioned SSE events, manual and scheduled sync, and selectable
+  Always-on, Balanced, and Paused modes. The CLI now supports daemon run,
+  start, status, and stop administration.
+- Validation: daemon unit tests cover exclusive ownership and stable private
+  authentication tokens; full-workspace verification is recorded under M3.
+- Next: M3.1 — define the versioned API types and Rust client.
+- Blockers: none.
+
+### 2026-09-25 — M3
+
+- Completed: M3.1–M3.4.
+- Delivered: `snartnet-sdk` pins the version 1 loopback contract in
+  `sdk/src/types.rs` (`API_VERSION`, runtime metadata, health, snapshot, tagged
+  commands, command/sync/stop responses, and SSE state events) and provides the
+  blocking `Client`, `DaemonPaths`, and `Subscription` API. The client rereads
+  runtime metadata and the bearer token for each request, rejects non-loopback or
+  port-0 metadata, disables proxies and redirects, retries idempotent GETs three
+  times with 100/200 ms backoff, never replays writes, refreshes a full snapshot
+  after every SSE reconnect, and auto-starts the daemon through
+  `ensure_running(executable)` with bounded readiness polling.
+- Delivered: `snartnet` is daemon administration only (`daemon
+  run/start/status/stop`); `specs/CLI.md` is annotated as a historical proposal,
+  and the README documents the daemon-only CLI, the SDK, and the daemon's
+  loopback endpoint (`127.0.0.1:47469`).
+- Fixed: the flaky `snartnet-client` lib test
+  `session::tests::canonical_commit_survives_a_broken_legacy_mirror_and_keeps_new_contacts`,
+  which failed once in a pre-fix workspace run with `actor thread unexpectedly
+  shutdown: "SendError(..)"` (`mainline-8.0.0/src/dht.rs:143`). All three
+  `session::tests` reach `Session::start_distributed`, which asks for the shared
+  UDP `47473`, and `Session::open` derived `bind.port() + 2` – port `2` for the
+  tests' OS-assigned bind port. mainline 8.0 answers the startup `Check` only if
+  that message already reached its actor thread, so a taken port panicked the
+  caller instead of returning the bind error. `DhtNode::open` now probes the
+  port, lets mainline choose its own when the port is unavailable, and converts
+  the remaining race into a startup error;
+  `dht::tests::a_port_that_is_already_taken_does_not_abort_startup` covers the
+  path, and the client-lib suite passes twelve consecutive full runs.
+- Validation: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+  -- -D warnings`, `cargo build --workspace`, and three post-fix
+  `cargo test --workspace` runs pass. SDK integration tests cover the bearer
+  header, GET retry and no-write-replay behavior, SSE EOF and revision-reset
+  recovery, non-loopback metadata rejection, unknown-command rejection, no spawn
+  for a healthy daemon, and auto-start readiness; the CLI test asserts that
+  non-daemon subcommands are rejected.
+- Follow-up found during validation (not yet scheduled, pre-existing): the
+  auxiliary torrent/DHT ports collide by construction. `Session::open` and
+  `TcpSwarmTransport::new` both bind torrent on `bind.port() + 1` and DHT on
+  `bind.port() + 2`, LAN discovery binds reusable UDP `47471` (the same port as
+  torrent for the default bind), and `Session::start_distributed` falls back to
+  the fixed `47472`/`47473` for any bind address. Every failure is swallowed by
+  `.ok()`/`is_none()` (and the DHT now moves to another port instead of
+  aborting), so the second binder – for example the transport torrent when a
+  `Session` already owns `47471` – silently ends up with a different or missing
+  node. The daemon inherits this from the Android bridge, which passes the same
+  `:47470` bind. One owner for auxiliary ports should be decided before the M7
+  network work.
+- Next: M4.1 — move desktop state and actions to the shared API client.
 - Blockers: none.
