@@ -8,10 +8,10 @@ roadmap.
 ## Status
 
 - **Status:** Active
-- **Current milestone:** M5 — `snartnet-tui` (not started)
+- **Current milestone:** M6 — Iroh device identity and peer protocol
 - **Last updated:** 2026-09-25
-- **Last completed:** M4.1, M4.2, and M4.4 — the desktop frontend is daemon-backed
-  (M4.3 tray: Linux only)
+- **Last completed:** M5.1–M5.5 — the terminal client is daemon-backed (M4.3 tray:
+  Linux only)
 - **Known blockers:** None
 
 ## Working agreement
@@ -77,11 +77,11 @@ with the tray disabled.*
 
 ## M5 — `snartnet-tui`
 
-- [ ] **M5.1** Add the Ratatui/Crossterm workspace crate and daemon client.
-- [ ] **M5.2** Implement Messages, Contacts, Feed, Profile, and Network tabs.
-- [ ] **M5.3** Implement profile, contact, post, message, and sync workflows.
-- [ ] **M5.4** Add text invitation export, responsive layout, help, and recovery.
-- [ ] **M5.5** Test reducers, rendering, narrow terminals, and API failures.
+- [x] **M5.1** Add the Ratatui/Crossterm workspace crate and daemon client.
+- [x] **M5.2** Implement Messages, Contacts, Feed, Profile, and Network tabs.
+- [x] **M5.3** Implement profile, contact, post, message, and sync workflows.
+- [x] **M5.4** Add text invitation export, responsive layout, help, and recovery.
+- [x] **M5.5** Test reducers, rendering, narrow terminals, and API failures.
 
 ## M6 — Iroh device identity and peer protocol
 
@@ -265,4 +265,42 @@ with the tray disabled.*
   platform event loop that iced owns on the main thread; those targets compile
   with the tray disabled and the work stays tracked under M4.3.
 - Next: M5.1 — add the Ratatui/Crossterm workspace crate and daemon client.
+- Blockers: none.
+
+### 2026-09-25 — M5
+
+- Completed: M5.1–M5.5. `snartnet-tui` is a daemon-backed terminal client per ADR
+  0001; nothing in the crate opens the database, holds keys, or talks to peers.
+- Delivered: the new workspace crate renders with Ratatui 0.29 and Crossterm 0.28
+  and depends only on `snartnet-sdk` (plus `snartnet-core` for types and
+  `snartnet-daemon` in tests). `tui/src/daemon.rs` is the only seam to the daemon
+  and wraps `snartnet_sdk::Client` behind an explicit `DaemonPaths`, so its
+  `--data-dir`/`SNARTNET_DATA_DIR`/`SNARTNET_HOME` resolution matches the CLI.
+  `tui/src/state.rs` turns one snapshot into the view models the terminal draws,
+  and `tui/src/app.rs` is a pure reducer: one `Message` in, at most one `Action`
+  out, executed only by the worker in `main`. `tui/src/ui.rs` renders Messages,
+  Contacts, Feed, Profile, and Network, plus a status line, per-tab hint bar, and
+  a help overlay, all from daemon data alone.
+- Delivered: profile creation and edits, contact import by invite/magnet/
+  fingerprint, posting, sending, opening a conversation (which marks it read),
+  manual sync, sync-mode cycling, discovery toggling, cache cleanup, and
+  daemon-generated invitation links land as typed `Command`s. Drafts live per
+  conversation and a rejected command keeps the user's text; the status line
+  shows the daemon's own message, and a stopped daemon is explained instead of
+  rendered as empty state. `q`/`Ctrl+C` end the view only, and `D`/`S` are the
+  explicit start/stop paths (stop asks for confirmation). Invitation URIs stay
+  selectable text in the Profile tab, so a key never leaves the daemon to be
+  exported.
+- Validation: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+  -- -D warnings`, and `cargo test --workspace` pass. The terminal suite is nine
+  tests: reducer one-in-one-out, the key map (a focused field never loses a typed
+  character to a shortcut), every tab rendering from daemon state including
+  narrow terminals down to `4x3`, an unreadable snapshot entry showing the
+  daemon's error, and two integration tests that start a real daemon with
+  `snartnet_daemon::run_with` on an OS-assigned port in a temporary home and run
+  the same action-to-call mapping `main` uses.
+- Documented: `docs/TUI.md` covers running the view, the key map, each workflow,
+  recovery, and what the client never does; the README links it and lists the
+  crate, and `docs/LOCAL_API.md` now points at the shipped terminal frontend.
+- Next: M6.1 — generate a separate Iroh identity per device.
 - Blockers: none.

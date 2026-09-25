@@ -1,0 +1,23 @@
+[package]
+name = "snartnet-tui"
+version = "0.3.3"
+edition = "2021"
+description = "SnartNet terminal UI client"
+license = "AGPL-3.0-only"
+
+[[bin]]
+name = "snartnet-tui"
+path = "src/main.rs"
+
+[dependencies]
+snartnet-core = { path = "../core" }
+snartnet-sdk = { path = "../sdk" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+ratatui = "0.29.0"
+crossterm = "0.28.1"
+
+[dev-dependencies]
+snartnet-daemon = { path = "../daemon" }
+tempfile = "3"

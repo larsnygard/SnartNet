@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "cli", "desktop", "android-bridge", "client", "daemon", "sdk"]
+members = ["core", "cli", "desktop", "tui", "android-bridge", "client", "daemon", "sdk"]
 resolver = "2"
 
 [workspace.dependencies]

@@ -30,6 +30,23 @@ workflows belong to frontends. Rust frontends can use `snartnet-sdk`; see the
 and reconnect behavior. Desktop migration is still M4: use separate data homes
 for the current desktop and daemon during this transition.
 
+## Run the terminal client
+
+`snartnet-tui` is a pure client of the same daemon: it renders and requests, and
+never opens the database, holds keys, or talks to peers itself.
+
+```bash
+cargo run -p snartnet-tui
+# or attach to a specific daemon home
+cargo run -p snartnet-tui -- --data-dir /tmp/snartnet-alice
+```
+
+It resolves the daemon home exactly like the CLI (`--data-dir`,
+`SNARTNET_DATA_DIR`, then `SNARTNET_HOME`), so `cargo run -p snartnet-cli --
+daemon status` describes the daemon the view is showing. Press `?` inside for the
+full key map; see the [terminal client guide](docs/TUI.md) for workflows and
+recovery behavior.
+
 ## Start a conversation
 
 1. Open **My profile**, choose a username and display name, and save.
@@ -87,6 +104,8 @@ The active delivery work is tracked in the [implementation plan](docs/IMPLEMENTA
 | `desktop/src/transport.rs`, `discovery.rs` | TCP cache exchange and optional UDP presence |
 | `desktop/src/tests.rs` | Chat, persistence, QR, and loopback integration regressions |
 | `cli/` | Daemon administration CLI |
+| `tui/src/main.rs`, `tui/src/daemon.rs` | Terminal event loop, jobs, and the SDK-backed daemon client |
+| `tui/src/app.rs`, `state.rs`, `input.rs`, `ui.rs` | Reducer, snapshot view models, key map, Ratatui rendering |
 | `sdk/` | Shared local API contract and Rust frontend client |
 | `daemon/` | Persistent backend and authenticated loopback API |
 | `android/`, `android-bridge/`, `client/` | Android client, JNI adapter, and shared native client session; see [Android setup](android/README.md) |
@@ -104,7 +123,7 @@ cargo test --workspace
 cargo build --workspace
 ```
 
-Tests use isolated temporary directories and real loopback TCP. They cover signature/identity binding, invitation limits, QR round trips, two-client encrypted conversations, concurrent inbox merging, offline outbox recovery, draft isolation, unread counts, and failed persistence.
+Tests use isolated temporary directories and real loopback TCP. They cover signature/identity binding, invitation limits, QR round trips, two-client encrypted conversations, concurrent inbox merging, offline outbox recovery, draft isolation, unread counts, and failed persistence. The terminal client suite covers the reducer, the key map, every tab's rendering (down to a few terminal cells), and API failures, and two of its tests drive a real daemon over the local API.
 
 To generate disposable sample data for a visual review, use a fresh directory:
 

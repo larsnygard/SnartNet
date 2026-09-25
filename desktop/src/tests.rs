@@ -91,7 +91,7 @@ fn populated_snapshot() -> (DaemonState, Profile, Profile) {
                         "incoming": false,
                         "encrypted": true,
                         "ciphertext": "ciphertext-2",
-                        "error": "cannot decrypt: the peer profile is missing",
+                        "error": "missing peer encryption key",
                         "time": "09:15"
                     }
                 ]
@@ -176,7 +176,7 @@ fn a_snapshot_becomes_the_view_models_the_window_renders() {
         .plaintext
         .as_ref()
         .expect_err("the second message is not decrypted");
-    assert!(error.contains("peer profile is missing"), "{error}");
+    assert!(error.contains("missing peer encryption key"), "{error}");
     assert_eq!(thread.messages[1].delivery, DeliveryState::Queued);
     assert_eq!(thread.messages[1].ciphertext, "ciphertext-2");
 

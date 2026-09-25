@@ -2,7 +2,8 @@
 
 `snartnet-sdk` is the frontend dependency. It owns no identity, SQLite database,
 or peer network session. `snartnet-client` remains the native backend library;
-desktop migration to the SDK is M4, and the terminal frontend is M5.
+desktop migration to the SDK was M4, and `snartnet-tui` (M5) is the terminal
+frontend built on this API.
 
 The SDK is blocking: call it on a UI worker thread (or in `spawn_blocking` from
 an async host). Drop it outside async runtime workers too, because its HTTP
