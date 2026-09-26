@@ -75,6 +75,12 @@ Invitations include the detected local IP and actual listening port. For remote 
 | `SNARTNET_IROH_DISCOVERY` | `dns` | Publish and resolve contact device endpoints through Iroh's n0 DNS/Pkarr services; `off` keeps direct addresses only |
 | `SNARTNET_IROH_RELAY` | `staging` | Iroh relay set for NAT hole punching: `staging`, `prod`, or `off` |
 
+`SNARTNET_BIND` is the only port you configure. Its owner derives the rest, and no
+derived port is a fixed second choice: LAN discovery keeps UDP `47471`, the torrent
+session listens on `base + 3` (TCP and uTP), and the Mainline DHT uses `base + 4`
+(UDP). A derived port that is already taken moves to an OS-assigned port, and a `:0`
+bind (tests, embedded hosts) owns neither auxiliary socket.
+
 For example, run a separate test identity without touching your normal data:
 
 ```bash
@@ -144,5 +150,7 @@ Contacts are also reached over Iroh (ADR 0003). Each device holds its own Iroh k
 Private keys are stored locally and are not password-encrypted. Back up the complete `data/` directory securely. Messages use static X25519 keys; forward secrecy, Double Ratchet, group chat, attachments, and key recovery remain future work. The shared low-level service also exposes legacy signed plaintext messages; the desktop chat always encrypts new messages.
 
 Torrent and DHT exchange is best-effort and uses direct peer connections; there is no SnartNet-operated relay. IPv6 and UPnP port mapping are enabled when available. DHT records contain routing metadata only; downloaded objects and message envelopes are verified before use. If both peers are behind unreachable NAT, use IPv6, VPN, or port forwarding. The implementation is intended for experimentation and does not provide anonymity or forward secrecy yet.
+
+Since M7 the durable copy comes first: an outbound message is published as a signed torrent object with a DHT mailbox pointer before it is pushed to a peer, and only a publication that *failed* holds the message back (the UI then shows the state and the reason, e.g. `queued (disk is full)`). A host with no durable transport at all — the swarm switched off, or an ephemeral bind — says so and delivers over the direct paths only. Inbound objects that arrive over the authenticated peer channel are written to the local store before they are acknowledged, and the acknowledgement count is what the sender treats as "stored", so a redelivery after a crash cannot be lost or double-counted. Both paths are attempted for every message and arrivals are deduplicated by signed object ID.
 
 Licensed under [AGPL-3.0-only](LICENSE).

@@ -4,7 +4,7 @@
 //! secret keys, so the desktop renders plaintext (or the daemon's decryption
 //! error) instead of holding a keypair of its own.
 
-use super::model::{Contact, DeliveryState, DhtStatus, PeerStatus, TorrentStatus};
+use super::model::{Contact, DeliveryState, DeliveryStatus, DhtStatus, PeerStatus, TorrentStatus};
 use serde_json::Value;
 use snartnet_core::{Profile, SignedPost};
 use snartnet_sdk::{Snapshot, SyncMode};
@@ -35,6 +35,8 @@ pub(crate) struct MessageView {
     pub ciphertext: String,
     pub encrypted: bool,
     pub delivery: DeliveryState,
+    /// Why the daemon could not publish a durable copy of this message (M7.1).
+    pub delivery_error: Option<String>,
     pub created_label: String,
     /// Daemon-side decryption result for this authenticated frontend.
     pub plaintext: Result<String, String>,
@@ -58,6 +60,9 @@ pub(crate) struct NetworkView {
     pub torrent: Option<TorrentStatus>,
     /// Authenticated iroh peer endpoint (ADR 0003), replacing the old gossip topic.
     pub peer: Option<PeerStatus>,
+    /// Durable publication state: whether this host can publish, why it last failed, and how
+    /// much inbound is spooled before acknowledgement (M7.3/M7.5).
+    pub delivery: DeliveryStatus,
     /// Scheduler mode the daemon is actually running, not what was requested.
     pub sync_mode: SyncMode,
     pub paused: bool,
@@ -96,6 +101,7 @@ impl DaemonState {
             dht: status(extra, "dht")?,
             torrent: status(extra, "torrent")?,
             peer: status(extra, "peer")?,
+            delivery: delivery_status(extra),
             sync_mode: sync_mode(extra)?,
             paused: extra
                 .get("paused")
@@ -184,6 +190,15 @@ fn sync_mode(extra: &serde_json::Map<String, Value>) -> Result<SyncMode, String>
     }
 }
 
+/// The durable publication summary. A daemon that never published anything still reports the
+/// object, so a window shows "no durable path" instead of inventing one.
+fn delivery_status(extra: &serde_json::Map<String, Value>) -> DeliveryStatus {
+    extra
+        .get("delivery")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
+}
+
 fn thread_from_value(value: &Value) -> Result<ThreadView, String> {
     let contact_fingerprint = value
         .get("fingerprint")
@@ -240,6 +255,10 @@ fn message_from_value(value: &Value) -> Result<MessageView, String> {
             .get("delivery")
             .and_then(|delivery| serde_json::from_value(delivery.clone()).ok())
             .unwrap_or_default(),
+        delivery_error: value
+            .get("deliveryError")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         created_label: string_field(value, "time"),
         plaintext,
     })

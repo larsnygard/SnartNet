@@ -50,22 +50,52 @@ impl VerificationState {
     }
 }
 
-/// Whether the daemon has handed a message to a peer or is still retrying.
+/// How far a message has travelled. Mirrors the daemon's `DeliveryState` (M7.5).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DeliveryState {
+    /// Persisted locally, but no durable copy is published yet.
     #[default]
     Queued,
+    /// Published and addressable: the recipient can fetch it without us being online.
+    Available,
+    /// A contact signed a storage receipt for its replica (M9).
+    Stored,
+    /// Handed to the recipient over the torrent or iroh path.
     Relayed,
+    /// An inbound object the daemon stored and verified before acknowledging it.
+    Received,
 }
 
 impl DeliveryState {
     pub(crate) fn label(self) -> &'static str {
         match self {
             DeliveryState::Queued => "queued",
+            DeliveryState::Available => "available",
+            DeliveryState::Stored => "replica-stored",
             DeliveryState::Relayed => "relayed",
+            DeliveryState::Received => "received",
         }
     }
+
+    /// Whether this message is still waiting for a hand-off or a durable copy.
+    pub(crate) fn is_pending(self) -> bool {
+        matches!(self, DeliveryState::Queued)
+    }
+}
+
+/// What the durable publication path is doing, from the snapshot's `delivery` key (M7.5).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct DeliveryStatus {
+    /// Whether this host can publish a durable copy at all.
+    #[serde(default)]
+    pub durable: bool,
+    /// Why the last publication failed, when it did.
+    #[serde(default)]
+    pub failed: Option<String>,
+    /// Objects spooled before acknowledgement and not yet folded into state (M7.3).
+    #[serde(default)]
+    pub spooled: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -123,12 +153,22 @@ pub(crate) struct MessageView {
     pub ciphertext: String,
     pub encrypted: bool,
     pub delivery: DeliveryState,
+    /// Why the daemon could not publish a durable copy of this message (M7.1).
+    pub delivery_error: Option<String>,
     pub created_label: String,
     /// Daemon-side decryption result for this authenticated frontend.
     pub plaintext: Result<String, String>,
 }
 
 impl MessageView {
+    /// The state a row shows, with the publication reason when there is one.
+    pub(crate) fn state_label(&self) -> String {
+        match &self.delivery_error {
+            Some(error) => format!("{} ({error})", self.delivery.label()),
+            None => self.delivery.label().to_string(),
+        }
+    }
+
     /// Body text, or the stored ciphertext when the user asks for the raw payload.
     pub(crate) fn body(&self, reveal_ciphertext: bool) -> String {
         if reveal_ciphertext && !self.ciphertext.is_empty() {
@@ -161,6 +201,9 @@ pub(crate) struct NetworkView {
     pub discovery: bool,
     pub last_sync: String,
     pub listener_error: Option<String>,
+    /// Durable publication state: whether this host can publish, why it last failed, and how
+    /// much inbound is spooled before acknowledgement (M7.3/M7.5).
+    pub delivery: DeliveryStatus,
     /// DHT, torrent, and authenticated peer status objects, already summarised for display.
     pub subsystems: Vec<(&'static str, String)>,
 }
@@ -203,6 +246,10 @@ impl DaemonState {
                 .unwrap_or(false),
             last_sync: string(extra, "lastSync").unwrap_or_else(|| "never".into()),
             listener_error: string(extra, "listenerError"),
+            delivery: extra
+                .get("delivery")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default(),
             subsystems: ["dht", "torrent", "peer"]
                 .into_iter()
                 .filter_map(|name| {
@@ -355,6 +402,10 @@ fn message_from_value(value: &Value) -> Result<MessageView, String> {
             .unwrap_or(false),
         delivery: serde_json::from_value(value.get("delivery").cloned().unwrap_or(Value::Null))
             .unwrap_or_default(),
+        delivery_error: value
+            .get("deliveryError")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         created_label: value
             .get("time")
             .and_then(Value::as_str)

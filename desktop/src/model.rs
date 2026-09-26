@@ -107,13 +107,55 @@ impl Default for Contact {
     }
 }
 
-/// Whether the daemon has handed a message to a peer or is still retrying.
+/// How far a message has travelled. Mirrors the daemon's `DeliveryState` (M7.5).
+///
+/// The five states are the ones delivery can actually reach, so the window cannot show a
+/// sixth state the daemon never sets. `Stored` is a contact's replica receipt (M9).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DeliveryState {
+    /// Persisted locally, but no durable copy is published yet.
     #[default]
     Queued,
+    /// Published and addressable: the recipient can fetch it without us being online.
+    Available,
+    /// A contact signed a storage receipt for its replica (M9).
+    Stored,
+    /// Handed to the recipient over the torrent or iroh path.
     Relayed,
+    /// An inbound object the daemon stored and verified before acknowledging it.
+    Received,
+}
+
+impl DeliveryState {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            DeliveryState::Queued => "Queued",
+            DeliveryState::Available => "Available",
+            DeliveryState::Stored => "Replica stored",
+            DeliveryState::Relayed => "Relayed",
+            DeliveryState::Received => "Received",
+        }
+    }
+
+    /// Whether this message is still waiting for a hand-off or a durable copy.
+    pub(crate) fn is_pending(self) -> bool {
+        matches!(self, DeliveryState::Queued)
+    }
+}
+
+/// What the durable publication path is doing, from the snapshot's `delivery` key (M7.5).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct DeliveryStatus {
+    /// Whether this host can publish a durable copy at all.
+    #[serde(default)]
+    pub durable: bool,
+    /// Why the last publication failed, when it did.
+    #[serde(default)]
+    pub failed: Option<String>,
+    /// Objects spooled before acknowledgement and not yet folded into state (M7.3).
+    #[serde(default)]
+    pub spooled: u64,
 }
 
 #[derive(Debug, Clone, Default)]

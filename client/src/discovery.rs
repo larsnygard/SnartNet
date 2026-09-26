@@ -35,6 +35,16 @@ pub struct LanAnnounce {
     /// "ip:port" of our TCP sync server so a peer can add us directly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcp_addr: Option<String>,
+    /// Device endpoint id, so a contact can dial the authenticated peer channel (M7.2).
+    ///
+    /// An announcement is unauthenticated, so this only ever *suggests* a device: the
+    /// handshake still validates the certificate against the contact's profile key and the
+    /// TLS-proven endpoint id, and a wrong suggestion simply fails to connect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_endpoint_id: Option<String>,
+    /// Direct iroh addresses (UDP) for that device.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peer_addrs: Vec<String>,
 }
 
 /// A peer discovered on the local network via UDP broadcast.
@@ -45,6 +55,9 @@ pub struct DiscoveredPeer {
     pub display_name: Option<String>,
     /// TCP sync address advertised by the peer, if provided.
     pub tcp_addr: Option<String>,
+    /// Device endpoint id and direct addresses, when the peer advertised them.
+    pub peer_endpoint_id: Option<String>,
+    pub peer_addrs: Vec<String>,
     /// Unix-epoch seconds of the most recent announcement.
     pub last_seen: u64,
 }
@@ -124,12 +137,16 @@ impl LanDiscovery {
                         existing.username.clone_from(&msg.username);
                         existing.tcp_addr.clone_from(&msg.tcp_addr);
                         existing.display_name.clone_from(&msg.display_name);
+                        existing.peer_endpoint_id.clone_from(&msg.peer_endpoint_id);
+                        existing.peer_addrs.clone_from(&msg.peer_addrs);
                     } else {
                         guard.push(DiscoveredPeer {
                             fingerprint: msg.fingerprint,
                             username: msg.username,
                             display_name: msg.display_name,
                             tcp_addr: msg.tcp_addr,
+                            peer_endpoint_id: msg.peer_endpoint_id,
+                            peer_addrs: msg.peer_addrs,
                             last_seen: now,
                         });
                     }

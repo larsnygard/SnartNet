@@ -130,24 +130,13 @@ pub extern "system" fn Java_com_snartnet_android_NativeBridge_nativeSync(
 ) -> jstring {
     let result = (|| {
         let _sync = SYNC.try_lock().map_err(|_| "Sync already running")?;
-        if let Some(client) = session().lock().map_err(|e| e.to_string())?.as_mut() {
-            let _ = client.sync_distributed();
-        }
-        let work = session()
-            .lock()
-            .map_err(|e| e.to_string())?
-            .as_ref()
+        // One round under one lock: publish, ingest, push. Doing the steps under separate
+        // locks let a command commit between them and an older snapshot win (M7.1).
+        let mut guard = session().lock().map_err(|e| e.to_string())?;
+        guard
+            .as_mut()
             .ok_or("Client is not initialized")?
-            .prepare_sync();
-        if let Some(work) = work {
-            let result = work();
-            session()
-                .lock()
-                .map_err(|e| e.to_string())?
-                .as_mut()
-                .ok_or("Client is not initialized")?
-                .apply_sync(result)?;
-        }
+            .sync_once()?;
         Ok(json!({"synced":true}))
     })();
     reply(&mut env, result)

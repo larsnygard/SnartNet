@@ -470,6 +470,9 @@ pub const DEVICE_NAMESPACE: &str = "snartnet/device";
 /// descriptor has to stay well inside that budget; it is public data, not a secret.
 pub const MAX_DESCRIPTOR_BYTES: usize = 1000;
 
+/// Most direct addresses a descriptor advertises, so it stays inside the DHT budget.
+pub const MAX_ADVERTISED_ADDRS: usize = 4;
+
 /// A pointer from a profile to one device endpoint, published as a signed DHT record.
 ///
 /// The record itself is signed by the profile key (BEP-44 mutable records are keyed by the
@@ -484,18 +487,30 @@ pub struct DeviceDescriptor {
     /// Advertised TCP sync address, so the same record also feeds the torrent path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tcp_addr: Option<String>,
+    /// Direct iroh addresses for `endpoint_id` (M7.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peer_addrs: Vec<String>,
     pub updated_at: u64,
 }
 
 impl DeviceDescriptor {
     /// Build a descriptor from an already-issued certificate.
-    pub fn new(certificate: DeviceCertificate, tcp_addr: Option<String>, updated_at: u64) -> Self {
+    ///
+    /// `peer_addrs` are the device's iroh addresses (UDP), never its TCP sync port: the two
+    /// are different transports, and a TCP port cannot be dialed by iroh.
+    pub fn new(
+        certificate: DeviceCertificate,
+        tcp_addr: Option<String>,
+        peer_addrs: Vec<String>,
+        updated_at: u64,
+    ) -> Self {
         Self {
             v: 1,
             profile: certificate.profile.clone(),
             endpoint_id: certificate.endpoint_id.clone(),
             certificate,
             tcp_addr,
+            peer_addrs: bounded_addrs(peer_addrs),
             updated_at,
         }
     }
@@ -553,12 +568,12 @@ impl DeviceDescriptor {
                 CAPABILITY_PEER.to_string(),
             )));
         }
-        let mut addrs = Vec::new();
-        if let Some(addr) = &self.tcp_addr {
-            if let Ok(parsed) = addr.parse::<SocketAddr>() {
-                addrs.push(parsed);
-            }
-        }
+        // Only iroh addresses are dialable here; the TCP sync address stays a separate path.
+        let addrs = self
+            .peer_addrs
+            .iter()
+            .filter_map(|addr| addr.parse::<SocketAddr>().ok())
+            .collect();
         Ok(PeerTarget {
             fingerprint: self.profile.clone(),
             endpoint_id: self.endpoint_id.clone(),
@@ -567,9 +582,28 @@ impl DeviceDescriptor {
     }
 }
 
+/// Cap advertised addresses: a DHT value must stay inside BEP-44's budget.
+pub fn bounded_addrs(addrs: Vec<String>) -> Vec<String> {
+    addrs
+        .into_iter()
+        .filter(|addr| addr.parse::<SocketAddr>().is_ok())
+        .take(MAX_ADVERTISED_ADDRS)
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Accept side
 // ---------------------------------------------------------------------------
+
+/// Somewhere an accepted object goes before the peer is told it was accepted (M7.3).
+///
+/// The session installs a store that writes to SQLite; without a sink the in-memory inbox
+/// *is* the storage, which is what the library tests rely on.
+pub trait InboundPersist: Send + Sync + 'static {
+    /// Store an accepted object. `Err` refuses the object: the frame is not acknowledged,
+    /// so the sender keeps it queued instead of believing it was delivered.
+    fn persist(&self, inbound: &PeerInbound) -> Result<(), String>;
+}
 
 /// Shared state behind both the accept handler and the public handle.
 struct PeerInner {
@@ -579,6 +613,8 @@ struct PeerInner {
     peers: Mutex<Vec<AuthenticatedPeer>>,
     inbox: Mutex<Vec<PeerInbound>>,
     accepted: Mutex<Vec<AcceptedCertificate>>,
+    /// Durable sink for objects, installed by the session before the endpoint accepts.
+    persist: Mutex<Option<Arc<dyn InboundPersist>>>,
     targets: Mutex<Vec<PeerTarget>>,
     active: AtomicBool,
     status: Mutex<PeerStatus>,
@@ -592,6 +628,7 @@ impl PeerInner {
             peers: Mutex::new(Vec::new()),
             inbox: Mutex::new(Vec::new()),
             accepted: Mutex::new(Vec::new()),
+            persist: Mutex::new(None),
             targets: Mutex::new(Vec::new()),
             active: AtomicBool::new(false),
             status: Mutex::new(PeerStatus {
@@ -723,6 +760,49 @@ impl PeerInner {
         }
     }
 
+    /// Install the durable sink for accepted objects.
+    ///
+    /// A session that reopens its endpoint replaces the sink; the newest sink is the one the
+    /// acknowledgement has to reach, so replacing (rather than refusing) is what keeps it
+    /// correct across a peer restart.
+    fn set_inbound_persist(&self, sink: Arc<dyn InboundPersist>) {
+        if let Ok(mut persist) = self.persist.lock() {
+            *persist = Some(sink);
+        }
+    }
+
+    /// Accept one object frame: store it first, then hand it to the session (M7.3).
+    ///
+    /// Returns `true` when the object may be counted in the acknowledgement. A refused
+    /// object is neither stored nor queued, so the sender's next attempt can succeed.
+    fn accept_object(&self, fingerprint: &str, endpoint_id: &str, object: Value) -> bool {
+        let inbound = PeerInbound::Object {
+            fingerprint: fingerprint.to_string(),
+            endpoint_id: endpoint_id.to_string(),
+            object,
+        };
+        match self.persist.lock() {
+            Ok(persist) => match persist.as_ref() {
+                Some(sink) => match sink.persist(&inbound) {
+                    Ok(()) => {
+                        self.push_inbound(inbound);
+                        true
+                    }
+                    Err(error) => {
+                        self.set_error(Some(format!("refused an inbound object: {error}")));
+                        false
+                    }
+                },
+                // No durable sink: the in-memory inbox is the storage.
+                None => {
+                    self.push_inbound(inbound);
+                    true
+                }
+            },
+            Err(_) => false,
+        }
+    }
+
     /// Serve one accepted connection: handshake first, application frames second.
     async fn handle_connection(&self, connection: Connection) -> Result<(), PeerError> {
         let remote = connection.remote_id();
@@ -774,12 +854,11 @@ impl PeerInner {
             match next {
                 None => break,
                 Some(Frame::Object { object }) => {
-                    self.push_inbound(PeerInbound::Object {
-                        fingerprint: peer_fingerprint.clone(),
-                        endpoint_id: endpoint_id.clone(),
-                        object,
-                    });
-                    received += 1;
+                    // Acknowledge only what is stored: the count we send back is our
+                    // promise that the object survives our own restart.
+                    if self.accept_object(&peer_fingerprint, &endpoint_id, object) {
+                        received += 1;
+                    }
                 }
                 Some(Frame::Notice { kind, fingerprint }) => {
                     // A notice can only speak for the profile the certificate proved.
@@ -957,6 +1036,14 @@ impl PeerNode {
     /// Replace the set of contacts allowed to talk to us.
     pub fn set_contacts(&self, policies: Vec<ContactPolicy>) {
         self.inner.set_contacts(policies);
+    }
+
+    /// Install the durable sink for accepted objects (M7.3).
+    ///
+    /// Must be installed before the endpoint can accept a connection (the session does it
+    /// while opening the node), because an object that is acknowledged has to be stored.
+    pub fn set_inbound_persist(&self, sink: Arc<dyn InboundPersist>) {
+        self.inner.set_inbound_persist(sink);
     }
 
     /// Start the contact-scoped presence loop over `targets`.
@@ -1609,6 +1696,7 @@ mod tests {
         let descriptor = DeviceDescriptor::new(
             alice.certificate.clone(),
             Some("127.0.0.1:47474".into()),
+            vec!["127.0.0.1:47474".into()],
             NOW,
         );
         let bytes = descriptor
@@ -1644,7 +1732,7 @@ mod tests {
     fn a_tampered_device_descriptor_is_refused() {
         let alice = Identity::new("alice", NOW);
         let bob = Identity::new("bob", NOW);
-        let descriptor = DeviceDescriptor::new(alice.certificate.clone(), None, NOW);
+        let descriptor = DeviceDescriptor::new(alice.certificate.clone(), None, Vec::new(), NOW);
 
         let mut future = descriptor.clone();
         future.v = 2;
@@ -1677,7 +1765,7 @@ mod tests {
             DEVICE_CERT_TTL_SECS,
         )
         .unwrap();
-        let restricted = DeviceDescriptor::new(chat_only, None, NOW);
+        let restricted = DeviceDescriptor::new(chat_only, None, Vec::new(), NOW);
         assert_eq!(
             restricted.to_target(&alice.fingerprint(), NOW).unwrap_err(),
             PeerError::Certificate(CertificateError::MissingCapability(
@@ -1689,6 +1777,89 @@ mod tests {
     // -----------------------------------------------------------------------
     // Live handshakes between local endpoints
     // -----------------------------------------------------------------------
+
+    /// A durable sink that refuses everything, standing in for a full disk (M7.3).
+    struct RefusingPersist;
+
+    impl InboundPersist for RefusingPersist {
+        fn persist(&self, _: &PeerInbound) -> Result<(), String> {
+            Err("no space left on device".into())
+        }
+    }
+
+    /// A sink that stores every object and counts them, the way a session's spool does.
+    #[derive(Default)]
+    struct CountingPersist {
+        stored: Mutex<Vec<PeerInbound>>,
+    }
+
+    impl InboundPersist for CountingPersist {
+        fn persist(&self, inbound: &PeerInbound) -> Result<(), String> {
+            self.stored.lock().unwrap().push(inbound.clone());
+            Ok(())
+        }
+    }
+
+    /// A refused persist must not be acknowledged, so the sender keeps the object queued.
+    ///
+    /// The acknowledgement is the sender's only evidence that its copy survived us, which is
+    /// why it is counted after the store accepted the object, not before (M7.3).
+    #[test]
+    fn a_refused_persist_is_not_acknowledged_or_queued() {
+        let alice = Identity::live("alice");
+        let bob = Identity::live("bob");
+        let alice_node = alice.node();
+        let bob_node = bob.node();
+        alice_node.set_contacts(vec![bob.policy()]);
+        bob_node.set_contacts(vec![alice.policy()]);
+        bob_node.set_inbound_persist(Arc::new(RefusingPersist));
+
+        let object = json!({"kind": "post", "content": "hello bob"});
+        let target = target_for(&bob, &bob_node);
+        let delivery = alice_node.runtime.block_on(handle(&alice_node).deliver(
+            &target,
+            vec![Frame::Object {
+                object: object.clone(),
+            }],
+        ));
+        // The frame was well formed and the certificate valid, so the connection succeeded and
+        // only the count is withheld.
+        assert_eq!(
+            delivery.expect("the handshake and framing are unaffected"),
+            0
+        );
+        assert!(bob_node.drain_inbox().is_empty());
+        assert!(wait_for_error(&bob_node, "refused an inbound object").contains("no space left"));
+
+        // A sink that works stores it and the same object is acknowledged.
+        let sink = Arc::new(CountingPersist::default());
+        bob_node.set_inbound_persist(sink.clone());
+        let delivery = alice_node.runtime.block_on(handle(&alice_node).deliver(
+            &target,
+            vec![Frame::Object {
+                object: object.clone(),
+            }],
+        ));
+        assert_eq!(delivery.unwrap(), 1);
+        assert_eq!(
+            sink.stored.lock().unwrap().as_slice(),
+            &[PeerInbound::Object {
+                fingerprint: alice.fingerprint(),
+                endpoint_id: alice_node.node_id(),
+                object: object.clone(),
+            }]
+        );
+        // The object reached the inbox only after it was stored, which is the order the ack
+        // promises.
+        assert_eq!(
+            bob_node.drain_inbox(),
+            vec![PeerInbound::Object {
+                fingerprint: alice.fingerprint(),
+                endpoint_id: alice_node.node_id(),
+                object,
+            }]
+        );
+    }
 
     #[test]
     fn two_contacts_authenticate_and_exchange_an_object() {

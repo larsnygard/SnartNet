@@ -76,6 +76,11 @@ pub struct Contact {
     /// Newest device endpoint id this contact authenticated with (ADR 0003).
     #[serde(default)]
     pub peer_endpoint_id: Option<String>,
+    /// Direct iroh addresses learned for that device (its UDP sockets, or the addresses a
+    /// device descriptor carried). Distinct from `transport_addr`, which is the TCP sync
+    /// port: dialing an endpoint on a TCP port was a bug that only ever worked by accident.
+    #[serde(default)]
+    pub peer_addrs: Vec<String>,
     /// `issued_at` of the newest accepted device certificate, so a replayed older one is refused.
     #[serde(default)]
     pub peer_certificate_issued_at: Option<u64>,
@@ -101,6 +106,7 @@ impl Default for Contact {
             known_public_key: None,
             known_encryption_public_key: None,
             peer_endpoint_id: None,
+            peer_addrs: Vec::new(),
             peer_certificate_issued_at: None,
             last_sync_error: None,
         }
@@ -132,6 +138,12 @@ pub struct ChatItem {
     pub envelope: Option<SignedMessage>,
     #[serde(default)]
     pub delivery: DeliveryState,
+    /// Why the last durable publication of this outbound message failed (M7.1).
+    ///
+    /// A message with a reason here has no durable copy, so it is not pushed: the state and
+    /// the reason are shown together instead of the message looking delivered.
+    #[serde(default)]
+    pub delivery_error: Option<String>,
     /// Preserve the key used for this message if a contact later rotates encryption keys.
     #[serde(default)]
     pub peer_encryption_key: Option<String>,
@@ -205,9 +217,62 @@ pub struct StartupData {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryState {
+    /// Persisted locally, but no durable copy is published yet (M7.1).
     #[default]
     Queued,
+    /// Published and addressable: a contact can fetch it without us being online.
+    Available,
+    /// A contact signed a storage receipt for its replica (M9).
+    Stored,
+    /// Pushed straight to the recipient over plain TCP or the iroh peer channel.
     Relayed,
+    /// Inbound object we persisted and verified before acknowledging it (M7.3).
+    Received,
+}
+
+impl DeliveryState {
+    /// Whether a durable copy of this object exists somewhere other than our memory.
+    pub fn is_durable(self) -> bool {
+        matches!(
+            self,
+            DeliveryState::Available | DeliveryState::Stored | DeliveryState::Received
+        )
+    }
+
+    /// Whether an outbound message in this state still needs a delivery attempt.
+    pub fn is_pending(self) -> bool {
+        matches!(self, DeliveryState::Queued | DeliveryState::Available)
+    }
+
+    /// The most durable state reached so far, so two paths cannot downgrade it.
+    ///
+    /// Ranked `Queued < Available < Stored < Relayed`, with `Received` only ever inbound.
+    pub fn strongest(self, other: DeliveryState) -> DeliveryState {
+        fn rank(state: DeliveryState) -> u8 {
+            match state {
+                DeliveryState::Queued => 0,
+                DeliveryState::Available => 1,
+                DeliveryState::Stored => 2,
+                DeliveryState::Relayed => 3,
+                DeliveryState::Received => 4,
+            }
+        }
+        if rank(other) > rank(self) {
+            other
+        } else {
+            self
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DeliveryState::Queued => "queued",
+            DeliveryState::Available => "available",
+            DeliveryState::Stored => "replica-stored",
+            DeliveryState::Relayed => "relayed",
+            DeliveryState::Received => "received",
+        }
+    }
 }
 
 impl ChatItem {
@@ -224,9 +289,24 @@ impl ChatItem {
             pushed_via_iroh: false,
             created_label: message.created_at.format("%d %b · %H:%M UTC").to_string(),
             verified_sender: true,
-            delivery: DeliveryState::Queued,
+            // Inbound means we already persisted it: that is what `Received` reports.
+            delivery: if incoming {
+                DeliveryState::Received
+            } else {
+                DeliveryState::Queued
+            },
+            delivery_error: None,
             peer_encryption_key: peer_key,
             envelope: Some(signed),
+        }
+    }
+
+    /// Record one delivered path without downgrading an earlier, stronger state.
+    pub fn record_path(&mut self, bittorrent: bool, iroh: bool) {
+        self.pushed_via_bittorrent |= bittorrent;
+        self.pushed_via_iroh |= iroh;
+        if bittorrent || iroh {
+            self.delivery = self.delivery.strongest(DeliveryState::Relayed);
         }
     }
 }

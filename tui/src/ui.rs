@@ -173,16 +173,23 @@ fn message_line(selected: bool, message: &MessageView, revealed: bool) -> Line<'
         ("→", Color::Green)
     };
     let state = if message.encrypted {
-        format!("encrypted · {}", message.delivery.label())
+        format!("encrypted · {}", message.state_label())
     } else {
-        message.delivery.label().to_string()
+        message.state_label()
+    };
+    // A message that is still waiting (or whose copy could not be published) stands out, so a
+    // stuck queue is visible in the list rather than only in the log (M7.5).
+    let state_style = if message.delivery.is_pending() {
+        Style::default().fg(WARNING)
+    } else {
+        Style::default().fg(DIMMED)
     };
     let line = Line::from(vec![
         Span::styled(format!("{marker} {arrow} "), Style::default().fg(colour)),
         Span::raw(message.body(revealed)),
         Span::styled(
             format!("  [{state} · {}]", message.created_label),
-            Style::default().fg(DIMMED),
+            state_style,
         ),
     ]);
     if selected {
@@ -444,6 +451,29 @@ fn network(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("Listener error: ", Style::default().fg(WARNING)),
             Span::styled(error.clone(), Style::default().fg(WARNING)),
         ]));
+    }
+    lines.push(kv(
+        "Durable publication",
+        if status.delivery.durable {
+            "available".to_string()
+        } else {
+            "unavailable on this host".to_string()
+        },
+    ));
+    if let Some(error) = &status.delivery.failed {
+        lines.push(Line::from(vec![
+            Span::styled("Publish error: ", Style::default().fg(WARNING)),
+            Span::styled(error.clone(), Style::default().fg(WARNING)),
+        ]));
+    }
+    if status.delivery.spooled > 0 {
+        lines.push(kv(
+            "Spooled inbound",
+            format!(
+                "{} object(s) stored before acknowledgement",
+                status.delivery.spooled
+            ),
+        ));
     }
     for (name, summary) in &status.subsystems {
         lines.push(kv(name, summary.clone()));

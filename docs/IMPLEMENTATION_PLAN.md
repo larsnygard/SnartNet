@@ -8,10 +8,11 @@ roadmap.
 ## Status
 
 - **Status:** Active
-- **Current milestone:** M7 — Durable BitTorrent plus realtime Iroh delivery
+- **Current milestone:** M8 — Transparent relay selection
 - **Last updated:** 2026-09-26
-- **Last completed:** M6.1–M6.6 — Iroh device identity and the authenticated peer
-  protocol (M4.3 tray: Linux only)
+- **Last completed:** M7.1–M7.6 — durable BitTorrent publication plus realtime Iroh
+  delivery (M6.1–M6.6 device identity and peer protocol before it; M4.3 tray:
+  Linux only)
 - **Known blockers:** None
 
 ## Working agreement
@@ -94,12 +95,12 @@ with the tray disabled.*
 
 ## M7 — Durable BitTorrent plus realtime Iroh delivery
 
-- [ ] **M7.1** Persist and publish an object before realtime delivery.
-- [ ] **M7.2** Deliver the same encrypted message over Iroh when online.
-- [ ] **M7.3** Persist inbound Iroh objects before acknowledgement.
-- [ ] **M7.4** Deduplicate torrent and Iroh arrivals by object ID.
-- [ ] **M7.5** Add accurate queued, available, replica-stored, and received states.
-- [ ] **M7.6** Test online, offline, retry, restart, and dual-path delivery.
+- [x] **M7.1** Persist and publish an object before realtime delivery.
+- [x] **M7.2** Deliver the same encrypted message over Iroh when online.
+- [x] **M7.3** Persist inbound Iroh objects before acknowledgement.
+- [x] **M7.4** Deduplicate torrent and Iroh arrivals by object ID.
+- [x] **M7.5** Add accurate queued, available, replica-stored, and received states.
+- [x] **M7.6** Test online, offline, retry, restart, and dual-path delivery.
 
 ## M8 — Transparent relay selection
 
@@ -361,5 +362,61 @@ with the tray disabled.*
   -- -D warnings`, and `cargo test --workspace` pass (64 client, 42 core, 3
   daemon, 17 desktop, 10 integration, 9 terminal tests).
 - Next: M7.1 — persist and publish an object before realtime delivery.
+- Blockers: none.
+
+### 2026-09-26 — M7
+
+- Completed: M7.1–M7.6. Publication is now a precondition of delivery rather than a
+  side effect, inbound peer objects are stored before they are acknowledged, and the
+  five delivery states are the ones delivery can actually reach.
+- Delivered: `client/src/ports.rs` is the single derivation point for the auxiliary
+  sockets. The peer bind owns torrent on `base + 3` (skipping LAN discovery's
+  `47471`) and DHT on `base + 4`; a derived port that is taken moves to an
+  OS-assigned port instead of a fixed second choice, and an ephemeral bind owns no
+  auxiliary socket at all. `TcpSwarmTransport` opens both nodes for a concrete bind
+  and exposes them through `torrent()`/`dht()`, so the second binder that used to
+  silently end up with a different or missing node is gone; `Session` no longer opens
+  a second torrent or DHT node and no longer binds `47472`/`47473` as a fallback.
+- Delivered: `client/src/delivery.rs` makes the durability rule explicit.
+  `PublishOutcome` is `Stored`, `Unsupported`, or `Failed`, and only `Failed` blocks
+  direct delivery. `SwarmStore` is the production `DurableStore`, held by the session
+  behind a trait object so a failing store can be tested against the real rules.
+  A publication failure is recorded on the message (`delivery_error`), which keeps it
+  out of the push list and visible in the UI, so the old silent downgrade of a failed
+  publish to "relayed" is impossible.
+- Delivered: `Session::sync_once` is the one sync round the daemon and the Android
+  bridge both drive (publish, ingest, then both direct push paths). `sync::exchange`
+  no longer publishes: it pushes, reports per-message `DeliveryPaths` for the torrent
+  and iroh paths, and returns them so `apply_sync` can record the strongest state.
+- Delivered: M7.3/M7.4. `repository::InboundSpool` implements the new
+  `peer::InboundPersist` sink; the accept handler stores an object *before* counting
+  it in the acknowledgement, and a refused persist is neither acknowledged nor
+  queued. Objects the session acknowledges are drained from the spool on every sync,
+  re-verified against the contact's key, and deduplicated by `object_id_of` (a signed
+  id, with a byte hash as the fallback), so a redelivery over another path or across a
+  restart collapses onto one row.
+- Delivered: M7.5. `DeliveryState` is `queued`, `available`, `replica-stored`,
+  `relayed`, and `received`; the snapshot adds `deliveryLabel`, `deliveryError`,
+  `viaBittorrent`, `viaIroh`, and a `delivery` block (`durable`, `failed`, `spooled`).
+  The desktop and terminal frontends render all five states, show the publication
+  reason next to a queued message, and explain a stuck message in the Network panel.
+- Delivered: the daemon and the Android bridge now push as well as pull
+  (`sync_once`), the daemon no longer serialises its three sync steps under separate
+  locks, and LAN announcements carry the device endpoint id and its direct addresses.
+  A contact that met us only on the LAN is now dialable over the authenticated peer
+  channel, and `Contact.peer_addrs` is separate from `transport_addr`: dialing iroh on
+  the TCP sync port was a latent bug that only ever worked by accident.
+- Delivered: seven new tests. `session::tests` covers the two-host flow (queue
+  offline, retry after a restart, reply over the direct paths, five states), a failed
+  publication that stays queued and unpushed until the store recovers, and a spooled
+  object that is ingested after a restart; `peer::tests` covers a refused persist that
+  is not acknowledged and a working sink that stores before the object reaches the
+  inbox. The session tests start both TCP listeners and no longer depend on the public
+  DHT/torrent path, so the client suite runs in ~2s instead of ~7s of live network
+  traffic.
+- Validation: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+  -- -D warnings`, and `cargo test --workspace` pass (73 client, 42 core, 3 daemon,
+  17 desktop, 10 integration, 9 terminal tests).
+- Next: M8.1 — use production Iroh relay configuration by default.
 - Blockers: none.
 

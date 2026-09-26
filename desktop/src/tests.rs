@@ -92,7 +92,18 @@ fn populated_snapshot() -> (DaemonState, Profile, Profile) {
                         "encrypted": true,
                         "ciphertext": "ciphertext-2",
                         "error": "missing peer encryption key",
+                        "delivery": "available",
                         "time": "09:15"
+                    },
+                    {
+                        "id": "message-3",
+                        "incoming": false,
+                        "encrypted": true,
+                        "ciphertext": "ciphertext-3",
+                        "error": "missing peer encryption key",
+                        "delivery": "queued",
+                        "deliveryError": "disk is full",
+                        "time": "09:16"
                     }
                 ]
             }],
@@ -124,6 +135,11 @@ fn populated_snapshot() -> (DaemonState, Profile, Profile) {
                 "peer_count": 4,
                 "discovery": "dns-pkarr",
                 "last_error": null
+            },
+            "delivery": {
+                "durable": true,
+                "failed": "disk is full",
+                "spooled": 2
             },
             "paused": true,
             "discovery": true,
@@ -183,8 +199,17 @@ fn a_snapshot_becomes_the_view_models_the_window_renders() {
         .as_ref()
         .expect_err("the second message is not decrypted");
     assert!(error.contains("missing peer encryption key"), "{error}");
-    assert_eq!(thread.messages[1].delivery, DeliveryState::Queued);
+    assert_eq!(thread.messages[1].delivery, DeliveryState::Available);
     assert_eq!(thread.messages[1].ciphertext, "ciphertext-2");
+    assert_eq!(thread.messages[1].delivery.label(), "Available");
+    // A publication failure is shown with the state instead of the message looking queued for
+    // no reason (M7.5).
+    assert_eq!(thread.messages[2].delivery, DeliveryState::Queued);
+    assert!(thread.messages[2].delivery.is_pending());
+    assert_eq!(
+        thread.messages[2].delivery_error.as_deref(),
+        Some("disk is full")
+    );
 
     assert_eq!(state.nearby.len(), 1);
     assert_eq!(state.nearby[0].alias, "carol@laptop");
@@ -204,6 +229,10 @@ fn a_snapshot_becomes_the_view_models_the_window_renders() {
         .as_ref()
         .is_some_and(|session| session.listening));
     assert_eq!(network.peer.as_ref().map(|peer| peer.peer_count), Some(4));
+    // The durable summary explains why a message is still queued (M7.5).
+    assert!(network.delivery.durable);
+    assert_eq!(network.delivery.failed.as_deref(), Some("disk is full"));
+    assert_eq!(network.delivery.spooled, 2);
 }
 
 #[test]
@@ -229,6 +258,10 @@ fn an_empty_snapshot_still_produces_renderable_defaults() {
     assert!(state.network.dht.is_none());
     assert!(state.network.torrent.is_none());
     assert!(state.network.peer.is_none());
+    // A daemon that reports no delivery block is treated as having no durable path rather
+    // than as a silent success.
+    assert!(!state.network.delivery.durable);
+    assert!(state.network.delivery.failed.is_none());
 }
 
 #[test]

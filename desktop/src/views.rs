@@ -211,13 +211,27 @@ impl App {
             let preview = thread
                 .and_then(|t| t.messages.last())
                 .map(|m| {
-                    if !m.incoming && m.delivery == DeliveryState::Queued {
-                        "Waiting to send".to_string()
-                    } else {
-                        match &m.plaintext {
+                    if m.incoming {
+                        return match &m.plaintext {
                             Ok(body) => body.chars().take(60).collect::<String>(),
                             Err(_) => "Encrypted conversation".to_string(),
-                        }
+                        };
+                    }
+                    // An outbound message explains itself: the reason a copy could not be
+                    // published comes first, then how far it has travelled.
+                    if let Some(error) = &m.delivery_error {
+                        return format!("Not stored: {error}");
+                    }
+                    if m.delivery.is_pending() {
+                        return "Waiting to send".to_string();
+                    }
+                    match m.delivery {
+                        DeliveryState::Available => "Stored, waiting for the recipient".to_string(),
+                        DeliveryState::Stored => "Stored by a contact".to_string(),
+                        _ => match &m.plaintext {
+                            Ok(body) => body.chars().take(60).collect::<String>(),
+                            Err(_) => "Encrypted conversation".to_string(),
+                        },
                     }
                 })
                 .unwrap_or_else(|| "Say hello".to_string());
@@ -298,15 +312,16 @@ impl App {
                     let meta = if item.incoming {
                         item.created_label.clone()
                     } else {
-                        format!(
-                            "{} · {}",
-                            item.created_label,
-                            if item.delivery == DeliveryState::Relayed {
-                                "Relayed"
-                            } else {
-                                "Queued"
-                            }
-                        )
+                        // The reason a copy is missing is part of the state, not a detail: a
+                        // message that looks queued because the disk is full must say so.
+                        match &item.delivery_error {
+                            Some(error) => format!(
+                                "{} · {} ({error})",
+                                item.created_label,
+                                item.delivery.label()
+                            ),
+                            None => format!("{} · {}", item.created_label, item.delivery.label()),
+                        }
                     };
                     let mut meta_row = row![muted(meta), horizontal_space()];
                     // Only an encrypted payload has ciphertext worth revealing;
@@ -913,6 +928,25 @@ impl App {
             if let Some(error) = &peer.last_error {
                 notes.push(format!("Peer error: {error}"));
             }
+        }
+        // The delivery summary explains the message states: a queued message with a reason
+        // here is a publication problem, not a slow recipient.
+        notes.push(format!(
+            "Durable publication: {}",
+            if network.delivery.durable {
+                "available"
+            } else {
+                "unavailable on this host"
+            }
+        ));
+        if let Some(error) = &network.delivery.failed {
+            notes.push(format!("Publish error: {error}"));
+        }
+        if network.delivery.spooled > 0 {
+            notes.push(format!(
+                "{} inbound object(s) spooled before acknowledgement",
+                network.delivery.spooled
+            ));
         }
         notes
     }

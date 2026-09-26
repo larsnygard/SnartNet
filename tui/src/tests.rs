@@ -93,7 +93,18 @@ fn populated_state() -> (DaemonState, Profile, Profile) {
                         "encrypted": true,
                         "ciphertext": "ciphertext-2",
                         "error": "missing peer encryption key",
+                        "delivery": "available",
                         "time": "09:15"
+                    },
+                    {
+                        "id": "message-3",
+                        "incoming": false,
+                        "encrypted": true,
+                        "ciphertext": "ciphertext-3",
+                        "error": "missing peer encryption key",
+                        "delivery": "queued",
+                        "deliveryError": "disk is full",
+                        "time": "09:16"
                     }
                 ]
             }],
@@ -120,6 +131,7 @@ fn populated_state() -> (DaemonState, Profile, Profile) {
                 "last_error": null
             },
             "peer": {"active": true, "node_id": "node-1", "peer_count": 4, "discovery": "dns-pkarr", "last_error": null},
+            "delivery": {"durable": false, "failed": "disk is full", "spooled": 1},
             "syncMode": "paused",
             "paused": true,
             "discovery": true,
@@ -152,7 +164,12 @@ fn a_snapshot_becomes_the_view_models_the_terminal_renders() {
         .expect("threads are keyed by fingerprint");
     assert!(state.thread("someone-else").is_none());
     assert_eq!(thread.messages[0].delivery, DeliveryState::Relayed);
-    assert_eq!(thread.messages[1].delivery, DeliveryState::Queued);
+    assert_eq!(thread.messages[1].delivery, DeliveryState::Available);
+    assert_eq!(thread.messages[1].state_label(), "available");
+    // A publication failure is part of the state a row shows, not a hidden detail (M7.5).
+    assert_eq!(thread.messages[2].delivery, DeliveryState::Queued);
+    assert!(thread.messages[2].delivery.is_pending());
+    assert_eq!(thread.messages[2].state_label(), "queued (disk is full)");
     // The daemon decrypts for this frontend, and the stored payload stays visible.
     assert!(thread.messages[0].incoming && thread.messages[0].encrypted);
     assert_eq!(thread.messages[0].body(false), "Hej Bob");
@@ -173,6 +190,10 @@ fn a_snapshot_becomes_the_view_models_the_terminal_renders() {
     assert_eq!(network.listening.as_deref(), Some("192.168.1.5:47470"));
     assert_eq!(network.subsystems.len(), 3);
     assert!(network.listener_error.is_none());
+    // The delivery summary the Network tab renders explains a stuck message (M7.5).
+    assert!(!network.delivery.durable);
+    assert_eq!(network.delivery.failed.as_deref(), Some("disk is full"));
+    assert_eq!(network.delivery.spooled, 1);
     assert_eq!(state.nearby[0].alias, "carol@laptop");
     assert_eq!(state.nearby[0].address.as_deref(), Some("10.0.0.9:47470"));
 }
@@ -189,7 +210,7 @@ fn the_first_snapshot_seeds_the_forms_and_later_ones_never_overwrite_typing() {
         Some(bob.fingerprint.as_str())
     );
     assert_eq!(
-        app.selected_message, 1,
+        app.selected_message, 2,
         "the cursor opens on the newest message"
     );
     assert_eq!(app.form.username, profile.username);

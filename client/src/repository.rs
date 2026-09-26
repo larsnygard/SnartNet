@@ -66,9 +66,103 @@ pub struct IndexedObject {
     pub torrent_descriptor: Option<String>,
 }
 
+/// Indexed store handle. Cheap to clone: it only holds the data directory and the
+/// database path, and every operation opens its own connection.
+#[derive(Clone)]
 pub struct IndexedStore {
     root: PathBuf,
     db_path: PathBuf,
+}
+
+/// The signed id of one object frame, used to deduplicate delivery paths (M7.4).
+///
+/// Objects that carry a signed id use it; a profile is keyed by fingerprint and version;
+/// anything else falls back to a hash of its bytes, so a redelivery of the same object over
+/// another path still collapses onto one row.
+pub fn object_id_of(object: &serde_json::Value) -> String {
+    if let Some(id) = object
+        .get("message")
+        .and_then(|message| message.get("id"))
+        .and_then(serde_json::Value::as_str)
+    {
+        return format!("message:{id}");
+    }
+    if let Some(id) = object
+        .get("post")
+        .and_then(|post| post.get("id"))
+        .and_then(serde_json::Value::as_str)
+    {
+        return format!("post:{id}");
+    }
+    if let Some(profile) = object.get("profile") {
+        if let Some(fingerprint) = profile
+            .get("fingerprint")
+            .and_then(serde_json::Value::as_str)
+        {
+            let version = profile
+                .get("version")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            return format!("profile:{fingerprint}:{version}");
+        }
+    }
+    let digest = blake3::hash(object.to_string().as_bytes())
+        .to_hex()
+        .to_string();
+    format!("object:{digest}")
+}
+
+/// One object a peer sent, written before it was acknowledged (M7.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpooledInbound {
+    /// Signed object id, so a redelivery over another path is recognised.
+    pub id: String,
+    /// Contact that sent it.
+    pub fingerprint: String,
+    /// Device endpoint the frame arrived on.
+    pub endpoint_id: String,
+    /// The frame's object JSON, byte-for-byte.
+    pub object_json: String,
+    pub received_at: i64,
+}
+
+/// Most inbound objects held in the spool at once.
+///
+/// The spool is drained on every sync, so it only grows while syncing is paused or a
+/// hostile peer floods us. Past the bound the *oldest* entries are dropped, which keeps
+/// the newest delivery attempt rather than refusing all of them.
+pub const MAX_SPOOLED_INBOUND: usize = 512;
+
+/// Durable sink for accepted peer objects, installed by the session (M7.3).
+///
+/// A peer acknowledgement means "stored", not "received into a channel", so the object has
+/// to reach SQLite before the ack is written. The session drains this spool on every sync,
+/// which is also what makes an object that arrived during a crash survive the restart.
+pub struct InboundSpool {
+    store: IndexedStore,
+}
+
+impl InboundSpool {
+    pub fn new(store: IndexedStore) -> Self {
+        Self { store }
+    }
+}
+
+impl crate::peer::InboundPersist for InboundSpool {
+    fn persist(&self, inbound: &crate::peer::PeerInbound) -> Result<(), String> {
+        let crate::peer::PeerInbound::Object {
+            fingerprint,
+            endpoint_id,
+            object,
+        } = inbound
+        else {
+            // A notice is a hint, not an object: nothing to store before acknowledging.
+            return Ok(());
+        };
+        self.store
+            .spool_inbound(fingerprint, endpoint_id, object)
+            .map(|_| ())
+    }
 }
 
 impl IndexedStore {
@@ -246,6 +340,90 @@ impl IndexedStore {
         Ok(())
     }
 
+    /// Write a peer's object to the durable spool before it is acknowledged (M7.3).
+    ///
+    /// The object id comes from the signed payload when it has one, so a redelivery of the
+    /// same object over the torrent or iroh path collapses onto one row.
+    pub fn spool_inbound(
+        &self,
+        fingerprint: &str,
+        endpoint_id: &str,
+        object: &serde_json::Value,
+    ) -> Result<String, String> {
+        let id = object_id_of(object);
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO inbound_spool (id, fingerprint, endpoint_id, object_json, received_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(id) DO UPDATE SET
+                 object_json = excluded.object_json,
+                 endpoint_id = excluded.endpoint_id,
+                 received_at = excluded.received_at",
+            params![
+                id,
+                fingerprint,
+                endpoint_id,
+                object.to_string(),
+                Utc::now().timestamp()
+            ],
+        )
+        .map_err(|e| format!("spool inbound object: {e}"))?;
+        conn.execute(
+            "DELETE FROM inbound_spool WHERE id IN (
+                 SELECT id FROM inbound_spool
+                 ORDER BY received_at DESC, rowid DESC
+                 LIMIT -1 OFFSET ?1
+             )",
+            params![MAX_SPOOLED_INBOUND as i64],
+        )
+        .map_err(|e| format!("trim inbound spool: {e}"))?;
+        Ok(id)
+    }
+
+    /// Spooled objects in arrival order, oldest first.
+    pub fn spooled_inbound(&self) -> Result<Vec<SpooledInbound>, String> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, fingerprint, endpoint_id, object_json, received_at
+                 FROM inbound_spool ORDER BY received_at, rowid",
+            )
+            .map_err(|e| format!("prepare inbound spool query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SpooledInbound {
+                    id: row.get(0)?,
+                    fingerprint: row.get(1)?,
+                    endpoint_id: row.get(2)?,
+                    object_json: row.get(3)?,
+                    received_at: row.get(4)?,
+                })
+            })
+            .map_err(|e| format!("query inbound spool: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("read inbound spool: {e}"))
+    }
+
+    /// Drop spooled objects the session has ingested.
+    pub fn clear_spooled(&self, ids: &[String]) -> Result<(), String> {
+        let conn = self.connect()?;
+        for id in ids {
+            conn.execute("DELETE FROM inbound_spool WHERE id = ?1", params![id])
+                .map_err(|e| format!("clear spooled object: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// How many objects are waiting to be ingested, for diagnostics.
+    pub fn spooled_count(&self) -> Result<usize, String> {
+        let conn = self.connect()?;
+        conn.query_row("SELECT COUNT(*) FROM inbound_spool", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|count| count.max(0) as usize)
+        .map_err(|e| format!("count spooled objects: {e}"))
+    }
+
     fn connect(&self) -> Result<Connection, String> {
         let conn =
             Connection::open(&self.db_path).map_err(|e| format!("open indexed state: {e}"))?;
@@ -273,7 +451,15 @@ impl IndexedStore {
              CREATE TABLE IF NOT EXISTS contacts (fingerprint TEXT PRIMARY KEY, payload_json TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS threads (fingerprint TEXT PRIMARY KEY, payload_json TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS cursors (name TEXT PRIMARY KEY, sequence INTEGER NOT NULL);
-             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);",
+             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS inbound_spool (
+                 id TEXT PRIMARY KEY,
+                 fingerprint TEXT NOT NULL,
+                 endpoint_id TEXT NOT NULL,
+                 object_json TEXT NOT NULL,
+                 received_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS inbound_spool_arrival ON inbound_spool(received_at, id);",
         )
         .map_err(|e| format!("create indexed-state schema: {e}"))?;
         let version = conn

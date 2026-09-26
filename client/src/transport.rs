@@ -3,6 +3,7 @@ use crate::{
     dht::DhtNode,
     discovery::{lan_unix_secs, local_lan_ip},
     model::Contact,
+    ports::AuxiliaryPorts,
     torrent::TorrentNode,
 };
 use serde::{Deserialize, Serialize};
@@ -91,6 +92,9 @@ pub struct TcpSwarmTransport {
 struct Inner {
     swarm_dir: PathBuf,
     bind_addr: SocketAddr,
+    /// Auxiliary ports this bind owns (M7), resolved once in [`AuxiliaryPorts::resolve`].
+    /// `None` for an ephemeral bind, which is the test and embedded-host mode.
+    ports: Option<AuxiliaryPorts>,
     base_peers: Vec<SocketAddr>,
     peers: Mutex<Vec<SocketAddr>>,
     /// Serializes read/merge/replace inbox updates from the listener and sync worker.
@@ -108,6 +112,9 @@ impl TcpSwarmTransport {
             inner: Arc::new(Inner {
                 swarm_dir: root.into(),
                 bind_addr: "127.0.0.1:0".parse().unwrap(),
+                // An ephemeral bind owns no auxiliaries: tests exercise the durable path
+                // through an injected store instead of a live torrent session.
+                ports: None,
                 base_peers: Vec::new(),
                 peers: Mutex::new(Vec::new()),
                 writes: Mutex::new(()),
@@ -119,22 +126,39 @@ impl TcpSwarmTransport {
         }
     }
 
+    /// Open the transport for a concrete bind, which then owns the torrent and DHT ports.
     pub fn new(root: &Path, bind_addr: SocketAddr) -> Result<Self, String> {
+        Self::with_peers(root, bind_addr, Vec::new())
+    }
+
+    /// [`Self::new`] plus peers that were configured up front (`SNARTNET_PEERS`).
+    ///
+    /// Configured peers are always dialed, in addition to whatever a sync discovers, so a
+    /// static seed survives a frontend that never learns another address.
+    pub fn with_peers(
+        root: &Path,
+        bind_addr: SocketAddr,
+        base_peers: Vec<SocketAddr>,
+    ) -> Result<Self, String> {
         std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+        let ports = AuxiliaryPorts::resolve(bind_addr);
+        let torrent = match ports {
+            Some(ports) => Some(Arc::new(TorrentNode::open(
+                root.join("torrent"),
+                ports.torrent,
+            )?)),
+            None => None,
+        };
         Ok(Self {
             inner: Arc::new(Inner {
                 swarm_dir: root.into(),
                 bind_addr,
-                base_peers: Vec::new(),
+                ports,
+                base_peers,
                 peers: Mutex::new(Vec::new()),
                 writes: Mutex::new(()),
                 listening_addr: Mutex::new(None),
-                torrent: TorrentNode::open(
-                    root.join("torrent"),
-                    bind_addr.port().saturating_add(1),
-                )
-                .ok()
-                .map(Arc::new),
+                torrent,
                 dht: Mutex::new(None),
                 identity: Mutex::new(None),
             }),
@@ -157,25 +181,22 @@ impl TcpSwarmTransport {
             .unwrap_or_default();
 
         let swarm_dir = swarm_root_dir()?;
+        Self::with_peers(&swarm_dir, bind_addr, peers)
+    }
 
-        Ok(Self {
-            inner: Arc::new(Inner {
-                swarm_dir: swarm_dir.clone(),
-                bind_addr,
-                base_peers: peers,
-                peers: Mutex::new(Vec::new()),
-                writes: Mutex::new(()),
-                listening_addr: Mutex::new(None),
-                torrent: TorrentNode::open(
-                    swarm_dir.join("torrent"),
-                    bind_addr.port().saturating_add(1),
-                )
-                .ok()
-                .map(Arc::new),
-                dht: Mutex::new(None),
-                identity: Mutex::new(None),
-            }),
-        })
+    /// The torrent node this bind owns, if the bind is not ephemeral.
+    pub fn torrent(&self) -> Option<Arc<TorrentNode>> {
+        self.inner.torrent.clone()
+    }
+
+    /// The DHT node this bind owns, once an identity has been attached.
+    pub fn dht(&self) -> Option<Arc<DhtNode>> {
+        self.inner.dht.lock().ok().and_then(|dht| dht.clone())
+    }
+
+    /// The auxiliary ports this bind owns, as reported by diagnostics.
+    pub fn auxiliary_ports(&self) -> Option<AuxiliaryPorts> {
+        self.inner.ports
     }
 
     pub fn set_peers(&self, peers: Vec<SocketAddr>) {
@@ -210,12 +231,18 @@ impl TcpSwarmTransport {
     }
 
     /// Attach the local identity so the transport can publish signed BEP-44
-    /// mailbox/feed descriptors. The secret key never leaves the DHT node.
+    /// mailbox/feed/device descriptors. The secret key never leaves the DHT node.
+    ///
+    /// The DHT socket belongs to this bind ([`AuxiliaryPorts`]), so it is opened here
+    /// once and shared with every caller through [`Self::dht`].
     pub fn set_identity(&self, keypair: &KeyPair) {
         *self.inner.identity.lock().unwrap() = Some(keypair.clone());
+        let Some(ports) = self.inner.ports else {
+            return;
+        };
         if self.inner.dht.lock().unwrap().is_none() {
-            let port = self.inner.bind_addr.port().saturating_add(2);
-            *self.inner.dht.lock().unwrap() = DhtNode::open(keypair, port).ok().map(Arc::new);
+            let opened = DhtNode::open(keypair, ports.dht).ok().map(Arc::new);
+            *self.inner.dht.lock().unwrap() = opened;
         }
     }
 
@@ -278,8 +305,23 @@ impl TcpSwarmTransport {
         &self.inner.swarm_dir
     }
 
-    /// Publish a durable local snapshot. Acknowledgement means a peer stored it, not that it was read.
-    pub fn publish_profile_torrent(&self, profile: &SignedProfile) -> Result<String, String> {
+    /// Whether this bind owns a durable publication path at all (torrent + DHT + identity).
+    ///
+    /// Used by [`crate::delivery`] to distinguish "this host cannot publish" (an ephemeral
+    /// test bind, or a frontend with the swarm off) from "publishing failed".
+    pub fn has_durable_transport(&self) -> bool {
+        self.inner.torrent.is_some()
+            && self.dht().is_some()
+            && self
+                .inner
+                .identity
+                .lock()
+                .map(|i| i.is_some())
+                .unwrap_or(false)
+    }
+
+    /// Publish a signed profile durably and return its magnet URI.
+    pub fn publish_profile(&self, profile: &SignedProfile) -> Result<String, String> {
         let torrent = self
             .inner
             .torrent
@@ -303,55 +345,75 @@ impl TcpSwarmTransport {
     }
 
     pub fn relay_profile(&self, profile: &SignedProfile) -> Option<String> {
-        let magnet = self.publish_profile_torrent(profile).ok();
+        let magnet = self.publish_profile(profile).ok();
+        self.push_profile(profile);
+        magnet
+    }
+
+    /// Hand our profile to directly reachable peers, returning how many accepted it.
+    pub fn push_profile(&self, profile: &SignedProfile) -> usize {
         self.fanout_put(&TransportRequest::PutProfile {
             fingerprint: profile.profile.fingerprint.clone(),
             blob: Box::new(SwarmProfileBlob {
                 profile: profile.clone(),
                 updated_at: lan_unix_secs(),
             }),
-        });
-        magnet
+        })
     }
 
-    pub fn relay_posts(&self, fingerprint: &str, posts: Vec<SignedPost>) {
-        if let Some(torrent) = &self.inner.torrent {
-            let object_id = format!("feed-{fingerprint}-{}", lan_unix_secs());
-            if let Ok(bytes) = serde_json::to_vec(&SwarmPostsBlob {
-                posts: posts.clone(),
-                updated_at: lan_unix_secs(),
-            }) {
-                if let Ok(magnet) = torrent.publish(&object_id, &bytes) {
-                    if let Some(dht) = self.inner.dht.lock().unwrap().as_ref() {
-                        if let Ok(value) = serde_json::to_vec(
-                            &serde_json::json!({"magnet": magnet, "object_id": object_id}),
-                        ) {
-                            let _ = dht.publish("snartnet/feed", &[fingerprint], &value);
-                        }
-                    }
-                }
-            }
+    /// Publish one author's feed snapshot durably, returning its locator.
+    ///
+    /// A feed is a mutable pointer, so the pointer is what a contact resolves; the bytes
+    /// live in the torrent session under a versioned object id.
+    pub fn publish_posts(
+        &self,
+        fingerprint: &str,
+        posts: &[SignedPost],
+    ) -> Result<Option<String>, String> {
+        let Some(torrent) = &self.inner.torrent else {
+            return Err("torrent transport unavailable".into());
+        };
+        let object_id = format!("feed-{fingerprint}-{}", lan_unix_secs());
+        let bytes = serde_json::to_vec(&SwarmPostsBlob {
+            posts: posts.to_vec(),
+            updated_at: lan_unix_secs(),
+        })
+        .map_err(|e| e.to_string())?;
+        let magnet = torrent.publish(&object_id, &bytes)?;
+        if let Some(dht) = self.dht() {
+            let value = serde_json::to_vec(&serde_json::json!({
+                "magnet": magnet,
+                "object_id": object_id,
+            }))
+            .map_err(|e| e.to_string())?;
+            dht.publish("snartnet/feed", &[fingerprint], &value)?;
         }
-        self.fanout_put(&TransportRequest::PutPosts {
-            fingerprint: fingerprint.into(),
-            blob: SwarmPostsBlob {
-                posts,
-                updated_at: lan_unix_secs(),
-            },
-        });
+        Ok(Some(magnet))
     }
 
-    pub fn relay_message(&self, message: &SignedMessage) -> bool {
-        if let (Some(torrent), Some(dht), Some(keypair)) = (
-            &self.inner.torrent,
-            self.inner.dht.lock().unwrap().clone(),
-            self.inner.identity.lock().unwrap().clone(),
-        ) {
-            let legacy = crate::protocol::SignedEnvelope::from_signed_message(message);
-            if let Ok(envelope) = crate::protocol::SignedEnvelope::sign(legacy.envelope, &keypair) {
-                let _ = self.publish_mailbox_manifest(torrent, &dht, &keypair, message, &envelope);
-            }
-        }
+    /// Publish one signed message into the recipient's mailbox and return its locator.
+    ///
+    /// This is the durable half of delivery (M7.1): the bytes are in the torrent session
+    /// and the DHT carries a signed manifest pointer, so the recipient can retrieve the
+    /// message later without either side being online at the same moment.
+    pub fn publish_message(&self, message: &SignedMessage) -> Result<Option<String>, String> {
+        let Some(torrent) = &self.inner.torrent else {
+            return Err("torrent transport unavailable".into());
+        };
+        let Some(dht) = self.dht() else {
+            return Err("DHT transport unavailable".into());
+        };
+        let Some(keypair) = self.inner.identity.lock().ok().and_then(|k| k.clone()) else {
+            return Err("no local identity for a signed mailbox pointer".into());
+        };
+        let legacy = crate::protocol::SignedEnvelope::from_signed_message(message);
+        let envelope = crate::protocol::SignedEnvelope::sign(legacy.envelope, &keypair)?;
+        let magnet = self.publish_mailbox_manifest(torrent, &dht, &keypair, message, &envelope)?;
+        Ok(Some(magnet))
+    }
+
+    /// Hand a message to directly reachable TCP peers. Durable publication is separate.
+    pub fn push_message(&self, message: &SignedMessage) -> bool {
         self.fanout_put(&TransportRequest::PutInbox {
             recipient_fingerprint: message.message.recipient_fingerprint.clone(),
             blob: SwarmInboxBlob {
@@ -361,6 +423,28 @@ impl TcpSwarmTransport {
         }) > 0
     }
 
+    /// Hand a posts snapshot to directly reachable peers. Durable publication is separate.
+    pub fn push_posts(&self, fingerprint: &str, posts: Vec<SignedPost>) -> usize {
+        self.fanout_put(&TransportRequest::PutPosts {
+            fingerprint: fingerprint.into(),
+            blob: SwarmPostsBlob {
+                posts,
+                updated_at: lan_unix_secs(),
+            },
+        })
+    }
+
+    pub fn relay_posts(&self, fingerprint: &str, posts: Vec<SignedPost>) {
+        let _ = self.publish_posts(fingerprint, &posts);
+        self.push_posts(fingerprint, posts);
+    }
+
+    /// Publish a message durably and push it to directly reachable peers.
+    pub fn relay_message(&self, message: &SignedMessage) -> bool {
+        let _ = self.publish_message(message);
+        self.push_message(message)
+    }
+
     fn publish_mailbox_manifest(
         &self,
         torrent: &TorrentNode,
@@ -368,7 +452,7 @@ impl TcpSwarmTransport {
         keypair: &KeyPair,
         message: &SignedMessage,
         envelope: &crate::protocol::SignedEnvelope,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         let sender = &message.message.sender_fingerprint;
         let recipient = &message.message.recipient_fingerprint;
         let object_id = format!("message-{}", message.message.id);
@@ -439,7 +523,9 @@ impl TcpSwarmTransport {
         )
         .map_err(|e| e.to_string())?;
         dht.publish("snartnet/mailbox", &[sender, recipient], &value)?;
-        Ok(())
+        // The locator is the mailbox pointer a recipient resolves, not the manifest object:
+        // both are published, but the pointer is what makes the copy addressable.
+        Ok(manifest_magnet)
     }
 
     /// Resolve immutable mailbox batches directly from the DHT and torrent swarms.

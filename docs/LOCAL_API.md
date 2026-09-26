@@ -54,6 +54,14 @@ representation. This avoids coupling frontends to backend storage/network crates
 Private identity keys are absent from snapshots; decrypted message text may be
 present for the authenticated local frontend.
 
+A message carries a delivery state and, when publication failed, the reason:
+`delivery` is `queued`, `available`, `replica-stored`, `relayed`, or `received`,
+with `deliveryLabel` as the display form, `deliveryError` as the publication
+failure, and `viaBittorrent`/`viaIroh` recording the paths that accepted it (M7).
+The top-level `delivery` key summarises the durable path: `durable` (can this host
+publish at all), `failed` (why the last publication failed), and `spooled`
+(inbound objects stored before acknowledgement and not yet ingested).
+
 API major version 1 is checked in runtime metadata and health before writes.
 Versioned responses and events are checked too. Additive response fields are
 accepted. Incompatible versions, invalid runtime metadata, and authentication

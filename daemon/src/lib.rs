@@ -162,7 +162,10 @@ async fn sync_scheduler(app: Shared) {
             let app = app.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 if let Ok(mut session) = app.session.lock() {
-                    if session.sync_distributed().is_ok() {
+                    // One round: publish durable copies, ingest arrivals, then push over both
+                    // direct paths. The daemon used to only pull, so a desktop message was
+                    // never handed to a reachable peer (M7.2).
+                    if session.sync_once().is_ok() {
                         publish(&app, "sync");
                     }
                 }
@@ -257,7 +260,7 @@ async fn sync(State(app): State<Shared>) -> Result<Json<SyncResponse>, ApiError>
             .session
             .lock()
             .map_err(|_| ApiError::internal("session lock poisoned"))?;
-        let received = session.sync_distributed().map_err(ApiError::bad_request)?;
+        let received = session.sync_once().map_err(ApiError::bad_request)?;
         publish(&app, "sync");
         Ok(Json(SyncResponse {
             received,
@@ -444,9 +447,9 @@ mod tests {
             DaemonPaths::from_data_dir(Some(root.path().join("data").to_str().unwrap())).unwrap();
         fs::create_dir_all(paths.runtime_dir()).unwrap();
         let token = load_or_create_token(&paths).unwrap();
-        let mut session = Session::open(paths.data_dir(), "127.0.0.1:0".parse().unwrap()).unwrap();
+        let session = Session::open(paths.data_dir(), "127.0.0.1:0".parse().unwrap()).unwrap();
         // This contract test never starts the TCP fallback listener or publishes an identity.
-        session.torrent = None;
+        // The ephemeral bind owns no auxiliary socket, so there is no torrent node to unset.
         let (events, _) = broadcast::channel(64);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let (stopping, _) = watch::channel(false);
