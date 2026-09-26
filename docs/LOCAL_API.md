@@ -38,7 +38,7 @@ addresses are accepted; redirects and HTTP proxies are disabled.
 
 | Method/path | Request | Response |
 | --- | --- | --- |
-| GET `/v1/health` | none | `Health`: apiVersion, revision, syncMode |
+| GET `/v1/health` | none | `Health`: apiVersion, revision, syncMode, sync |
 | GET `/v1/snapshot` | none | `Snapshot`: apiVersion, revision, state |
 | POST `/v1/command` | tagged `Command` | `CommandResponse`: apiVersion, revision, result |
 | POST `/v1/sync` | empty object | `SyncResponse`: received, revision |
@@ -73,6 +73,21 @@ API major version 1 is checked in runtime metadata and health before writes.
 Versioned responses and events are checked too. Additive response fields are
 accepted. Incompatible versions, invalid runtime metadata, and authentication
 failures are terminal; they never trigger auto-start. Hosts should surface them.
+
+The `limits` key reports bounded work (M11.1): `round` carries the per-round `caps` and
+`spent` counts for publications, contact fetches, and spooled objects folded into state;
+`queues` reports how deep the queues are (`outbound` awaiting delivery, `publishing`
+awaiting a durable copy, `spooled` with `spoolBytes`, and `inbox`), `caps` repeats the
+bounds those queues are held to, `refused` counts objects the host had to turn away
+(each one is an acknowledgement that was not written, so the sender retries), and
+`overloaded` marks a round that could not accept more inbound. Frontends render these
+numbers rather than restating the bounds.
+
+`sync` appears in health and in the snapshot (M11.1) as the scheduler's retry state:
+`failures` (consecutive failed rounds, zero when the last round completed),
+`nextSyncMs` (milliseconds until the next scheduled round), and, when something went
+wrong, `lastError`. Absent `sync` means the daemon is older than the block, not that
+nothing is wrong. A failing round backs off from 10 seconds to at most 10 minutes.
 
 ## Recovery and delivery semantics
 

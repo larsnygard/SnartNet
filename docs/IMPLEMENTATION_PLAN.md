@@ -10,8 +10,9 @@ roadmap.
 - **Status:** Active
 - **Current milestone:** M11 — Hardening and release readiness
 - **Last updated:** 2026-09-26
-- **Last completed:** M10.1–M10.3 — Android on the shared backend service with
-  power-aware sync (M9 replication and M8 relays before it; M4.3 tray: Linux only)
+- **Last completed:** M11.1 — resource limits, backoff, and bounded queues (M10 Android
+  on the shared backend service, M9 replication, and M8 relays before it; M4.3 tray:
+  Linux only)
 - **Known blockers:** None
 
 ## Working agreement
@@ -125,7 +126,7 @@ with the tray disabled.*
 
 ## M11 — Hardening and release readiness
 
-- [ ] **M11.1** Add resource limits, backoff, and bounded queues.
+- [x] **M11.1** Add resource limits, backoff, and bounded queues.
 - [ ] **M11.2** Threat-model API, device, relay, replica, and migration flows.
 - [ ] **M11.3** Add redacted diagnostics and clean-install/migration testing.
 - [ ] **M11.4** Run the complete Linux/macOS/Windows/Android release matrix.
@@ -556,4 +557,35 @@ with the tray disabled.*
   unchanged apart from the new service, permissions, and lifecycle calls.
 - Next: M11.1 — add resource limits, backoff, and bounded queues.
 - Blockers: none.
+
+### 2026-09-26 — M11.1
+
+- Completed: M11.1.
+- Delivered: `client/src/limits.rs` and ADR 0008. One sync round now spends a budget:
+  publishing, contact resolution, spool draining, and storage-record hand-over are each
+  capped (`MAX_*_PER_ROUND`), the pending push list is capped, and contact resolution
+  rotates through a cursor so a per-round cap cannot starve whoever sits last. What does not
+  fit stays queued; a test proves a round publishes exactly its share and that the next
+  round starts with a fresh budget.
+- Delivered: the queues are bounded by refusal instead of by discarding. The durable inbound
+  spool checks its entry *and* byte bounds (`MAX_SPOOLED_BYTES`, because 512 maximum-size
+  frames would be half a gigabyte) before inserting and counts refusals, so an object we
+  already acknowledged is never thrown away; the endpoint's in-memory inbox is bounded too,
+  and a full inbox only drops a copy when a durable sink already stored the object — without
+  a sink it refuses the acknowledgement instead.
+- Delivered: the daemon's scheduler runs on a `Scheduler` (per-mode cadence, `Backoff`,
+  wake-on-mode-change) and scores every round. A failed round, or one that had to refuse
+  inbound, doubles the retry delay (10 s → 10 min); a completed round resets it. `Health`
+  gained an optional `sync` block (`failures`, `nextSyncMs`, `lastError`) and the snapshot
+  gained `limits` (round caps and spend, queue depths, queue caps, refusals, overloaded) and
+  `sync`, which the desktop and terminal Network panels render.
+- Validation: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+  -- -D warnings`, and `cargo test --workspace` pass (109 client, 42 core, 4 daemon,
+  17 desktop, 10 integration, 9 terminal, 1 bridge test). New tests cover budget
+  exhaustion per category, the spool refusal path (entries and bytes), the inbox bound in
+  both storage modes, the fetch rotation, the drain budget, overload reporting, and the
+  scheduler's cadence and backoff.
+- Next: M11.2 — threat-model API, device, relay, replica, and migration flows.
+- Blockers: none.
+
 

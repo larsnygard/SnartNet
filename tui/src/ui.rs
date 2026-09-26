@@ -543,6 +543,63 @@ fn network(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(note.clone(), Style::default().fg(DIMMED)),
         ]));
     }
+    // Resource limits and the scheduler's backoff (M11.1). The caps come from the daemon, so
+    // what is shown is what this host is actually doing.
+    lines.push(kv(
+        "Round budget",
+        format!(
+            "{}/{} published · {}/{} contacts fetched · {}/{} spooled folded",
+            status.limits.round.spent.publishes,
+            status.limits.round.caps.publishes,
+            status.limits.round.spent.fetches,
+            status.limits.round.caps.fetches,
+            status.limits.round.spent.spool_drain,
+            status.limits.round.caps.spool_drain
+        ),
+    ));
+    lines.push(kv(
+        "Queues",
+        format!(
+            "{} await delivery · {} await publication · {} of {} spooled ({} KiB of {} MiB) · {} of {} in the inbox",
+            status.limits.queues.outbound,
+            status.limits.queues.publishing,
+            status.limits.queues.spooled,
+            status.limits.caps.spooled,
+            status.limits.queues.spool_bytes / 1024,
+            status.limits.caps.spool_bytes / (1024 * 1024),
+            status.limits.queues.inbox,
+            status.limits.caps.inbox
+        ),
+    ));
+    if status.limits.refused.spool > 0 || status.limits.refused.inbox > 0 {
+        // A refusal is an acknowledgement the host did not write, so the sender retries.
+        lines.push(kv(
+            "Refused inbound",
+            format!(
+                "{} object(s) for a full spool · {} for a full inbox",
+                status.limits.refused.spool, status.limits.refused.inbox
+            ),
+        ));
+    }
+    if status.sync.failures > 0 {
+        lines.push(kv(
+            "Sync retrying",
+            format!(
+                "in {}s after {} failed round(s){}",
+                status.sync.next_sync_ms / 1000,
+                status.sync.failures,
+                match &status.sync.last_error {
+                    Some(error) => format!(": {error}"),
+                    None => String::new(),
+                }
+            ),
+        ));
+    } else if status.limits.overloaded {
+        lines.push(kv(
+            "Sync",
+            "inbound is at its limit, so the daemon is slowing down".to_string(),
+        ));
+    }
     for (name, summary) in &status.subsystems {
         lines.push(kv(name, summary.clone()));
     }

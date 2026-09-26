@@ -7,6 +7,7 @@ use crate::{
         DEVICE_CERT_TTL_SECS,
     },
     discovery::*,
+    limits::{Category, Limits, RoundBudget},
     model::*,
     peer::{
         referral_from_object, ContactPolicy, PeerInbound, PeerNode, PeerOptions, PeerStatus,
@@ -68,11 +69,27 @@ pub struct Session {
     paused: bool,
     pub listener_error: Option<String>,
     last_sync: String,
+    /// Caps on one round and on the durable inbox (M11.1).
+    limits: Limits,
+    /// What the current (and, between rounds, the last) round has spent of those caps.
+    round: RoundBudget,
+    /// Rotation over contacts, so a per-round fetch budget cannot starve a contact that sits
+    /// after the budgeted window in the list (M11.1).
+    fetch_cursor: usize,
+    /// Set when the last round had to refuse inbound objects (M11.1).
+    ///
+    /// The daemon treats a round that hit this like a failed one and backs off: retrying a full
+    /// spool every ten seconds turns a full disk into a busy loop.
+    overloaded: bool,
 }
 
 impl Session {
     pub fn open(root: &Path, bind: std::net::SocketAddr) -> Result<Self, String> {
         let repository = IndexedStore::open(root)?;
+        let limits = Limits::production();
+        // The durable spool's bounds live with the table it protects, so the session has to hand
+        // its limits down before anything can be spooled (M11.1).
+        repository.set_spool_limits(limits.spool_entries, limits.spool_bytes);
         let state = repository.load_state()?;
         // One owner for the auxiliary ports (crate::ports): the transport opens the torrent
         // node for a concrete bind, and the DHT node once an identity is attached. The
@@ -108,7 +125,36 @@ impl Session {
             paused: false,
             listener_error: None,
             last_sync: "never".into(),
+            round: RoundBudget::new(limits),
+            limits,
+            fetch_cursor: 0,
+            overloaded: false,
         })
+    }
+
+    /// The caps this session works under (M11.1).
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
+    /// Replace the caps, for a test or a host that wants a smaller footprint.
+    ///
+    /// Everything derived from them is updated here, so a narrowed limit cannot leave a queue
+    /// that was sized from the old one behind.
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
+        self.round = RoundBudget::new(limits);
+        self.repository
+            .set_spool_limits(limits.spool_entries, limits.spool_bytes);
+        if let Some(peer) = self.peer.as_ref() {
+            peer.set_inbox_limit(limits.inbox_entries);
+        }
+    }
+
+    /// Whether the last round had to refuse inbound objects, or the spool is still full
+    /// (M11.1).
+    pub fn overloaded(&self) -> bool {
+        self.overloaded
     }
 
     pub fn start(&mut self) {
@@ -158,6 +204,9 @@ impl Session {
                         // Install the durable sink before anything can connect: an object the
                         // peer handler acknowledged has to already be storable (M7.3).
                         node.set_inbound_persist(self.spool.clone());
+                        // The session's inbox limit reaches the endpoint that will enforce it,
+                        // including after a limit change that happened before it opened (M11.1).
+                        node.set_inbox_limit(self.limits.inbox_entries);
                         node.set_contacts(self.peer_policies());
                         self.peer = Some(node);
                         self.peer_error = None;
@@ -315,6 +364,10 @@ impl Session {
     /// and whether the message may be pushed at all. A failure leaves the message `Queued`
     /// with the reason in `publish_error`, so the next sync retries instead of the message
     /// silently looking delivered.
+    ///
+    /// A round publishes as many as its budget allows (M11.1): a publication is a torrent add
+    /// plus a DHT pointer, and a backlog published in one round would hold the session lock for
+    /// as long as it takes. What is left stays `Queued` and is picked up next round.
     fn publish_pending_outbound(&mut self) -> Result<usize, String> {
         let pending: Vec<SignedMessage> = self
             .state
@@ -326,6 +379,9 @@ impl Session {
             .collect();
         let mut published = 0;
         for message in pending {
+            if !self.round.take(Category::Publish) {
+                break;
+            }
             let outcome = self.publish_message_durable(&message);
             if outcome.published.is_durable() {
                 published += 1;
@@ -372,6 +428,8 @@ impl Session {
 
     /// Resolve contact profile torrents and encrypted mailbox descriptors.
     pub fn sync_distributed(&mut self) -> Result<usize, String> {
+        // A round starts here: the budget is per round, so it cannot leak into the next one.
+        self.round = RoundBudget::new(self.limits);
         self.start_distributed();
         // A LAN announcement may be the only thing that tells us where a contact's device
         // is, so hints are folded in before the peer channel is dialed.
@@ -404,8 +462,13 @@ impl Session {
             .map(|p| p.profile.fingerprint.clone())
             .unwrap_or_default();
         let mut next = self.state.clone();
-        for index in 0..next.contacts.len() {
+        // Resolving a contact costs two network lookups (profile torrent, mailbox descriptors),
+        // so the round visits a window of them and rotates: a contact that sits after the window
+        // is reached next round instead of never (M11.1).
+        let window = self.fetch_window(next.contacts.len());
+        for index in window.clone() {
             let fingerprint = next.contacts[index].fingerprint.clone();
+            self.round.take(Category::Fetch);
             if let Some(magnet) = next.contacts[index].magnet_uri.clone() {
                 let object_id = format!("profile-{}", fingerprint);
                 if let Ok(bytes) = torrent.fetch(&magnet, &object_id) {
@@ -446,10 +509,33 @@ impl Session {
                 received += 1;
             }
         }
+        self.fetch_cursor = self
+            .fetch_cursor
+            .saturating_add(window.len())
+            .checked_rem(next.contacts.len())
+            .unwrap_or(0);
         if received > 0 {
             self.commit(next)?;
         }
         Ok(received)
+    }
+
+    /// Which contacts this round resolves over the network, starting where the last round
+    /// stopped (M11.1).
+    ///
+    /// Rotating instead of always taking the first `budget` contacts is what makes the per-round
+    /// fetch budget a delay for everyone rather than a permanent exclusion for whoever sits last
+    /// in the list.
+    fn fetch_window(&self, contacts: usize) -> std::ops::Range<usize> {
+        if contacts == 0 {
+            return 0..0;
+        }
+        let budget = self.round.remaining(Category::Fetch).min(contacts);
+        let start = self.fetch_cursor % contacts;
+        // The window does not wrap: it runs to the end of the list and the next round starts at
+        // index 0 again, so every contact is visited within a bounded number of rounds and the
+        // range stays a plain slice of the list.
+        start..(start + budget).min(contacts)
     }
 
     /// Ingest objects the peer handler stored before it acknowledged them (M7.3/M7.4).
@@ -458,8 +544,15 @@ impl Session {
     /// lost. Every entry is re-verified exactly like an in-memory arrival, and entries are
     /// dropped from the spool only after the canonical commit succeeded, which is what makes
     /// the spool a retry log instead of a loss.
+    ///
+    /// A round drains as much of it as its budget allows (M11.1); the rest stays spooled, which
+    /// is safe because a spooled entry is by definition not yet part of canonical state.
     fn ingest_spooled_inbound(&mut self) -> Result<usize, String> {
-        let spooled = self.repository.spooled_inbound()?;
+        let mut spooled = self.repository.spooled_inbound()?;
+        let budget = self.round.remaining(Category::SpoolDrain);
+        if spooled.len() > budget {
+            spooled.truncate(budget);
+        }
         if spooled.is_empty() {
             return Ok(0);
         }
@@ -477,6 +570,7 @@ impl Session {
             // An entry is removed from the spool even when it cannot be ingested: bytes that
             // can never become a valid object must not block the spool forever.
             ingested.push(entry.id.clone());
+            self.round.take(Category::SpoolDrain);
             let Ok(object) = serde_json::from_str::<Value>(&entry.object_json) else {
                 continue;
             };
@@ -1135,11 +1229,19 @@ impl Session {
         let mut outgoing: Vec<(String, Value)> = Vec::new();
         let mut next = self.state.clone();
         let mut changed = false;
+        // Each record is a signed object on the peer channel, so the round hands over as many as
+        // its budget allows (M11.1). A record that does not fit stays unsent rather than being
+        // marked as sent: a lease we never handed over is exactly what a receipt can never match.
+        let mut spent = false;
         for issued in next.issued_leases.iter_mut() {
             if issued.sent_at > 0 {
                 continue;
             }
             if issued.lease.is_active(now) {
+                if spent || !self.round.take(Category::StorageRecord) {
+                    spent = true;
+                    continue;
+                }
                 outgoing.push((issued.contact.clone(), lease_object(&issued.lease)));
             }
             // An expired request is not worth sending; the next round issues a fresh one.
@@ -1151,6 +1253,9 @@ impl Session {
             let (Some(stored_at), None) = (held.stored_at, held.receipt_sent_at) else {
                 continue;
             };
+            if spent || !self.round.take(Category::StorageRecord) {
+                break;
+            }
             let Some(keypair) = keypair.as_ref() else {
                 break;
             };
@@ -1379,13 +1484,31 @@ impl Session {
     /// The daemon and the Android bridge both drive their cadence through this, so the order
     /// that makes delivery honest — publish, then push what may be pushed — exists in one
     /// place instead of once per frontend.
+    ///
+    /// The round spends a [`RoundBudget`] (M11.1): what does not fit stays queued for the next
+    /// round instead of holding the session lock for minutes, and a round that had to refuse
+    /// inbound objects is reported through [`Self::overloaded`].
     pub fn sync_once(&mut self) -> Result<usize, String> {
+        let refusals_before = self.repository.spool_refusals();
         let received = self.sync_distributed()?;
         if let Some(work) = self.prepare_sync() {
             let result = work();
             self.apply_sync(result)?;
         }
+        // Either a peer was refused during this round, or the spool is still full afterwards, in
+        // which case a retry now would be refused too.
+        self.overloaded = self.repository.spool_refusals() > refusals_before || self.spool_full();
         Ok(received)
+    }
+
+    /// Whether the durable spool has no room for another object (M11.1).
+    ///
+    /// A spool that already reaches either bound is full for practical purposes: the next object
+    /// would be refused, and the peer that sent it would keep it queued.
+    fn spool_full(&self) -> bool {
+        let entries = self.repository.spooled_count().unwrap_or(0);
+        let bytes = self.repository.spool_bytes().unwrap_or(0);
+        entries >= self.limits.spool_entries || bytes >= self.limits.spool_bytes
     }
 
     pub fn prepare_sync(&self) -> Option<impl FnOnce() -> sync::SyncResult> {
@@ -1422,6 +1545,11 @@ impl Session {
             .filter(|m| !m.incoming && m.delivery_error.is_none())
             .filter(|m| matches!(m.delivery, DeliveryState::Queued | DeliveryState::Available))
             .filter_map(|m| m.envelope.clone())
+            // A push is one frame per message per contact on a single connection, so a backlog is
+            // handed over a round at a time instead of in one burst (M11.1). Messages are taken
+            // in thread order and a pushed message leaves this list, so the backlog drains in
+            // order.
+            .take(self.limits.pushes)
             .collect();
         let peer = self.peer.clone();
         // Everything the peer channel carries this round: relay referrals to offer, and replica
@@ -1515,6 +1643,40 @@ impl Session {
                 "failed": self.publish_error,
                 "spooled": self.repository.spooled_count().unwrap_or(0),
             }),
+            // Resource limits (M11.1): what one round may spend and did spend, how deep the
+            // queues behind it are, and what the host had to refuse. A frontend shows these
+            // numbers instead of repeating the caps in a string where they can drift.
+            "limits": json!({
+                "round": self.round.report(),
+                "queues": json!({
+                    "outbound": self.outbound_pending(),
+                    "publishing": self.queued_for_publication(),
+                    "spooled": self.repository.spooled_count().unwrap_or(0),
+                    "spoolBytes": self.repository.spool_bytes().unwrap_or(0),
+                    "inbox": self.peer.as_ref().map(|peer| peer.status().inbox).unwrap_or(0),
+                    "held": self.state.held_leases.len(),
+                    "issued": self.state.issued_leases.len(),
+                    "receipts": self.state.receipts.len(),
+                }),
+                "caps": json!({
+                    "pushes": self.limits.pushes,
+                    "spooled": self.limits.spool_entries,
+                    "spoolBytes": self.limits.spool_bytes,
+                    "inbox": self.limits.inbox_entries,
+                    "held": MAX_HELD_LEASES,
+                    "issued": MAX_ISSUED_LEASES,
+                    "receipts": MAX_RECEIPTS,
+                    "frameBytes": peer::MAX_FRAME_BYTES,
+                    "peers": peer::MAX_PEERS,
+                }),
+                "refused": json!({
+                    "spool": self.repository.spool_refusals(),
+                    "inbox": self.peer.as_ref().map(|peer| peer.status().inbox_refused).unwrap_or(0),
+                }),
+                // A round that refused inbound is overloaded: the daemon backs off instead of
+                // asking a full spool for room every ten seconds.
+                "overloaded": self.overloaded,
+            }),
             // Relay selection: which sources decided the map, what is applied right now, and
             // how each relay has behaved locally (M8.2/M8.4).
             "relay": json!({
@@ -1563,13 +1725,41 @@ impl Session {
         match self.peer.as_ref() {
             Some(node) => json!(node.status()),
             None => json!(PeerStatus {
-                active: false,
+                // A node that was never opened holds nothing: the inbox counters keep their
+                // default zero (M11.1).
                 node_id: self.device.as_ref().map(|d| d.endpoint_id_string()),
-                peer_count: 0,
                 discovery: peer::discovery_label(PeerOptions::from_env().discovery).to_string(),
                 last_error: self.peer_error.clone(),
+                ..PeerStatus::default()
             }),
         }
+    }
+
+    /// Outbound messages that still need a delivery attempt, as the queue depth a frontend sees
+    /// (M11.1).
+    ///
+    /// This is the filter `prepare_sync` pushes with, so the number a frontend shows cannot
+    /// disagree with what a round would actually try.
+    fn outbound_pending(&self) -> usize {
+        self.state
+            .threads
+            .iter()
+            .flat_map(|thread| &thread.messages)
+            .filter(|item| {
+                !item.incoming && item.delivery_error.is_none() && item.delivery.is_pending()
+            })
+            .count()
+    }
+
+    /// Outbound messages with no durable copy yet (M11.1): the queue the publish budget works
+    /// through, one round at a time.
+    fn queued_for_publication(&self) -> usize {
+        self.state
+            .threads
+            .iter()
+            .flat_map(|thread| &thread.messages)
+            .filter(|item| !item.incoming && item.delivery == DeliveryState::Queued)
+            .count()
     }
 
     pub fn invitation(&self) -> Result<String, String> {
@@ -2017,6 +2207,154 @@ mod tests {
             "Hello Alice"
         );
         assert!(a.state.threads[0].messages[1].pushed_via_bittorrent);
+    }
+
+    /// A round spends its budget and leaves the rest queued, and the next round starts with a
+    /// full budget again (M11.1).
+    #[test]
+    fn a_round_publishes_only_its_budget_and_the_next_round_gets_a_fresh_one() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let mut a = client(a_dir.path(), "alice");
+        let mut b = client(b_dir.path(), "bob");
+        pair(&mut a, &mut b);
+        // A store that refuses messages keeps them `Queued` with a recorded reason, which is
+        // exactly the backlog a publish budget has to meter: without it, one round would try
+        // every queued message.
+        a.store = Box::new(FailingStore);
+        let bob = b.state.profile.clone().unwrap().profile.fingerprint;
+        a.set_limits(Limits::production().with_round(1, 16, 16, 128, 16));
+        for index in 0..3 {
+            a.command(
+                json!({"op":"message", "recipient":bob, "content":format!("message {index}")}),
+            )
+            .unwrap();
+        }
+        assert_eq!(a.queued_for_publication(), 3);
+        for round in 1..=3 {
+            // The publication half of a round, without the push half: nothing here changes the
+            // delivery state, so the backlog is the same three messages every round.
+            a.sync_distributed().unwrap();
+            // Exactly one publication per round, and the round's spend is not carried over.
+            assert_eq!(
+                a.round.spent(Category::Publish),
+                1,
+                "round {round} spent the wrong share"
+            );
+        }
+        assert_eq!(a.queued_for_publication(), 3);
+        // With the cap raised, one round works through everything that is left.
+        a.set_limits(Limits::production().with_round(16, 16, 16, 128, 16));
+        a.sync_distributed().unwrap();
+        assert_eq!(a.round.spent(Category::Publish), 3);
+        // The snapshot reports the caps and the spend with the same numbers.
+        let limits = a.snapshot()["limits"].clone();
+        assert_eq!(limits["round"]["caps"]["publishes"], 16);
+        assert_eq!(limits["round"]["spent"]["publishes"], 3);
+        assert_eq!(limits["caps"]["pushes"], 16);
+        assert_eq!(limits["queues"]["publishing"], 3);
+    }
+
+    /// The fetch budget rotates over contacts instead of excluding whoever sits last (M11.1).
+    #[test]
+    fn the_fetch_window_rotates_and_honours_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::open(dir.path(), "127.0.0.1:0".parse().unwrap()).unwrap();
+        session.set_limits(Limits::production().with_round(16, 16, 2, 16, 16));
+        assert_eq!(session.fetch_window(3), 0..2, "the window is the budget");
+        session.fetch_cursor = 2;
+        assert_eq!(
+            session.fetch_window(3),
+            2..3,
+            "the rest of the list comes next"
+        );
+        // A spent budget visits nobody rather than everyone.
+        session.round = RoundBudget::new(session.limits);
+        assert!(session.round.take(Category::Fetch));
+        assert!(session.round.take(Category::Fetch));
+        assert_eq!(session.fetch_window(3), 2..2);
+        // More contacts than the budget, and a session with none at all.
+        session.round = RoundBudget::new(session.limits);
+        session.fetch_cursor = 0;
+        assert_eq!(session.fetch_window(10), 0..2);
+        assert_eq!(session.fetch_window(0), 0..0);
+    }
+
+    /// The spool drain stops at its budget: the rest stays spooled, which is safe because a
+    /// spooled entry is not part of canonical state yet (M11.1).
+    #[test]
+    fn the_spool_drain_stops_at_its_budget() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let mut a = client(a_dir.path(), "alice");
+        let mut b = client(b_dir.path(), "bob");
+        pair(&mut a, &mut b);
+        let alice = a.state.profile.clone().unwrap();
+        let bob = b.state.profile.clone().unwrap();
+        for index in 0..3 {
+            let message = block_on(create_message_async(
+                bob.profile.fingerprint.clone(),
+                alice.profile.fingerprint.clone(),
+                format!("spooled {index}"),
+                b.state.keypair.clone(),
+                alice
+                    .profile
+                    .encryption_public_key
+                    .clone()
+                    .expect("a profile always carries an encryption key"),
+            ))
+            .unwrap();
+            a.repository
+                .spool_inbound(
+                    &bob.profile.fingerprint,
+                    "bob-device",
+                    &serde_json::to_value(&message).unwrap(),
+                )
+                .unwrap();
+        }
+        a.set_limits(Limits::production().with_round(16, 16, 16, 1, 16));
+        a.sync_distributed().unwrap();
+        assert_eq!(a.round.spent(Category::SpoolDrain), 1);
+        assert_eq!(a.state.threads[0].messages.len(), 1);
+        assert_eq!(a.repository.spooled_count().unwrap(), 2);
+        // The next round folds the next one: nothing was dropped, only delayed.
+        a.sync_distributed().unwrap();
+        assert_eq!(a.state.threads[0].messages.len(), 2);
+        assert_eq!(a.repository.spooled_count().unwrap(), 1);
+    }
+
+    /// A spool that is full is reported as an overloaded round, so the scheduler can back off
+    /// instead of asking for room every ten seconds (M11.1).
+    #[test]
+    fn a_full_spool_makes_the_round_overloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = client(dir.path(), "alice");
+        // A spool that holds two objects, so the third one is refused.
+        let small = Limits::production().with_spool(2, 1024 * 1024);
+        session.set_limits(small);
+        assert!(!session.overloaded());
+        for id in ["one", "two"] {
+            session
+                .repository
+                .spool_inbound("bob", "bob-device", &json!({"message": {"id": id}}))
+                .unwrap();
+        }
+        assert_eq!(session.repository.spool_refusals(), 0);
+        assert!(session
+            .repository
+            .spool_inbound("bob", "bob-device", &json!({"message": {"id": "three"}}))
+            .is_err());
+        // A round with no drain budget leaves the spool full, so the host reports the pressure
+        // instead of pretending it can take more.
+        session.set_limits(small.with_round(16, 16, 16, 0, 16));
+        session.sync_once().unwrap();
+        assert!(session.overloaded());
+        assert_eq!(session.snapshot()["limits"]["refused"]["spool"], 1);
+        // Draining it clears the pressure, so the next round is not overloaded.
+        session.set_limits(small);
+        session.sync_once().unwrap();
+        assert!(!session.overloaded());
+        assert_eq!(session.repository.spooled_count().unwrap(), 0);
     }
 
     /// A publication failure is not papered over by a direct push (M7.1/M7.6).

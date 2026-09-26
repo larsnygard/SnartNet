@@ -35,6 +35,25 @@ pub struct Health {
     pub api_version: u64,
     pub revision: u64,
     pub sync_mode: SyncMode,
+    /// The scheduler's retry state (M11.1).
+    ///
+    /// Optional so a frontend built against an older daemon keeps working: an absent block means
+    /// "this daemon does not report it", not "nothing is wrong".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncHealth>,
+}
+
+/// How the daemon's sync scheduler is doing: how long it waits after a failed round, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncHealth {
+    /// Rounds that failed in a row. Zero means the last round completed.
+    pub failures: u32,
+    /// Milliseconds until the next scheduled round.
+    pub next_sync_ms: u64,
+    /// Why the last round failed, or why it was considered overloaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// Full authoritative state; profile and network records retain their existing JSON format.

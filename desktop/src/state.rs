@@ -5,8 +5,8 @@
 //! error) instead of holding a keypair of its own.
 
 use super::model::{
-    Contact, DeliveryState, DeliveryStatus, DhtStatus, PeerStatus, RelayView, StorageView,
-    TorrentStatus,
+    Contact, DeliveryState, DeliveryStatus, DhtStatus, LimitsView, PeerStatus, RelayView,
+    StorageView, SyncStatus, TorrentStatus,
 };
 use serde_json::Value;
 use snartnet_core::{Profile, SignedPost};
@@ -70,6 +70,10 @@ pub(crate) struct NetworkView {
     pub relay: RelayView,
     /// Replication and storage policy state (M9).
     pub storage: StorageView,
+    /// Resource limits, queue depths, and refusals (M11.1).
+    pub limits: LimitsView,
+    /// The scheduler's retry state, which is the daemon's backoff (M11.1).
+    pub sync: SyncStatus,
     /// Scheduler mode the daemon is actually running, not what was requested.
     pub sync_mode: SyncMode,
     pub paused: bool,
@@ -111,6 +115,8 @@ impl DaemonState {
             delivery: delivery_status(extra),
             relay: relay_view(extra),
             storage: storage_view(extra),
+            limits: limits_view(extra),
+            sync: sync_status(extra),
             sync_mode: sync_mode(extra)?,
             paused: extra
                 .get("paused")
@@ -221,6 +227,25 @@ fn storage_view(extra: &serde_json::Map<String, Value>) -> StorageView {
 fn relay_view(extra: &serde_json::Map<String, Value>) -> RelayView {
     extra
         .get("relay")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// What one round may spend and what the queues behind it hold (M11.1).
+///
+/// A daemon that predates the block reports nothing, which reads as all zeros: the panel then
+/// shows no limits line rather than an invented bound.
+fn limits_view(extra: &serde_json::Map<String, Value>) -> LimitsView {
+    extra
+        .get("limits")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// The scheduler's retry state (M11.1). Absent means the daemon does not report it.
+fn sync_status(extra: &serde_json::Map<String, Value>) -> SyncStatus {
+    extra
+        .get("sync")
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .unwrap_or_default()
 }

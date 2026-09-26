@@ -1008,6 +1008,49 @@ impl App {
         if let Some(note) = &network.storage.note {
             notes.push(format!("Storage: {note}"));
         }
+        // Resource limits and the scheduler's backoff (M11.1). The caps come from the daemon
+        // rather than from this window, so what is shown is what the host is actually doing.
+        notes.push(format!(
+            "Round budget: {}/{} published · {}/{} contacts fetched · {}/{} spooled folded",
+            network.limits.round.spent.publishes,
+            network.limits.round.caps.publishes,
+            network.limits.round.spent.fetches,
+            network.limits.round.caps.fetches,
+            network.limits.round.spent.spool_drain,
+            network.limits.round.caps.spool_drain
+        ));
+        notes.push(format!(
+            "Queues: {} await delivery · {} await publication · {} of {} spooled ({} KiB of {} MiB) · {} of {} in the inbox",
+            network.limits.queues.outbound,
+            network.limits.queues.publishing,
+            network.limits.queues.spooled,
+            network.limits.caps.spooled,
+            network.limits.queues.spool_bytes / 1024,
+            network.limits.caps.spool_bytes / (1024 * 1024),
+            network.limits.queues.inbox,
+            network.limits.caps.inbox
+        ));
+        if network.limits.refused.spool > 0 || network.limits.refused.inbox > 0 {
+            // A refusal is an acknowledgement the host did not write, so the sender will retry:
+            // worth saying out loud rather than leaving as a queue that never drains.
+            notes.push(format!(
+                "Refused inbound: {} object(s) for a full spool · {} for a full inbox",
+                network.limits.refused.spool, network.limits.refused.inbox
+            ));
+        }
+        if network.sync.failures > 0 {
+            notes.push(format!(
+                "Sync retrying in {}s after {} failed round(s){}",
+                network.sync.next_sync_ms / 1000,
+                network.sync.failures,
+                match &network.sync.last_error {
+                    Some(error) => format!(": {error}"),
+                    None => String::new(),
+                }
+            ));
+        } else if network.limits.overloaded {
+            notes.push("Inbound is at its limit, so the daemon is slowing down".into());
+        }
         notes
     }
 }

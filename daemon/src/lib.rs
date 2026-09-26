@@ -11,10 +11,11 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::RngCore;
 use serde::Serialize;
 use serde_json::json;
+use snartnet_client::limits::{Backoff, BACKOFF_BASE, BACKOFF_MAX};
 use snartnet_client::session::Session;
 use snartnet_sdk::types::{
     ClientState, Command, CommandResponse, ErrorResponse, Health, RuntimeMetadata, Snapshot,
-    StateEvent, StopResponse, SyncMode, SyncModeRequest, SyncResponse, API_VERSION,
+    StateEvent, StopResponse, SyncHealth, SyncMode, SyncModeRequest, SyncResponse, API_VERSION,
 };
 pub use snartnet_sdk::{Client as DaemonClient, DaemonPaths};
 use std::{
@@ -24,9 +25,9 @@ use std::{
     net::Ipv4Addr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{broadcast, oneshot, watch};
+use tokio::sync::{broadcast, oneshot, watch, Notify};
 
 struct RuntimeLock {
     _file: fs::File,
@@ -55,6 +56,11 @@ struct App {
     events: broadcast::Sender<StateEvent>,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     stopping: watch::Sender<bool>,
+    /// When the next round is due and how long to wait after a failed one (M11.1). Shared so
+    /// `/v1/health` can answer without interrupting the scheduler.
+    scheduler: Mutex<Scheduler>,
+    /// Woken when the mode changes, so a frontend never waits out a backoff to be heard.
+    wake: Notify,
 }
 type Shared = Arc<App>;
 
@@ -62,6 +68,130 @@ type Shared = Arc<App>;
 pub const DEFAULT_API_PORT: u16 = 47469;
 /// Production peer-facing bind for the torrent/DHT stack.
 pub const DEFAULT_PEER_BIND: &str = "127.0.0.1:47470";
+
+/// How long between rounds in always-on mode.
+pub const ALWAYS_ON_INTERVAL: Duration = BACKOFF_BASE;
+/// How long between rounds in balanced mode: a minute is prompt enough for a desktop client and
+/// cheap enough to leave running.
+pub const BALANCED_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Decides when the next sync round runs, and how patiently a failing one is retried (M11.1).
+///
+/// Kept apart from the loop that drives it so the policy is testable without a runtime: the
+/// timings are the only thing that varies, and they are all `Instant` arithmetic here.
+#[derive(Debug)]
+struct Scheduler {
+    mode: SyncMode,
+    backoff: Backoff,
+    next_due: Instant,
+    last_error: Option<String>,
+}
+
+impl Scheduler {
+    /// A scheduler for `mode`, with its first round one interval away.
+    fn new(mode: SyncMode, now: Instant) -> Self {
+        let mut scheduler = Self {
+            mode,
+            backoff: Backoff::new(BACKOFF_BASE, BACKOFF_MAX),
+            next_due: now,
+            last_error: None,
+        };
+        scheduler.next_due = now + scheduler.interval().unwrap_or(BALANCED_INTERVAL);
+        scheduler
+    }
+
+    /// How often this mode syncs. `None` for paused, which schedules nothing at all.
+    fn interval(&self) -> Option<Duration> {
+        match self.mode {
+            SyncMode::AlwaysOn => Some(ALWAYS_ON_INTERVAL),
+            SyncMode::Balanced => Some(BALANCED_INTERVAL),
+            SyncMode::Paused => None,
+        }
+    }
+
+    /// Adopt a mode from a frontend; the next round is scheduled from `now`.
+    fn set_mode(&mut self, mode: SyncMode, now: Instant) {
+        if self.mode != mode {
+            self.mode = mode;
+            self.next_due = now + self.interval().unwrap_or(BALANCED_INTERVAL);
+        }
+    }
+
+    /// Whether a round is due at `now`.
+    fn due(&self, now: Instant) -> bool {
+        self.interval().is_some() && now >= self.next_due
+    }
+
+    /// How long to sleep before looking again.
+    ///
+    /// The next round's own interval is the floor, and a failing round's backoff is the ceiling:
+    /// waiting for the interval is pointless when the retry is deliberately further away, and
+    /// retrying before the interval is what the interval exists to prevent.
+    fn sleep(&self, now: Instant) -> Duration {
+        let idle = match self.interval() {
+            Some(_) => self.next_due.saturating_duration_since(now),
+            // Paused: nothing is scheduled, so look again after a balanced interval. A mode
+            // change wakes the loop anyway, so this is only a fallback.
+            None => BALANCED_INTERVAL,
+        };
+        self.backoff.delay().max(idle)
+    }
+
+    /// Score one round and schedule the next one.
+    ///
+    /// A round that failed, or that had to refuse inbound objects, raises the failures and the
+    /// retry delay. A round that completed clears both, so one bad round does not slow a healthy
+    /// daemon down for long.
+    fn record(&mut self, round: Result<(), String>, overloaded: bool, now: Instant) {
+        self.last_error = match round {
+            Err(error) => {
+                self.backoff.record_failure();
+                Some(error)
+            }
+            Ok(()) if overloaded => {
+                self.backoff.record_failure();
+                Some("the durable inbound spool is full; inbound objects are being refused".into())
+            }
+            Ok(()) => {
+                self.backoff.record_success();
+                None
+            }
+        };
+        self.next_due = now + self.interval().unwrap_or(BALANCED_INTERVAL);
+    }
+
+    /// The scheduler as `/v1/health` and the snapshot report it.
+    fn health(&self, now: Instant) -> SyncHealth {
+        SyncHealth {
+            failures: self.backoff.failures(),
+            next_sync_ms: self.next_due.saturating_duration_since(now).as_millis() as u64,
+            last_error: self.last_error.clone(),
+        }
+    }
+}
+
+/// One app for one `SNARTNET_HOME`, plus the receiver that stops the server.
+///
+/// Kept in one place so the daemon's own contract tests build an app the same way the real
+/// listener does: a field added here cannot be missing in a test.
+fn shared(session: Session, token: String) -> (Shared, oneshot::Receiver<()>) {
+    let (events, _) = broadcast::channel(64);
+    let (shutdown, shutdown_rx) = oneshot::channel();
+    let (stopping, _) = watch::channel(false);
+    let mode = SyncMode::Balanced;
+    let app = Arc::new(App {
+        session: Mutex::new(session),
+        token,
+        mode: Mutex::new(mode),
+        revision: Mutex::new(0),
+        events,
+        shutdown: Mutex::new(Some(shutdown)),
+        stopping,
+        scheduler: Mutex::new(Scheduler::new(mode, Instant::now())),
+        wake: Notify::new(),
+    });
+    (app, shutdown_rx)
+}
 
 pub fn run(paths: DaemonPaths) -> Result<(), String> {
     run_with(paths, DEFAULT_API_PORT, DEFAULT_PEER_BIND.parse().unwrap())
@@ -83,18 +213,7 @@ pub fn run_with(
     let token = load_or_create_token(&paths)?;
     let mut session = Session::open(paths.data_dir(), bind)?;
     session.start();
-    let (events_tx, _) = broadcast::channel(64);
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let (stopping, _) = watch::channel(false);
-    let app = Arc::new(App {
-        session: Mutex::new(session),
-        token,
-        mode: Mutex::new(SyncMode::Balanced),
-        revision: Mutex::new(0),
-        events: events_tx,
-        shutdown: Mutex::new(Some(shutdown_tx)),
-        stopping,
-    });
+    let (app, shutdown_rx) = shared(session, token);
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     // Keep the final backend reference on this synchronous stack, even on startup failure.
     runtime.block_on(run_async(paths, app.clone(), api_port, shutdown_rx))
@@ -145,32 +264,55 @@ fn router(app: Shared) -> Router {
 }
 
 async fn sync_scheduler(app: Shared) {
-    let mut ticks = 0u64;
+    let mut stopping = app.stopping.subscribe();
     loop {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        let mode = match app.mode.lock() {
-            Ok(mode) => *mode,
+        let now = Instant::now();
+        let wait = match app.scheduler.lock() {
+            Ok(scheduler) => scheduler.sleep(now),
             Err(_) => return,
         };
-        ticks += 1;
-        let due = match mode {
-            SyncMode::AlwaysOn => true,
-            SyncMode::Balanced => ticks.is_multiple_of(6),
-            SyncMode::Paused => false,
-        };
-        if due {
-            let app = app.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                if let Ok(mut session) = app.session.lock() {
-                    // One round: publish durable copies, ingest arrivals, then push over both
-                    // direct paths. The daemon used to only pull, so a desktop message was
-                    // never handed to a reachable peer (M7.2).
-                    if session.sync_once().is_ok() {
-                        publish(&app, "sync");
-                    }
+        // A mode change or a shutdown wakes the loop instead of waiting out a backoff: a phone
+        // that comes back to the foreground must not wait ten minutes for a failed round's timer.
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = app.wake.notified() => {}
+            _ = stopping.changed() => break,
+        }
+        if *stopping.borrow() {
+            break;
+        }
+        let now = Instant::now();
+        match app.scheduler.lock() {
+            Ok(scheduler) => {
+                if !scheduler.due(now) {
+                    continue;
                 }
-            })
-            .await;
+            }
+            Err(_) => return,
+        }
+        let round_app = app.clone();
+        let round = tokio::task::spawn_blocking(move || {
+            let mut session = round_app
+                .session
+                .lock()
+                .map_err(|_| "session lock poisoned".to_string())?;
+            // One round: publish durable copies, ingest arrivals, then push over both direct
+            // paths. The daemon used to only pull, so a desktop message was never handed to a
+            // reachable peer (M7.2).
+            session.sync_once()?;
+            let overloaded = session.overloaded();
+            publish(&round_app, "sync");
+            Ok::<bool, String>(overloaded)
+        })
+        .await
+        .unwrap_or_else(|_| Err("sync worker failed".into()));
+        let (result, overloaded) = match round {
+            Ok(overloaded) => (Ok(()), overloaded),
+            Err(error) => (Err(error), false),
+        };
+        match app.scheduler.lock() {
+            Ok(mut scheduler) => scheduler.record(result, overloaded, Instant::now()),
+            Err(_) => return,
         }
     }
 }
@@ -215,6 +357,14 @@ async fn snapshot(State(app): State<Shared>) -> Result<Json<Snapshot>, ApiError>
             .lock()
             .map_err(|_| ApiError::internal("mode lock poisoned"))?;
         state.extra.insert("syncMode".into(), json!(mode));
+        // Backoff state travels with the snapshot too (M11.1), so a frontend can explain a quiet
+        // "next sync in" without a second request.
+        let sync_health = app
+            .scheduler
+            .lock()
+            .map_err(|_| ApiError::internal("scheduler lock poisoned"))?
+            .health(Instant::now());
+        state.extra.insert("sync".into(), json!(sync_health));
         Ok(Json(Snapshot {
             api_version: API_VERSION,
             revision: revision(&app),
@@ -277,6 +427,13 @@ async fn sync_mode(
     *app.mode
         .lock()
         .map_err(|_| ApiError::internal("mode lock poisoned"))? = request.mode;
+    // The scheduler owns when rounds run, so the mode has to reach it as well, and the loop is
+    // woken so a mode change is acted on at once instead of after the current wait (M11.1).
+    app.scheduler
+        .lock()
+        .map_err(|_| ApiError::internal("scheduler lock poisoned"))?
+        .set_mode(request.mode, Instant::now());
+    app.wake.notify_one();
     // The scheduler owns cadence while the session owns what a paused daemon
     // still does, so the mode has to reach both. Frontends render the session's
     // flag, and it must never disagree with what this process is doing.
@@ -348,6 +505,14 @@ fn state_summary(app: &Shared) -> Health {
         api_version: API_VERSION,
         sync_mode: *app.mode.lock().unwrap_or_else(|e| e.into_inner()),
         revision: revision(app),
+        // The scheduler's retry state (M11.1), so a frontend or a release check can see that the
+        // daemon is backing off instead of working normally.
+        sync: Some(
+            app.scheduler
+                .lock()
+                .map(|scheduler| scheduler.health(Instant::now()))
+                .unwrap_or_else(|e| e.into_inner().health(Instant::now())),
+        ),
     }
 }
 fn revision(app: &Shared) -> u64 {
@@ -450,18 +615,7 @@ mod tests {
         let session = Session::open(paths.data_dir(), "127.0.0.1:0".parse().unwrap()).unwrap();
         // This contract test never starts the TCP fallback listener or publishes an identity.
         // The ephemeral bind owns no auxiliary socket, so there is no torrent node to unset.
-        let (events, _) = broadcast::channel(64);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let (stopping, _) = watch::channel(false);
-        let app = Arc::new(App {
-            session: Mutex::new(session),
-            token,
-            mode: Mutex::new(SyncMode::Balanced),
-            revision: Mutex::new(0),
-            events,
-            shutdown: Mutex::new(Some(shutdown_tx)),
-            stopping,
-        });
+        let (app, shutdown_rx) = shared(session, token);
         let server_app = app.clone();
         let server_paths = paths.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -492,6 +646,13 @@ mod tests {
         ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let client = DaemonClient::new(paths.clone()).unwrap();
         assert_eq!(client.health().unwrap().api_version, API_VERSION);
+        // A scheduler always reports its retry state, and a healthy daemon is not backing off
+        // (M11.1).
+        let health = client.health().unwrap();
+        let sync = health.sync.expect("the daemon reports its scheduler");
+        assert_eq!(sync.failures, 0);
+        assert_eq!(sync.last_error, None);
+        assert!(sync.next_sync_ms > 0);
         fs::write(paths.token(), "B".repeat(43)).unwrap();
         assert!(matches!(
             client.snapshot(),
@@ -520,9 +681,16 @@ mod tests {
         let snapshot = subscription.next_snapshot().unwrap();
         assert_eq!(snapshot.revision, 4);
         assert_eq!(snapshot.state.threads.len(), 4);
-        assert_eq!(
-            client.set_sync_mode(SyncMode::Paused).unwrap().sync_mode,
-            SyncMode::Paused
+        let paused_health = client.set_sync_mode(SyncMode::Paused).unwrap();
+        assert_eq!(paused_health.sync_mode, SyncMode::Paused);
+        // The mode reached the scheduler, not just the session: a paused daemon schedules nothing
+        // beyond a balanced interval away (M11.1).
+        assert!(
+            paused_health
+                .sync
+                .expect("the daemon reports its scheduler")
+                .next_sync_ms
+                <= BALANCED_INTERVAL.as_millis() as u64
         );
         assert!(client.sync().is_err());
         // A frontend only reads snapshots, so both the scheduler mode and the
@@ -543,6 +711,17 @@ mod tests {
                 .get("syncMode")
                 .and_then(|value| value.as_str()),
             Some("paused")
+        );
+        // The backoff state travels with the snapshot too, so a frontend does not need a second
+        // request to explain a quiet daemon (M11.1).
+        assert_eq!(
+            paused
+                .state
+                .extra
+                .get("sync")
+                .and_then(|value| value.get("failures"))
+                .and_then(|value| value.as_u64()),
+            Some(0)
         );
         client.set_sync_mode(SyncMode::Balanced).unwrap();
         let resumed = client.snapshot().unwrap();
@@ -565,6 +744,54 @@ mod tests {
         client.stop().unwrap();
         // Keeping the subscription alive must not prevent graceful shutdown.
         server.join().unwrap();
+    }
+
+    #[test]
+    fn the_scheduler_schedules_each_mode_and_backs_off_after_a_failure() {
+        let start = Instant::now();
+        // Balanced waits a minute before its first round, always-on its own interval.
+        let mut balanced = Scheduler::new(SyncMode::Balanced, start);
+        assert!(!balanced.due(start));
+        assert!(balanced.due(start + BALANCED_INTERVAL));
+        let always_on = Scheduler::new(SyncMode::AlwaysOn, start);
+        assert!(!always_on.due(start + Duration::from_secs(5)));
+        assert!(always_on.due(start + ALWAYS_ON_INTERVAL));
+
+        // A paused scheduler is never due, and resuming schedules from that moment.
+        balanced.set_mode(SyncMode::Paused, start + BALANCED_INTERVAL);
+        let later = start + Duration::from_secs(3600);
+        assert!(!balanced.due(later));
+        assert_eq!(balanced.sleep(later), BALANCED_INTERVAL);
+        balanced.set_mode(SyncMode::Balanced, start);
+        assert!(!balanced.due(start));
+        assert!(balanced.due(start + BALANCED_INTERVAL));
+
+        // A failed round doubles the wait and keeps its reason visible.
+        balanced.record(Err("disk is full".into()), false, start);
+        assert_eq!(balanced.backoff.delay(), BACKOFF_BASE * 2);
+        assert_eq!(balanced.last_error.as_deref(), Some("disk is full"));
+        assert_eq!(balanced.health(start).failures, 1);
+        assert!(
+            balanced.sleep(start) >= BACKOFF_BASE * 2,
+            "a backoff must not be shortened by the interval"
+        );
+        // An overloaded round is scored as a failure with its own reason, because a full spool
+        // is the one failure that no retry can fix.
+        balanced.record(Ok(()), true, start);
+        assert_eq!(balanced.health(start).failures, 2);
+        assert!(balanced
+            .last_error
+            .as_deref()
+            .expect("an overloaded round has a reason")
+            .contains("spool is full"));
+        // A completed round clears both.
+        balanced.record(Ok(()), false, start);
+        assert_eq!(balanced.health(start).failures, 0);
+        assert_eq!(balanced.last_error, None);
+        assert_eq!(
+            balanced.health(start).next_sync_ms,
+            BALANCED_INTERVAL.as_millis() as u64
+        );
     }
 
     #[test]

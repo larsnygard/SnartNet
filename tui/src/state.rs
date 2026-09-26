@@ -166,6 +166,102 @@ pub(crate) struct RelayHealthView {
     pub last_error: Option<String>,
 }
 
+/// Resource limits and queue depths, from the snapshot's `limits` key (M11.1).
+///
+/// The daemon reports the caps and what one round spent, so the panel shows the real numbers
+/// instead of repeating them in a string that can drift from the code.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LimitsView {
+    #[serde(default)]
+    pub round: RoundBudgetView,
+    #[serde(default)]
+    pub queues: QueueDepths,
+    #[serde(default)]
+    pub caps: QueueCaps,
+    #[serde(default)]
+    pub refused: RefusedCounts,
+    /// Set when the last round could not accept more inbound objects.
+    #[serde(default)]
+    pub overloaded: bool,
+}
+
+/// What one sync round may spend and what it spent.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RoundBudgetView {
+    #[serde(default)]
+    pub caps: RoundCounters,
+    #[serde(default)]
+    pub spent: RoundCounters,
+}
+
+/// One round's per-category numbers.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RoundCounters {
+    #[serde(default)]
+    pub publishes: usize,
+    #[serde(default)]
+    pub fetches: usize,
+    #[serde(default)]
+    pub spool_drain: usize,
+}
+
+/// How deep the queues behind a round are.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QueueDepths {
+    /// Messages still needing a delivery attempt.
+    #[serde(default)]
+    pub outbound: usize,
+    /// Messages with no durable copy yet.
+    #[serde(default)]
+    pub publishing: usize,
+    #[serde(default)]
+    pub spooled: usize,
+    #[serde(default)]
+    pub spool_bytes: u64,
+    #[serde(default)]
+    pub inbox: usize,
+}
+
+/// The bounds those queues are held to.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QueueCaps {
+    #[serde(default)]
+    pub spooled: usize,
+    #[serde(default)]
+    pub spool_bytes: u64,
+    #[serde(default)]
+    pub inbox: usize,
+}
+
+/// Objects the host had to refuse. Each one is an acknowledgement that was not written.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RefusedCounts {
+    #[serde(default)]
+    pub spool: u64,
+    #[serde(default)]
+    pub inbox: u64,
+}
+
+/// The daemon scheduler's retry state, from the snapshot's `sync` key (M11.1).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SyncStatus {
+    /// Rounds that failed in a row. Zero means the last round completed.
+    #[serde(default)]
+    pub failures: u32,
+    /// Milliseconds until the next scheduled round.
+    #[serde(default)]
+    pub next_sync_ms: u64,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct Contact {
     pub fingerprint: String,
@@ -276,6 +372,10 @@ pub(crate) struct NetworkView {
     pub relay: RelayView,
     /// Replication and storage policy state (M9).
     pub storage: StorageView,
+    /// Resource limits, queue depths, and refusals (M11.1).
+    pub limits: LimitsView,
+    /// The scheduler's retry state, which is the daemon's backoff (M11.1).
+    pub sync: SyncStatus,
     /// DHT, torrent, and authenticated peer status objects, already summarised for display.
     pub subsystems: Vec<(&'static str, String)>,
 }
@@ -328,6 +428,14 @@ impl DaemonState {
                 .unwrap_or_default(),
             storage: extra
                 .get("storage")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default(),
+            limits: extra
+                .get("limits")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default(),
+            sync: extra
+                .get("sync")
                 .and_then(|value| serde_json::from_value(value.clone()).ok())
                 .unwrap_or_default(),
             subsystems: ["dht", "torrent", "peer"]

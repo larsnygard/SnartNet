@@ -36,7 +36,7 @@ use std::{
     fmt,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -480,6 +480,11 @@ pub struct PeerStatus {
     /// Discovery mode in effect: `dns-pkarr` or `off`.
     pub discovery: String,
     pub last_error: Option<String>,
+    /// Accepted objects waiting for the next sync in the in-memory inbox (M11.1).
+    pub inbox: usize,
+    /// How many accepted objects were refused for lack of inbox room (M11.1). With a durable
+    /// sink installed this stays zero for the inbox itself: the object is already stored.
+    pub inbox_refused: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -628,6 +633,14 @@ pub trait InboundPersist: Send + Sync + 'static {
     fn persist(&self, inbound: &PeerInbound) -> Result<(), String>;
 }
 
+/// Most accepted objects held in the in-memory inbox at once (M11.1).
+///
+/// The inbox is the in-memory copy of objects the session has yet to fold into state. It is a
+/// fast path, not the storage: with a durable sink installed the object is already spooled, so a
+/// full inbox drops the in-memory copy and still acknowledges. Without a sink the inbox *is* the
+/// storage, and a full one refuses the object so the sender keeps it queued.
+pub const MAX_PEER_INBOX: usize = 256;
+
 /// Shared state behind both the accept handler and the public handle.
 struct PeerInner {
     certificate: DeviceCertificate,
@@ -635,6 +648,11 @@ struct PeerInner {
     policy: Mutex<BTreeMap<String, ContactPolicy>>,
     peers: Mutex<Vec<AuthenticatedPeer>>,
     inbox: Mutex<Vec<PeerInbound>>,
+    /// Most objects the inbox holds before it refuses new ones, narrowed by the session's
+    /// [`crate::limits::Limits`] (M11.1).
+    inbox_limit: AtomicUsize,
+    /// Accepted objects refused for lack of inbox room, when the inbox is the storage.
+    inbox_refused: AtomicU64,
     accepted: Mutex<Vec<AcceptedCertificate>>,
     /// Durable sink for objects, installed by the session before the endpoint accepts.
     persist: Mutex<Option<Arc<dyn InboundPersist>>>,
@@ -679,6 +697,8 @@ impl PeerInner {
             policy: Mutex::new(BTreeMap::new()),
             peers: Mutex::new(Vec::new()),
             inbox: Mutex::new(Vec::new()),
+            inbox_limit: AtomicUsize::new(MAX_PEER_INBOX),
+            inbox_refused: AtomicU64::new(0),
             accepted: Mutex::new(Vec::new()),
             persist: Mutex::new(None),
             targets: Mutex::new(Vec::new()),
@@ -691,6 +711,8 @@ impl PeerInner {
                 peer_count: 0,
                 discovery: discovery_label(options.discovery).to_string(),
                 last_error: None,
+                inbox: 0,
+                inbox_refused: 0,
             }),
         }
     }
@@ -808,10 +830,20 @@ impl PeerInner {
         }
     }
 
-    fn push_inbound(&self, inbound: PeerInbound) {
-        if let Ok(mut inbox) = self.inbox.lock() {
-            inbox.push(inbound);
+    /// Queue an accepted object in memory, unless the inbox is full (M11.1).
+    ///
+    /// Returns whether the object was queued. The caller decides what a refusal means: with a
+    /// durable sink the object is already stored, so the refusal only costs a fast-path copy.
+    fn push_inbound(&self, inbound: PeerInbound) -> bool {
+        let Ok(mut inbox) = self.inbox.lock() else {
+            return false;
+        };
+        if inbox.len() >= self.inbox_limit.load(Ordering::Relaxed) {
+            self.inbox_refused.fetch_add(1, Ordering::Relaxed);
+            return false;
         }
+        inbox.push(inbound);
+        true
     }
 
     /// Install the durable sink for accepted objects.
@@ -825,10 +857,18 @@ impl PeerInner {
         }
     }
 
+    /// Narrow the in-memory inbox to the session's limit (M11.1).
+    fn set_inbox_limit(&self, limit: usize) {
+        self.inbox_limit.store(limit, Ordering::Relaxed);
+    }
+
     /// Accept one object frame: store it first, then hand it to the session (M7.3).
     ///
     /// Returns `true` when the object may be counted in the acknowledgement. A refused
     /// object is neither stored nor queued, so the sender's next attempt can succeed.
+    ///
+    /// A full inbox is not a refusal while a durable sink is installed: the object is already
+    /// spooled, so the in-memory copy only has to give way (M11.1).
     fn accept_object(&self, fingerprint: &str, endpoint_id: &str, object: Value) -> bool {
         let inbound = PeerInbound::Object {
             fingerprint: fingerprint.to_string(),
@@ -847,10 +887,15 @@ impl PeerInner {
                         false
                     }
                 },
-                // No durable sink: the in-memory inbox is the storage.
+                // No durable sink: the in-memory inbox *is* the storage, so a full inbox means
+                // the object cannot be kept and must not be acknowledged.
                 None => {
-                    self.push_inbound(inbound);
-                    true
+                    if self.push_inbound(inbound) {
+                        true
+                    } else {
+                        self.set_error(Some("in-memory inbox is full".into()));
+                        false
+                    }
                 }
             },
             Err(_) => false,
@@ -921,7 +966,9 @@ impl PeerInner {
                             "notice names a different profile than the certificate".into(),
                         ));
                     }
-                    self.push_inbound(PeerInbound::Notice {
+                    // A notice is a hint, not a stored object: dropping one under inbox
+                    // pressure costs a faster dial, never data (M11.1).
+                    let _ = self.push_inbound(PeerInbound::Notice {
                         fingerprint,
                         endpoint_id: endpoint_id.clone(),
                         kind,
@@ -1293,12 +1340,29 @@ impl PeerNode {
     }
 
     /// Snapshot for the daemon's `peers` state key.
+    ///
+    /// The inbox depth is read here rather than kept in the status mutex, so it is always the
+    /// current depth and cannot drift from what a sync would drain (M11.1).
     pub fn status(&self) -> PeerStatus {
-        self.inner
+        let mut status = self
+            .inner
             .status
             .lock()
             .map(|status| status.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        status.inbox = self
+            .inner
+            .inbox
+            .lock()
+            .map(|inbox| inbox.len())
+            .unwrap_or_default();
+        status.inbox_refused = self.inner.inbox_refused.load(Ordering::Relaxed);
+        status
+    }
+
+    /// Narrow the in-memory inbox, so a host with less headroom holds fewer objects (M11.1).
+    pub fn set_inbox_limit(&self, limit: usize) {
+        self.inner.set_inbox_limit(limit);
     }
 
     /// Contacts that completed a handshake recently.
@@ -2078,6 +2142,75 @@ mod tests {
                 object,
             }]
         );
+    }
+
+    /// A full in-memory inbox must not cost an acknowledgement when the object is already
+    /// durable: the spool holds it, so the in-memory copy is only a fast path (M11.1).
+    #[test]
+    fn a_full_inbox_drops_the_copy_but_still_acknowledges_a_stored_object() {
+        let alice = Identity::live("alice");
+        let bob = Identity::live("bob");
+        let alice_node = alice.node();
+        let bob_node = bob.node();
+        alice_node.set_contacts(vec![bob.policy()]);
+        bob_node.set_contacts(vec![alice.policy()]);
+        let sink = Arc::new(CountingPersist::default());
+        bob_node.set_inbound_persist(sink.clone());
+        bob_node.set_inbox_limit(1);
+
+        let first = json!({"kind": "post", "content": "one"});
+        let second = json!({"kind": "post", "content": "two"});
+        let target = target_for(&bob, &bob_node);
+        let delivery = alice_node.runtime.block_on(handle(&alice_node).deliver(
+            &target,
+            vec![
+                Frame::Object {
+                    object: first.clone(),
+                },
+                Frame::Object {
+                    object: second.clone(),
+                },
+            ],
+        ));
+        // Both objects are stored, so both are acknowledged even though only one fits in RAM.
+        assert_eq!(delivery.unwrap(), 2);
+        assert_eq!(sink.stored.lock().unwrap().len(), 2);
+        assert_eq!(bob_node.drain_inbox().len(), 1);
+        let status = bob_node.status();
+        assert_eq!(status.inbox_refused, 1);
+        // A dropped fast-path copy is not an error: nothing was lost.
+        assert_eq!(status.last_error, None);
+    }
+
+    /// Without a durable sink the inbox *is* the storage, so a full one must refuse the object
+    /// instead of acknowledging a copy that does not exist anywhere (M11.1).
+    #[test]
+    fn a_full_inbox_refuses_an_object_when_it_is_the_only_storage() {
+        let alice = Identity::live("alice");
+        let bob = Identity::live("bob");
+        let alice_node = alice.node();
+        let bob_node = bob.node();
+        alice_node.set_contacts(vec![bob.policy()]);
+        bob_node.set_contacts(vec![alice.policy()]);
+        bob_node.set_inbox_limit(1);
+
+        let target = target_for(&bob, &bob_node);
+        let delivery = alice_node.runtime.block_on(handle(&alice_node).deliver(
+            &target,
+            vec![
+                Frame::Object {
+                    object: json!({"kind": "post", "content": "one"}),
+                },
+                Frame::Object {
+                    object: json!({"kind": "post", "content": "two"}),
+                },
+            ],
+        ));
+        // Only the object we kept is acknowledged, so the sender retries the other one.
+        assert_eq!(delivery.unwrap(), 1);
+        assert_eq!(bob_node.drain_inbox().len(), 1);
+        assert_eq!(bob_node.status().inbox_refused, 1);
+        assert!(wait_for_error(&bob_node, "inbox is full").contains("in-memory inbox"));
     }
 
     /// A relay that cannot be reached must not stop a direct delivery (M8.5).

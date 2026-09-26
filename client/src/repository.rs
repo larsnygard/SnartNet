@@ -15,6 +15,10 @@ use snartnet_core::{FileStorage, KeyPair, SignedPost, SignedProfile};
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 const SCHEMA_VERSION: i64 = 1;
@@ -92,6 +96,30 @@ pub struct IndexedObject {
 pub struct IndexedStore {
     root: PathBuf,
     db_path: PathBuf,
+    /// Caps on the durable inbound spool and how much it refused (M11.1).
+    ///
+    /// Shared by every clone, because the peer handler writes through its own handle while the
+    /// session reads the counters from the store it owns.
+    spool_limits: Arc<SpoolLimits>,
+}
+
+/// The inbound spool's bounds and its refusal counter (M11.1).
+struct SpoolLimits {
+    entries: AtomicUsize,
+    bytes: AtomicU64,
+    /// Objects refused because the spool was full. Each one is an acknowledgement we did *not*
+    /// write, so the sender keeps it queued and retries.
+    refusals: AtomicU64,
+}
+
+impl SpoolLimits {
+    fn production() -> Self {
+        Self {
+            entries: AtomicUsize::new(MAX_SPOOLED_INBOUND),
+            bytes: AtomicU64::new(MAX_SPOOLED_BYTES),
+            refusals: AtomicU64::new(0),
+        }
+    }
 }
 
 /// One replica indexed in the local store (M9.3).
@@ -187,10 +215,19 @@ pub struct SpooledInbound {
 
 /// Most inbound objects held in the spool at once.
 ///
-/// The spool is drained on every sync, so it only grows while syncing is paused or a
-/// hostile peer floods us. Past the bound the *oldest* entries are dropped, which keeps
-/// the newest delivery attempt rather than refusing all of them.
+/// The spool is drained on every sync, so it only grows while syncing is paused or a hostile
+/// peer floods us. Past either bound the spool *refuses* new objects instead of dropping old
+/// ones: an entry in the spool is an object we already acknowledged, so discarding one would
+/// turn an acknowledgement into a lie. A refusal means no acknowledgement, the sender keeps the
+/// object queued, and the refusal is counted so a frontend can show the pressure (M11.1).
 pub const MAX_SPOOLED_INBOUND: usize = 512;
+
+/// Most bytes the spool holds before it refuses new objects.
+///
+/// A frame may be up to a megabyte (see `MAX_FRAME_BYTES`), so a count alone is not a bound: 512
+/// maximum-size objects would be half a gigabyte of disk. Whichever bound is reached first stops
+/// the spool, which is what keeps a flood from filling the volume the canonical store lives on.
+pub const MAX_SPOOLED_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Durable sink for accepted peer objects, installed by the session (M7.3).
 ///
@@ -235,6 +272,7 @@ impl IndexedStore {
         let store = Self {
             root: root.to_path_buf(),
             db_path: root.join("state.sqlite3"),
+            spool_limits: Arc::new(SpoolLimits::production()),
         };
         let created_database = !store.db_path.exists();
         let result: Result<(), String> = (|| {
@@ -420,10 +458,41 @@ impl IndexedStore {
         Ok(())
     }
 
+    /// Narrow (or widen) the spool bounds (M11.1).
+    ///
+    /// The session applies its [`crate::limits::Limits`] here, so a test can reach a full spool
+    /// with a handful of objects instead of half a gigabyte of them.
+    pub fn set_spool_limits(&self, entries: usize, bytes: u64) {
+        self.spool_limits.entries.store(entries, Ordering::Relaxed);
+        self.spool_limits.bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Objects this store refused because the spool was full (M11.1).
+    ///
+    /// Each refusal is an acknowledgement that was *not* written, so a growing counter means
+    /// inbound is being turned away and the daemon should slow down rather than retry sooner.
+    pub fn spool_refusals(&self) -> u64 {
+        self.spool_limits.refusals.load(Ordering::Relaxed)
+    }
+
+    /// Bytes the spool currently holds.
+    pub fn spool_bytes(&self) -> Result<u64, String> {
+        let conn = self.connect()?;
+        conn.query_row(
+            "SELECT COALESCE(SUM(LENGTH(object_json)), 0) FROM inbound_spool",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|bytes| bytes.max(0) as u64)
+        .map_err(|e| format!("measure inbound spool: {e}"))
+    }
+
     /// Write a peer's object to the durable spool before it is acknowledged (M7.3).
     ///
     /// The object id comes from the signed payload when it has one, so a redelivery of the
-    /// same object over the torrent or iroh path collapses onto one row.
+    /// same object over the torrent or iroh path collapses onto one row. A full spool refuses
+    /// the write with an error, which propagates as a refused acknowledgement (M11.1): the
+    /// object is neither stored nor claimed, and the sender retries later.
     pub fn spool_inbound(
         &self,
         fingerprint: &str,
@@ -431,7 +500,39 @@ impl IndexedStore {
         object: &serde_json::Value,
     ) -> Result<String, String> {
         let id = object_id_of(object);
+        let json = object.to_string();
         let conn = self.connect()?;
+        // A redelivery of an object the spool already holds only replaces its row, so it is
+        // always allowed: refusing it would claim a bound was reached when nothing grew.
+        let known: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM inbound_spool WHERE id = ?1)",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("look up spooled object: {e}"))?;
+        if !known {
+            let (entries, bytes): (i64, i64) = conn
+                .query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(LENGTH(object_json)), 0) FROM inbound_spool",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| format!("measure inbound spool: {e}"))?;
+            // Checked before the insert, never by trimming afterwards: trimming would drop an
+            // object that a peer was already told we stored (M11.1).
+            let over_entries =
+                entries as usize >= self.spool_limits.entries.load(Ordering::Relaxed);
+            let over_bytes = bytes.max(0) as u64 + json.len() as u64
+                > self.spool_limits.bytes.load(Ordering::Relaxed);
+            if over_entries || over_bytes {
+                self.spool_limits.refusals.fetch_add(1, Ordering::Relaxed);
+                return Err(format!(
+                    "inbound spool is full ({} object(s), {} byte(s))",
+                    entries, bytes
+                ));
+            }
+        }
         conn.execute(
             "INSERT INTO inbound_spool (id, fingerprint, endpoint_id, object_json, received_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -439,24 +540,9 @@ impl IndexedStore {
                  object_json = excluded.object_json,
                  endpoint_id = excluded.endpoint_id,
                  received_at = excluded.received_at",
-            params![
-                id,
-                fingerprint,
-                endpoint_id,
-                object.to_string(),
-                Utc::now().timestamp()
-            ],
+            params![id, fingerprint, endpoint_id, json, Utc::now().timestamp()],
         )
         .map_err(|e| format!("spool inbound object: {e}"))?;
-        conn.execute(
-            "DELETE FROM inbound_spool WHERE id IN (
-                 SELECT id FROM inbound_spool
-                 ORDER BY received_at DESC, rowid DESC
-                 LIMIT -1 OFFSET ?1
-             )",
-            params![MAX_SPOOLED_INBOUND as i64],
-        )
-        .map_err(|e| format!("trim inbound spool: {e}"))?;
         Ok(id)
     }
 
@@ -1258,6 +1344,66 @@ mod tests {
         drop(store);
         let reopened = IndexedStore::open(root.path()).unwrap();
         assert_eq!(reopened.device_certificate().unwrap(), Some(certificate));
+    }
+
+    /// A full spool must refuse, not trim: an entry it dropped was an object we already
+    /// acknowledged, and the sender has no way to learn that (M11.1).
+    #[test]
+    fn a_full_spool_refuses_new_objects_instead_of_dropping_acknowledged_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let store = IndexedStore::open(root.path()).unwrap();
+        store.set_spool_limits(2, MAX_SPOOLED_BYTES);
+        let object = |id: &str| serde_json::json!({ "message": { "id": id } });
+        store
+            .spool_inbound("alice", "endpoint", &object("one"))
+            .unwrap();
+        store
+            .spool_inbound("alice", "endpoint", &object("two"))
+            .unwrap();
+        // A redelivery of something already spooled only replaces its row, so it is allowed.
+        store
+            .spool_inbound("alice", "endpoint", &object("one"))
+            .unwrap();
+        assert_eq!(store.spool_refusals(), 0);
+        let refused = store.spool_inbound("alice", "endpoint", &object("three"));
+        assert!(refused.is_err());
+        assert_eq!(store.spool_refusals(), 1);
+        // Both earlier objects are still there: nothing an acknowledged peer was dropped.
+        assert_eq!(store.spooled_count().unwrap(), 2);
+        let ids: Vec<String> = store
+            .spooled_inbound()
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        assert!(ids.contains(&"message:one".to_string()));
+        assert!(ids.contains(&"message:two".to_string()));
+        // Draining a slot makes room again, so a refused object can arrive later.
+        store.clear_spooled(&["message:two".to_string()]).unwrap();
+        store
+            .spool_inbound("alice", "endpoint", &object("three"))
+            .unwrap();
+        assert_eq!(store.spooled_count().unwrap(), 2);
+    }
+
+    /// A count alone is not a bound for megabyte frames, so the byte cap stops the spool too.
+    #[test]
+    fn the_spool_stops_at_its_byte_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let store = IndexedStore::open(root.path()).unwrap();
+        store.set_spool_limits(MAX_SPOOLED_INBOUND, 200);
+        let object =
+            |id: &str| serde_json::json!({ "message": { "id": id, "content": "x".repeat(80) } });
+        store
+            .spool_inbound("alice", "endpoint", &object("one"))
+            .unwrap();
+        let bytes = store.spool_bytes().unwrap();
+        assert!(bytes > 0);
+        let err = store
+            .spool_inbound("alice", "endpoint", &object("two"))
+            .unwrap_err();
+        assert!(err.contains("spool is full"), "{err}");
+        assert_eq!(store.spool_refusals(), 1);
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod delivery;
 pub mod device;
 pub mod dht;
 pub mod discovery;
+pub mod limits;
 pub mod model;
 pub mod peer;
 pub mod ports;
