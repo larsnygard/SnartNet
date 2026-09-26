@@ -1,6 +1,6 @@
 [package]
 name = "snartnet-sdk"
-version = "0.3.3"
+version = "0.3.9"
 edition = "2021"
 license = "AGPL-3.0-only"
 
