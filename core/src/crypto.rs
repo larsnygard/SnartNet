@@ -33,6 +33,31 @@ pub struct KeyInfo {
     pub encryption_public_key: Option<String>,
 }
 
+/// The canonical SnartNet fingerprint for a raw Ed25519 public key: the first 16
+/// bytes of `SHA-256` over the 32 key bytes, base64-encoded.
+///
+/// This is the only definition of a fingerprint in the codebase. `KeyPair::generate`,
+/// `SignedProfile::verify`, and the device-certificate checks all derive fingerprints
+/// through it, so a certificate cannot bind itself to an identity under a different
+/// rule than the one that created it.
+pub fn fingerprint_from_public_key_bytes(public_key: &[u8]) -> Result<String, String> {
+    if public_key.len() != 32 {
+        return Err("Invalid public key length".into());
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(public_key);
+    let hash = hasher.finalize();
+    Ok(BASE64.encode(&hash[..16]))
+}
+
+/// [`fingerprint_from_public_key_bytes`] for a base64-encoded Ed25519 public key.
+pub fn fingerprint_for_public_key(public_key_b64: &str) -> Result<String, String> {
+    let bytes = BASE64
+        .decode(public_key_b64)
+        .map_err(|e| format!("Failed to decode public key: {}", e))?;
+    fingerprint_from_public_key_bytes(&bytes)
+}
+
 impl KeyPair {
     pub fn generate() -> Result<Self, String> {
         let mut csprng = OsRng;
@@ -46,10 +71,7 @@ impl KeyPair {
         let enc_public = X25519PublicKey::from(&enc_secret);
 
         // Create fingerprint from public key hash
-        let mut hasher = Sha256::new();
-        hasher.update(verifying_key.as_bytes());
-        let hash = hasher.finalize();
-        let fingerprint = BASE64.encode(&hash[..16]); // First 16 bytes as fingerprint
+        let fingerprint = fingerprint_from_public_key_bytes(verifying_key.as_bytes())?;
 
         Ok(KeyPair {
             public_key,

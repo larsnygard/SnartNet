@@ -1,8 +1,7 @@
-use crate::crypto::{verify_signature, KeyInfo, KeyPair};
+use crate::crypto::{fingerprint_from_public_key_bytes, verify_signature, KeyInfo, KeyPair};
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -210,7 +209,7 @@ impl SignedProfile {
             .decode(&self.profile.public_key)
             .map_err(|e| format!("Invalid public key: {e}"))?;
         if public_key.len() != 32
-            || STANDARD.encode(&Sha256::digest(&public_key)[..16]) != self.profile.fingerprint
+            || fingerprint_from_public_key_bytes(&public_key)? != self.profile.fingerprint
         {
             return Ok(false);
         }

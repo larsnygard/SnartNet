@@ -119,7 +119,7 @@ fn populated_state() -> (DaemonState, Profile, Profile) {
                 "last_publish": null,
                 "last_error": null
             },
-            "gossip": {"active": true, "node_id": "node-1", "peer_count": 4, "last_error": null},
+            "peer": {"active": true, "node_id": "node-1", "peer_count": 4, "discovery": "dns-pkarr", "last_error": null},
             "syncMode": "paused",
             "paused": true,
             "discovery": true,

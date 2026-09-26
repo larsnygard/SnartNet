@@ -1,9 +1,10 @@
 //! Shared native client protocol, records and validated actions.
 pub mod actions;
+pub mod device;
 pub mod dht;
 pub mod discovery;
-pub mod gossip;
 pub mod model;
+pub mod peer;
 pub mod protocol;
 pub mod repository;
 pub mod session;

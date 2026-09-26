@@ -118,7 +118,13 @@ fn populated_snapshot() -> (DaemonState, Profile, Profile) {
                 "last_publish": null,
                 "last_error": null
             },
-            "gossip": {"active": true, "node_id": "node-1", "peer_count": 4, "last_error": null},
+            "peer": {
+                "active": true,
+                "node_id": "node-1",
+                "peer_count": 4,
+                "discovery": "dns-pkarr",
+                "last_error": null
+            },
             "paused": true,
             "discovery": true,
             "lastSync": "10:02",
@@ -197,10 +203,7 @@ fn a_snapshot_becomes_the_view_models_the_window_renders() {
         .torrent
         .as_ref()
         .is_some_and(|session| session.listening));
-    assert_eq!(
-        network.gossip.as_ref().map(|gossip| gossip.peer_count),
-        Some(4)
-    );
+    assert_eq!(network.peer.as_ref().map(|peer| peer.peer_count), Some(4));
 }
 
 #[test]
@@ -225,7 +228,7 @@ fn an_empty_snapshot_still_produces_renderable_defaults() {
     assert!(state.network.listening.is_none());
     assert!(state.network.dht.is_none());
     assert!(state.network.torrent.is_none());
-    assert!(state.network.gossip.is_none());
+    assert!(state.network.peer.is_none());
 }
 
 #[test]

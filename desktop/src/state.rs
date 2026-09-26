@@ -4,7 +4,7 @@
 //! secret keys, so the desktop renders plaintext (or the daemon's decryption
 //! error) instead of holding a keypair of its own.
 
-use super::model::{Contact, DeliveryState, DhtStatus, GossipStatus, TorrentStatus};
+use super::model::{Contact, DeliveryState, DhtStatus, PeerStatus, TorrentStatus};
 use serde_json::Value;
 use snartnet_core::{Profile, SignedPost};
 use snartnet_sdk::{Snapshot, SyncMode};
@@ -56,7 +56,8 @@ pub(crate) struct NetworkView {
     pub peers: usize,
     pub dht: Option<DhtStatus>,
     pub torrent: Option<TorrentStatus>,
-    pub gossip: Option<GossipStatus>,
+    /// Authenticated iroh peer endpoint (ADR 0003), replacing the old gossip topic.
+    pub peer: Option<PeerStatus>,
     /// Scheduler mode the daemon is actually running, not what was requested.
     pub sync_mode: SyncMode,
     pub paused: bool,
@@ -94,7 +95,7 @@ impl DaemonState {
             peers: extra.get("peers").and_then(Value::as_u64).unwrap_or(0) as usize,
             dht: status(extra, "dht")?,
             torrent: status(extra, "torrent")?,
-            gossip: status(extra, "gossip")?,
+            peer: status(extra, "peer")?,
             sync_mode: sync_mode(extra)?,
             paused: extra
                 .get("paused")

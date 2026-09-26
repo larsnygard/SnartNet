@@ -150,12 +150,17 @@ pub(crate) struct DhtStatus {
     pub last_error: Option<String>,
 }
 
-/// Internet-wide peer discovery health, from the snapshot's `gossip` key.
+/// Internet-wide peer connectivity, from the snapshot's `peer` key.
+///
+/// Fields mirror `snartnet_client::peer::PeerStatus`: `node_id` is the device endpoint id
+/// from ADR 0003, not the profile key.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct GossipStatus {
+pub(crate) struct PeerStatus {
     pub active: bool,
     pub node_id: Option<String>,
     pub peer_count: usize,
+    #[serde(default)]
+    pub discovery: String,
     pub last_error: Option<String>,
 }
 

@@ -161,7 +161,7 @@ pub(crate) struct NetworkView {
     pub discovery: bool,
     pub last_sync: String,
     pub listener_error: Option<String>,
-    /// DHT, torrent, and gossip status objects, already summarised for display.
+    /// DHT, torrent, and authenticated peer status objects, already summarised for display.
     pub subsystems: Vec<(&'static str, String)>,
 }
 
@@ -203,7 +203,7 @@ impl DaemonState {
                 .unwrap_or(false),
             last_sync: string(extra, "lastSync").unwrap_or_else(|| "never".into()),
             listener_error: string(extra, "listenerError"),
-            subsystems: ["dht", "torrent", "gossip"]
+            subsystems: ["dht", "torrent", "peer"]
                 .into_iter()
                 .filter_map(|name| {
                     extra

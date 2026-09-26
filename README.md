@@ -72,6 +72,8 @@ Invitations include the detected local IP and actual listening port. For remote 
 | `SNARTNET_DHT_BOOTSTRAP` | library defaults | Comma-separated replacement bootstrap nodes for signed DHT discovery |
 | `SNARTNET_DHT_EXTRA_BOOTSTRAP` | empty | Comma-separated additional signed DHT bootstrap nodes |
 | `SNARTNET_TORRENT_BOOTSTRAP` | library defaults | Comma-separated replacement BitTorrent DHT bootstrap nodes |
+| `SNARTNET_IROH_DISCOVERY` | `dns` | Publish and resolve contact device endpoints through Iroh's n0 DNS/Pkarr services; `off` keeps direct addresses only |
+| `SNARTNET_IROH_RELAY` | `staging` | Iroh relay set for NAT hole punching: `staging`, `prod`, or `off` |
 
 For example, run a separate test identity without touching your normal data:
 
@@ -108,6 +110,7 @@ The active delivery work is tracked in the [implementation plan](docs/IMPLEMENTA
 | `tui/src/app.rs`, `state.rs`, `input.rs`, `ui.rs` | Reducer, snapshot view models, key map, Ratatui rendering |
 | `sdk/` | Shared local API contract and Rust frontend client |
 | `daemon/` | Persistent backend and authenticated loopback API |
+| `client/src/device.rs`, `peer.rs` | Per-device Iroh identity, device certificates, and the authenticated `snartnet/peer/1` contact protocol |
 | `android/`, `android-bridge/`, `client/` | Android client, JNI adapter, and shared native client session; see [Android setup](android/README.md) |
 | `legacy/PWA/` | Archived web reference with its own npm manifest |
 | `RFC`, `specs/`, `docs/ROADMAP.md` | Protocol proposals and future work, not a list of shipped features |
@@ -123,7 +126,7 @@ cargo test --workspace
 cargo build --workspace
 ```
 
-Tests use isolated temporary directories and real loopback TCP. They cover signature/identity binding, invitation limits, QR round trips, two-client encrypted conversations, concurrent inbox merging, offline outbox recovery, draft isolation, unread counts, and failed persistence. The terminal client suite covers the reducer, the key map, every tab's rendering (down to a few terminal cells), and API failures, and two of its tests drive a real daemon over the local API.
+Tests use isolated temporary directories and real loopback TCP. They cover signature/identity binding, invitation limits, QR round trips, two-client encrypted conversations, concurrent inbox merging, offline outbox recovery, draft isolation, unread counts, and failed persistence. The shared client suite also covers per-device Iroh identities and device certificates (expiry, tampering, endpoint mismatch, replay, and renewal) and drives two live `snartnet/peer/1` endpoints through a real handshake, object exchange, and refused-stranger case. The terminal client suite covers the reducer, the key map, every tab's rendering (down to a few terminal cells), and API failures, and two of its tests drive a real daemon over the local API.
 
 To generate disposable sample data for a visual review, use a fresh directory:
 
@@ -135,6 +138,8 @@ SNARTNET_HOME=/tmp/snartnet-review cargo run -p snartnet-desktop
 ## Current scope
 
 The desktop implements Ed25519 signed identities and X25519 + ChaCha20-Poly1305 direct messages. Signatures are checked against the contact's public-key fingerprint before trusting profile keys or displaying incoming messages. Sync uses BitTorrent objects with signed DHT descriptors and retains bounded TCP as a fallback. It runs outside the UI thread.
+
+Contacts are also reached over Iroh (ADR 0003). Each device holds its own Iroh key, separate from the profile signing key, and proves which profile it belongs to with a profile-signed device certificate that names the endpoint id, capabilities, and expiry. The certificate is validated against the endpoint id Iroh's TLS handshake already proved before a single application frame is read; a stranger is closed immediately, a replayed older certificate is refused against the pin kept from the newest one accepted, and `hello`/`hello_ack` nonces stop a recorded handshake from being replayed onto a new connection. Since M6 there is no global topic: presence and post/profile notices go only to contacts whose device endpoint is already known, and a queued message that plain TCP/BitTorrent could not relay is delivered as a signed object over the same authenticated channel. Address lookup uses Iroh's n0 DNS/Pkarr services by default (`SNARTNET_IROH_DISCOVERY=off` disables it) with a signed DHT device descriptor as the fallback.
 
 Private keys are stored locally and are not password-encrypted. Back up the complete `data/` directory securely. Messages use static X25519 keys; forward secrecy, Double Ratchet, group chat, attachments, and key recovery remain future work. The shared low-level service also exposes legacy signed plaintext messages; the desktop chat always encrypts new messages.
 

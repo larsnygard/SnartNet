@@ -8,10 +8,10 @@ roadmap.
 ## Status
 
 - **Status:** Active
-- **Current milestone:** M6 — Iroh device identity and peer protocol
-- **Last updated:** 2026-09-25
-- **Last completed:** M5.1–M5.5 — the terminal client is daemon-backed (M4.3 tray:
-  Linux only)
+- **Current milestone:** M7 — Durable BitTorrent plus realtime Iroh delivery
+- **Last updated:** 2026-09-26
+- **Last completed:** M6.1–M6.6 — Iroh device identity and the authenticated peer
+  protocol (M4.3 tray: Linux only)
 - **Known blockers:** None
 
 ## Working agreement
@@ -85,12 +85,12 @@ with the tray disabled.*
 
 ## M6 — Iroh device identity and peer protocol
 
-- [ ] **M6.1** Generate a separate Iroh identity per device.
-- [ ] **M6.2** Add profile-signed device certificates and validation.
-- [ ] **M6.3** Define and implement the `snartnet/peer/1` framed ALPN.
-- [ ] **M6.4** Replace global gossip with authenticated contact-scoped updates.
-- [ ] **M6.5** Add DNS/Pkarr lookup and optional DHT lookup.
-- [ ] **M6.6** Test replay, malformed input, endpoint mismatch, and expiry.
+- [x] **M6.1** Generate a separate Iroh identity per device.
+- [x] **M6.2** Add profile-signed device certificates and validation.
+- [x] **M6.3** Define and implement the `snartnet/peer/1` framed ALPN.
+- [x] **M6.4** Replace global gossip with authenticated contact-scoped updates.
+- [x] **M6.5** Add DNS/Pkarr lookup and optional DHT lookup.
+- [x] **M6.6** Test replay, malformed input, endpoint mismatch, and expiry.
 
 ## M7 — Durable BitTorrent plus realtime Iroh delivery
 
@@ -304,3 +304,62 @@ with the tray disabled.*
   crate, and `docs/LOCAL_API.md` now points at the shipped terminal frontend.
 - Next: M6.1 — generate a separate Iroh identity per device.
 - Blockers: none.
+
+### 2026-09-26 — M6
+
+- Completed: M6.1–M6.6. The unsigned global gossip topic is gone; contacts are
+  reached over per-device Iroh endpoints that must present a certificate before a
+  single application frame is read.
+- Delivered: `client/src/device.rs` owns the per-device identity. `DeviceKey` is a
+  separate Ed25519 secret generated on first start, persisted through
+  `Repository::save_device_key`/`device_key` in the canonical `identity_records`
+  table, and never written to a snapshot, the legacy JSON mirror, or a frontend.
+  `DeviceCertificate::issue` signs the endpoint id, capabilities, and lifetime
+  with the profile key, and `verify_at`/`verify_for_profile`/
+  `verify_with_capability` re-derive the fingerprint from `profile_key` (one
+  shared `snartnet_core::fingerprint_from_public_key_bytes`) rather than trusting
+  the claimed one.
+- Delivered: `client/src/peer.rs` implements `snartnet/peer/1` on its own Iroh
+  endpoint: a 4-byte big-endian length prefix plus internally tagged JSON frames
+  (`hello`, `hello_ack`, `object`, `notice`, `ack`, `goodbye`), bounded at 1 MiB
+  with a refused zero-length frame. The handshake exchanges certificates and a
+  fresh 16-byte nonce that must be echoed, and the dialer checks both that the
+  endpoint it reached is the one it asked for and that the ack belongs to this
+  connection. The accept side validates the certificate against the TLS-proven
+  remote endpoint id, refuses strangers with `CLOSE_UNKNOWN_CONTACT` before any
+  frame is read, and refuses a replayed older certificate with
+  `CLOSE_STALE_CERTIFICATE` using the pin persisted from the newest accepted
+  `issued_at`. `Ack { frames }` is written only after every frame is queued, and
+  the handler lingers until the sender hangs up because Iroh drops a connection
+  when its accept handler returns — a bug the live two-endpoint test caught.
+- Delivered: the session dials only contacts whose device endpoint it has already
+  pinned (`peer_targets`), announces profile and post changes plus presence as
+  contact-scoped notices, and falls back to the authenticated peer channel for a
+  queued message that plain TCP/BitTorrent could not relay. Ingested objects are
+  re-verified against the contact's key, signature, and recipient, and accepted
+  certificates are committed as pins so a crash cannot reopen a replay window.
+- Delivered: M6.5 is `SNARTNET_IROH_DISCOVERY` (default `dns` publishes to and
+  resolves through Iroh's n0 DNS/Pkarr services; `off` leaves only direct
+  addresses) and `SNARTNET_IROH_RELAY` (default `staging`), plus a
+  profile-signed `DeviceDescriptor` under the `snartnet/device` DHT namespace
+  whose target is only produced when the embedded certificate verifies for the
+  profile that was asked about.
+- Delivered: twenty-six `device.rs` tests and twenty `peer.rs` tests cover
+  framing round trips, empty/oversize/malformed frames and truncation, unknown
+  contacts, endpoint mismatch, certificate replay and renewal, pin survival
+  across a policy refresh, descriptor tampering and capability gating, nonce
+  mismatch, a forged notice, and two live handshakes between local endpoints that
+  assert both the ack count and the persisted pins.
+- Delivered: the daemon and both frontends now read a `peers` snapshot key
+  (`active`, `node_id`, `peer_count`, `discovery`, `last_error`) instead of
+  `gossip`; `client/src/gossip.rs`, the `iroh-gossip` dependency, and the
+  `Session::gossip` field are removed.
+- Documented: ADR 0003 gained the implementation record for the key split,
+  handshake, refusal rules, pinning, renewal window, lookups, and the removal of
+  the topic. The README lists the two new environment variables.
+- Validation: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+  -- -D warnings`, and `cargo test --workspace` pass (64 client, 42 core, 3
+  daemon, 17 desktop, 10 integration, 9 terminal tests).
+- Next: M7.1 — persist and publish an object before realtime delivery.
+- Blockers: none.
+

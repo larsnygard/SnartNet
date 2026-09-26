@@ -1,7 +1,7 @@
 //! Blocking transport work runs on a worker. The UI applies a delta, so messages and
 //! contacts added while a sync is running cannot be replaced by an older snapshot.
 use super::*;
-use crate::gossip::{self, GossipNode};
+use crate::peer::{PeerInbound, PeerNode, PeerTarget};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
@@ -18,7 +18,7 @@ pub fn exchange(
     posts: Vec<SignedPost>,
     mut contacts: Vec<Contact>,
     pending: Vec<SignedMessage>,
-    gossip: Option<Arc<GossipNode>>,
+    peer: Option<Arc<PeerNode>>,
 ) -> SyncResult {
     // Announce our signed key before sending envelopes. This also enables replies
     // when only one side has a reachable TCP endpoint.
@@ -80,18 +80,20 @@ pub fn exchange(
             .save_inbox(&message.message.recipient_fingerprint, &inbox)
             .is_ok()
             && transport.relay_message(&message);
-        // Fall back to a direct iroh connection (hole-punched, or relayed through an
-        // iroh relay server as a last resort) when the recipient isn't reachable over
+        // Fall back to the authenticated iroh peer channel (hole-punched, or relayed through
+        // an iroh relay server as a last resort) when the recipient isn't reachable over
         // plain TCP/BitTorrent, e.g. because both peers are behind restrictive NATs.
         if !relayed {
-            if let Some(gossip) = &gossip {
+            if let Some(peer) = &peer {
                 relayed = contacts
                     .iter()
                     .find(|c| c.fingerprint == message.message.recipient_fingerprint)
-                    .and_then(|c| c.known_public_key.as_deref())
-                    .and_then(gossip::public_key_from_base64)
-                    .and_then(|node_id| serde_json::to_vec(&message).ok().map(|b| (node_id, b)))
-                    .is_some_and(|(node_id, bytes)| gossip.send_chat(node_id, bytes));
+                    .and_then(peer_target_for)
+                    .and_then(|target| {
+                        let object = serde_json::to_value(&message).ok()?;
+                        Some(peer.send_object(&target, &object))
+                    })
+                    .unwrap_or(false);
             }
         }
         if relayed {
@@ -117,17 +119,24 @@ pub fn exchange(
             }
         }
     }
-    // Chat messages that arrived over the direct iroh channel while we weren't
+    // Chat messages that arrived over the authenticated iroh peer channel while we weren't
     // reachable any other way.
-    if let Some(gossip) = &gossip {
-        for payload in gossip.drain_chat_inbox() {
-            let Ok(signed) = serde_json::from_slice::<SignedMessage>(&payload) else {
+    if let Some(peer) = &peer {
+        for event in peer.drain_inbox() {
+            let PeerInbound::Object {
+                fingerprint,
+                object,
+                ..
+            } = event
+            else {
                 continue;
             };
-            let Some(contact) = contacts
-                .iter()
-                .find(|c| c.fingerprint == signed.message.sender_fingerprint)
-            else {
+            let Ok(signed) = serde_json::from_value::<SignedMessage>(object) else {
+                continue;
+            };
+            let Some(contact) = contacts.iter().find(|c| {
+                c.fingerprint == fingerprint && c.fingerprint == signed.message.sender_fingerprint
+            }) else {
                 continue;
             };
             if accepts_message(&signed, contact, &profile.profile.fingerprint)
@@ -149,6 +158,23 @@ pub fn exchange(
     result.contacts = contacts;
     result.profile_magnet = profile_magnet;
     result
+}
+
+/// The dial target for a contact we already learned the device endpoint of.
+///
+/// Without a pinned endpoint id there is nothing to dial: the old gossip topic accepted
+/// any node id derived from the profile key, which is exactly what ADR 0003 removes.
+fn peer_target_for(contact: &Contact) -> Option<PeerTarget> {
+    Some(PeerTarget {
+        fingerprint: contact.fingerprint.clone(),
+        endpoint_id: contact.peer_endpoint_id.clone()?,
+        addrs: contact
+            .transport_addr
+            .as_deref()
+            .and_then(|addr| addr.parse().ok())
+            .into_iter()
+            .collect(),
+    })
 }
 
 /// Verify both routing identities before an envelope can enter a visible thread.

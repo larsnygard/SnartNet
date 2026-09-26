@@ -5,6 +5,7 @@
 //! and uses SQLite as the authoritative store from then on.  Legacy files are
 //! retained as a compatibility mirror until every frontend uses the daemon.
 
+use crate::device::DeviceCertificate;
 use crate::model::{ChatItem, ChatThread, Contact};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -16,6 +17,20 @@ use std::{
 };
 
 const SCHEMA_VERSION: i64 = 1;
+/// Identity record holding this device's Iroh secret (ADR 0003).
+///
+/// It is deliberately not part of [`CanonicalState`]: that struct is also written to the
+/// transitional legacy JSON mirror, and a device secret must never leave the daemon's
+/// canonical identity store.
+pub const DEVICE_KEY_RECORD: &str = "device_key";
+
+/// Identity record holding this device's current [`DeviceCertificate`] (ADR 0003).
+///
+/// The certificate is public data (contacts must be able to read it), but replay
+/// protection keys off `issued_at`, so it is kept next to the device key in the identity
+/// store rather than in the mirror-visible canonical state.
+pub const DEVICE_CERT_RECORD: &str = "device_certificate";
+
 const LEGACY_KEYS: [&str; 7] = [
     "client_state",
     "keypair",
@@ -126,6 +141,45 @@ impl IndexedStore {
         // unavailable during the M1 transition, but that must not turn a
         // committed canonical update into an apparent failure.
         let _ = self.write_legacy_mirror(state);
+        Ok(())
+    }
+
+    /// This device's persisted Iroh secret, if one has been generated yet.
+    pub fn device_key(&self) -> Result<Option<String>, String> {
+        let conn = self.connect()?;
+        read_json::<String>(&conn, DEVICE_KEY_RECORD)
+    }
+
+    /// Persist this device's Iroh secret as a canonical identity record.
+    pub fn save_device_key(&self, secret: &str) -> Result<(), String> {
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO identity_records (key, value_json) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+            params![DEVICE_KEY_RECORD, to_json(&secret)?],
+        )
+        .map_err(|e| format!("save device key: {e}"))?;
+        Ok(())
+    }
+
+    /// The certificate this device last issued for itself, if any.
+    ///
+    /// Reusing it across restarts keeps `issued_at` (and therefore every contact's pin)
+    /// stable until the certificate actually expires.
+    pub fn device_certificate(&self) -> Result<Option<DeviceCertificate>, String> {
+        let conn = self.connect()?;
+        read_json::<DeviceCertificate>(&conn, DEVICE_CERT_RECORD)
+    }
+
+    /// Persist this device's certificate as a canonical identity record.
+    pub fn save_device_certificate(&self, certificate: &DeviceCertificate) -> Result<(), String> {
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO identity_records (key, value_json) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+            params![DEVICE_CERT_RECORD, to_json(certificate)?],
+        )
+        .map_err(|e| format!("save device certificate: {e}"))?;
         Ok(())
     }
 
@@ -599,6 +653,7 @@ fn insert_message_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::{DeviceKey, DEFAULT_CAPABILITIES};
     use chrono::Duration;
     use snartnet_core::{Post, Profile, SignedPost};
 
@@ -754,5 +809,71 @@ mod tests {
         let new_objects = store.objects_after(cursor).unwrap();
         assert_eq!(new_objects.len(), 1);
         assert!(new_objects[0].ingestion_sequence > cursor);
+    }
+
+    #[test]
+    fn the_device_key_round_trips_through_the_identity_table() {
+        let root = tempfile::tempdir().unwrap();
+        let store = IndexedStore::open(root.path()).unwrap();
+        assert_eq!(store.device_key().unwrap(), None);
+        store.save_device_key("device-secret").unwrap();
+        assert_eq!(
+            store.device_key().unwrap().as_deref(),
+            Some("device-secret")
+        );
+        // Reopening the store must return the same identity, or every restart would
+        // present a new endpoint id to contacts.
+        drop(store);
+        let reopened = IndexedStore::open(root.path()).unwrap();
+        assert_eq!(
+            reopened.device_key().unwrap().as_deref(),
+            Some("device-secret")
+        );
+    }
+
+    #[test]
+    fn the_device_certificate_round_trips_and_survives_restarts() {
+        let root = tempfile::tempdir().unwrap();
+        let store = IndexedStore::open(root.path()).unwrap();
+        assert_eq!(store.device_certificate().unwrap(), None);
+        let state = state("alice");
+        let profile = state.profile.clone().unwrap();
+        let keypair = state.keypair.clone().unwrap();
+        let device = DeviceKey::generate();
+        let certificate = DeviceCertificate::issue(
+            &profile,
+            &keypair,
+            &device,
+            &DEFAULT_CAPABILITIES,
+            1_000,
+            600,
+        )
+        .unwrap();
+        store.save_device_certificate(&certificate).unwrap();
+        assert_eq!(
+            store.device_certificate().unwrap(),
+            Some(certificate.clone())
+        );
+        // A restart must hand out the same `issued_at`, or contacts would see a replay-looking
+        // bump on every launch.
+        drop(store);
+        let reopened = IndexedStore::open(root.path()).unwrap();
+        assert_eq!(reopened.device_certificate().unwrap(), Some(certificate));
+    }
+
+    #[test]
+    fn the_device_key_never_reaches_the_legacy_mirror_or_the_snapshot_state() {
+        let root = tempfile::tempdir().unwrap();
+        let store = IndexedStore::open(root.path()).unwrap();
+        let state = state("alice");
+        store.save_state(&state).unwrap();
+        store.save_device_key("device-secret").unwrap();
+        let mirror = fs::read_to_string(root.path().join("data/client_state.json")).unwrap();
+        assert!(!mirror.contains("device-secret"));
+        assert!(!mirror.contains(DEVICE_KEY_RECORD));
+        // CanonicalState is what snapshots and the legacy mirror serialize, so the secret
+        // must not be reachable from it at all.
+        let serialized = serde_json::to_string(&state).unwrap();
+        assert!(!serialized.contains("device_key"));
     }
 }

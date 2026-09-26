@@ -120,6 +120,8 @@ pub async fn add_contact_async(fingerprint: String, alias: String) -> Result<Con
         synced_post_count: 0,
         known_public_key: None,
         known_encryption_public_key: None,
+        peer_endpoint_id: None,
+        peer_certificate_issued_at: None,
         last_sync_error: None,
     })
 }
@@ -192,6 +194,8 @@ pub async fn import_invite_async(code: String) -> Result<Contact, String> {
         synced_post_count: 0,
         known_public_key: None,
         known_encryption_public_key: None,
+        peer_endpoint_id: None,
+        peer_certificate_issued_at: None,
         last_sync_error,
     })
 }
@@ -226,6 +230,8 @@ pub async fn import_magnet_async(uri: String) -> Result<Contact, String> {
         synced_post_count: 0,
         known_public_key: None,
         known_encryption_public_key: None,
+        peer_endpoint_id: None,
+        peer_certificate_issued_at: None,
         last_sync_error: None,
     })
 }

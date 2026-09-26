@@ -815,8 +815,16 @@ impl App {
             ),
             None => "disabled".to_string(),
         };
-        let gossip_label = match &network.gossip {
-            Some(status) if status.active => format!("active ({} peers)", status.peer_count),
+        let peer_label = match &network.peer {
+            Some(status) if status.active => format!(
+                "active ({}, {} peers)",
+                if status.discovery.is_empty() {
+                    "discovery unknown".to_string()
+                } else {
+                    format!("discovery {}", status.discovery)
+                },
+                status.peer_count
+            ),
             Some(_) => "idle".to_string(),
             None => "disabled".to_string(),
         };
@@ -842,7 +850,7 @@ impl App {
             button(if network.discovery { "Turn off discovery" } else { "Turn on discovery" }).padding(12).style(button::secondary).on_press(Message::LanDiscoveryToggle),
         ].spacing(16));
         scrollable(column![card(connection).width(Length::Fill), nearby,
-            card(column![text("Across networks").size(21), muted("Messages use direct torrent peers discovered through public DHT bootstrap nodes. IPv6 and UPnP are attempted automatically. If a direct or torrent path isn't available, queued chat messages also try a direct connection over iroh, which hole-punches through NAT or falls back to an iroh relay server (test relays by default) so both peers can be behind unreachable NAT without a VPN or port forwarding."), text(format!("Internet discovery (iroh gossip): {gossip_label}")).size(16), button("Edit invitation address").padding(12).style(button::secondary).on_press(Message::SwitchPanel(Panel::Profile))].spacing(16)),
+            card(column![text("Across networks").size(21), muted("Messages use direct torrent peers discovered through public DHT bootstrap nodes. IPv6 and UPnP are attempted automatically. Devices that cannot be reached directly or over torrent also exchange updates over iroh, which hole-punches through NAT or falls back to an iroh relay server (test relays by default). Those connections are authenticated per device: a peer must present a certificate signed by a contact's profile key, so only people you added can reach you."), text(format!("Authenticated peers (iroh): {peer_label}")).size(16), button("Edit invitation address").padding(12).style(button::secondary).on_press(Message::SwitchPanel(Panel::Profile))].spacing(16)),
             button("Clean unused cache files older than 7 days").style(button::text).on_press(Message::CleanupLocalFiles),
         ].spacing(20)).height(Length::Fill).into()
     }
@@ -898,12 +906,12 @@ impl App {
                 notes.push(format!("Torrent error: {error}"));
             }
         }
-        if let Some(gossip) = &network.gossip {
-            if let Some(node) = &gossip.node_id {
-                notes.push(format!("Gossip node: {node}"));
+        if let Some(peer) = &network.peer {
+            if let Some(node) = &peer.node_id {
+                notes.push(format!("Device endpoint: {node}"));
             }
-            if let Some(error) = &gossip.last_error {
-                notes.push(format!("Gossip error: {error}"));
+            if let Some(error) = &peer.last_error {
+                notes.push(format!("Peer error: {error}"));
             }
         }
         notes

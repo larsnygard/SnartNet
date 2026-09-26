@@ -73,6 +73,12 @@ pub struct Contact {
     pub known_public_key: Option<String>,
     #[serde(default)]
     pub known_encryption_public_key: Option<String>,
+    /// Newest device endpoint id this contact authenticated with (ADR 0003).
+    #[serde(default)]
+    pub peer_endpoint_id: Option<String>,
+    /// `issued_at` of the newest accepted device certificate, so a replayed older one is refused.
+    #[serde(default)]
+    pub peer_certificate_issued_at: Option<u64>,
     #[serde(default)]
     pub last_sync_error: Option<String>,
 }
@@ -94,6 +100,8 @@ impl Default for Contact {
             synced_post_count: 0,
             known_public_key: None,
             known_encryption_public_key: None,
+            peer_endpoint_id: None,
+            peer_certificate_issued_at: None,
             last_sync_error: None,
         }
     }

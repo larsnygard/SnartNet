@@ -1,10 +1,14 @@
 //! Durable Android host state. Commands commit before changing the visible state.
 use crate::{
     actions::*,
+    device::{
+        DeviceCertificate, DeviceKey, DEFAULT_CAPABILITIES, DEVICE_CERT_RENEW_SECS,
+        DEVICE_CERT_TTL_SECS,
+    },
     dht::DhtNode,
     discovery::*,
-    gossip::{GossipNode, GossipPresence, UpdateKind},
     model::*,
+    peer::{ContactPolicy, PeerInbound, PeerNode, PeerOptions, PeerStatus, PeerTarget, UpdateKind},
     protocol::*,
     repository::{CanonicalState as State, IndexedStore},
     torrent::TorrentNode,
@@ -13,7 +17,7 @@ use crate::{
 };
 use futures::executor::block_on;
 use serde_json::{json, Value};
-use snartnet_core::{Message, MessageType};
+use snartnet_core::{KeyPair, Message, MessageType, SignedProfile};
 use std::{path::Path, sync::Arc};
 
 pub struct Session {
@@ -22,7 +26,13 @@ pub struct Session {
     pub transport: TcpSwarmTransport,
     pub torrent: Option<Arc<TorrentNode>>,
     pub dht: Option<Arc<DhtNode>>,
-    pub gossip: Option<Arc<GossipNode>>,
+    /// Authenticated, contact-scoped iroh endpoint (ADR 0003). Replaces the old global
+    /// gossip topic: only contacts with a policy can exchange frames with us.
+    pub peer: Option<Arc<PeerNode>>,
+    /// This device's iroh secret. Kept out of [`State`] so it never reaches the mirror.
+    device: Option<DeviceKey>,
+    /// Why the peer endpoint could not be opened, shown next to the peer status.
+    peer_error: Option<String>,
     discovery: LanDiscovery,
     paused: bool,
     pub listener_error: Option<String>,
@@ -42,18 +52,25 @@ impl Session {
             .as_ref()
             .and_then(|keypair| DhtNode::open(keypair, bind.port().saturating_add(2)).ok())
             .map(Arc::new);
-        let gossip = state
-            .keypair
-            .as_ref()
-            .and_then(|keypair| GossipNode::open(keypair).ok())
-            .map(Arc::new);
+        // The device secret is a long-lived identity of its own (ADR 0003): generated once,
+        // stored in the identity table, and never part of the mirror-visible state.
+        let device = match repository.device_key()? {
+            Some(secret) => Some(DeviceKey::from_secret_base64(&secret)?),
+            None => {
+                let key = DeviceKey::generate();
+                repository.save_device_key(&key.secret_base64())?;
+                Some(key)
+            }
+        };
         Ok(Self {
             state,
             repository,
             transport,
             torrent,
             dht,
-            gossip,
+            peer: None,
+            device,
+            peer_error: None,
             discovery: LanDiscovery::new(),
             paused: false,
             listener_error: None,
@@ -84,14 +101,107 @@ impl Session {
                 .and_then(|keypair| DhtNode::open(keypair, 47473).ok())
                 .map(Arc::new);
         }
-        if self.gossip.is_none() {
-            self.gossip = self
-                .state
-                .keypair
-                .as_ref()
-                .and_then(|keypair| GossipNode::open(keypair).ok())
-                .map(Arc::new);
+        self.ensure_peer();
+    }
+
+    /// Open the device endpoint on first use.
+    ///
+    /// A certificate binds the endpoint to a profile fingerprint, so there is nothing to
+    /// open before a profile exists. A stored certificate is reused until it expires, which
+    /// keeps `issued_at` (and therefore every contact's pin) stable across restarts.
+    fn ensure_peer(&mut self) {
+        if self.peer.is_some() {
+            return;
         }
+        let (Some(device), Some(profile), Some(keypair)) = (
+            self.device.clone(),
+            self.state.profile.clone(),
+            self.state.keypair.clone(),
+        ) else {
+            return;
+        };
+        match self.device_certificate(&profile, &keypair, &device) {
+            Ok(certificate) => {
+                match PeerNode::open_with(&device, certificate, PeerOptions::from_env()) {
+                    Ok(node) => {
+                        let node = Arc::new(node);
+                        node.set_contacts(self.peer_policies());
+                        self.peer = Some(node);
+                        self.peer_error = None;
+                    }
+                    Err(error) => self.peer_error = Some(error),
+                }
+            }
+            Err(error) => self.peer_error = Some(error),
+        }
+    }
+
+    /// The certificate to present to contacts: the stored one while it is still valid for
+    /// this endpoint, otherwise a freshly issued one, persisted immediately.
+    fn device_certificate(
+        &self,
+        profile: &SignedProfile,
+        keypair: &KeyPair,
+        device: &DeviceKey,
+    ) -> Result<DeviceCertificate, String> {
+        let now = unix_secs();
+        if let Some(stored) = self.repository.device_certificate()? {
+            let same_device = stored.endpoint_id == device.endpoint_id_string();
+            let fresh = stored.expires_at > now.saturating_add(DEVICE_CERT_RENEW_SECS);
+            let certified = stored
+                .verify_for_profile(&profile.profile.fingerprint, &device.endpoint_id(), now)
+                .is_ok();
+            if same_device && fresh && certified {
+                return Ok(stored);
+            }
+        }
+        let certificate = DeviceCertificate::issue(
+            profile,
+            keypair,
+            device,
+            &DEFAULT_CAPABILITIES,
+            now,
+            DEVICE_CERT_TTL_SECS,
+        )?;
+        self.repository.save_device_certificate(&certificate)?;
+        Ok(certificate)
+    }
+
+    /// Policies for every verified contact, carrying the pins learned from earlier
+    /// handshakes so a replayed certificate cannot be accepted after a restart.
+    fn peer_policies(&self) -> Vec<ContactPolicy> {
+        self.state
+            .contacts
+            .iter()
+            .filter(|contact| contact.verification == VerificationState::Verified)
+            .filter_map(|contact| {
+                let mut policy =
+                    ContactPolicy::new(&contact.fingerprint, contact.known_public_key.as_ref()?);
+                policy.pinned_endpoint = contact.peer_endpoint_id.clone();
+                policy.pinned_issued_at = contact.peer_certificate_issued_at;
+                Some(policy)
+            })
+            .collect()
+    }
+
+    /// Dial targets for contacts whose device endpoint we already learned.
+    fn peer_targets(&self) -> Vec<PeerTarget> {
+        self.state
+            .contacts
+            .iter()
+            .filter_map(|contact| {
+                Some(PeerTarget {
+                    fingerprint: contact.fingerprint.clone(),
+                    endpoint_id: contact.peer_endpoint_id.clone()?,
+                    addrs: contact
+                        .transport_addr
+                        .as_deref()
+                        .and_then(|addr| addr.parse().ok())
+                        .into_iter()
+                        .collect(),
+                })
+            })
+            .collect()
     }
 
     fn publish_profile_torrent(&mut self) -> Result<(), String> {
@@ -114,8 +224,8 @@ impl Session {
                 .map_err(|e| e.to_string())?;
             dht.publish("snartnet/profile", &[&profile.profile.fingerprint], &value)?;
         }
-        if let Some(gossip) = self.gossip.as_ref() {
-            gossip.announce_update(UpdateKind::Profile, self.gossip_presence(&profile));
+        if let Some(peer) = self.peer.as_ref() {
+            peer.announce(UpdateKind::Profile, self.peer_targets());
         }
         Ok(())
     }
@@ -132,10 +242,8 @@ impl Session {
                 .map_err(|e| e.to_string())?;
             dht.publish("snartnet/feed", &[&post.post.author_fingerprint], &value)?;
         }
-        if let Some(gossip) = self.gossip.as_ref() {
-            if let Some(profile) = &self.state.profile {
-                gossip.announce_update(UpdateKind::Post, self.gossip_presence(profile));
-            }
+        if let Some(peer) = self.peer.as_ref() {
+            peer.announce(UpdateKind::Post, self.peer_targets());
         }
         Ok(())
     }
@@ -223,8 +331,9 @@ impl Session {
     /// Resolve contact profile torrents and encrypted mailbox descriptors.
     pub fn sync_distributed(&mut self) -> Result<usize, String> {
         self.start_distributed();
+        let ingested = self.ingest_peer_events()?;
         let Some(torrent) = self.torrent.clone() else {
-            return Ok(0);
+            return Ok(ingested);
         };
         let local_fp = self
             .state
@@ -233,7 +342,7 @@ impl Session {
             .map(|p| p.profile.fingerprint.clone())
             .unwrap_or_default();
         let mut next = self.state.clone();
-        let mut received = 0;
+        let mut received = ingested;
         for index in 0..next.contacts.len() {
             let fingerprint = next.contacts[index].fingerprint.clone();
             if let Some(magnet) = next.contacts[index].magnet_uri.clone() {
@@ -275,6 +384,85 @@ impl Session {
         if received > 0 {
             self.commit(next)?;
         }
+        Ok(received)
+    }
+
+    /// Fold what the peer endpoint authenticated since the last tick into canonical state.
+    ///
+    /// Two kinds of events arrive here: certificates our contacts presented (which become
+    /// replay-protection pins) and already-verified objects they sent. Both are committed
+    /// before returning, so a crash cannot lose a pin and re-open a replay window.
+    fn ingest_peer_events(&mut self) -> Result<usize, String> {
+        let Some(peer) = self.peer.clone() else {
+            return Ok(0);
+        };
+        let accepted = peer.take_accepted();
+        let inbound = peer.drain_inbox();
+        if accepted.is_empty() && inbound.is_empty() {
+            return Ok(0);
+        }
+        let local_fp = self
+            .state
+            .profile
+            .as_ref()
+            .map(|p| p.profile.fingerprint.clone())
+            .unwrap_or_default();
+        let mut next = self.state.clone();
+        let mut received = 0;
+        for certificate in accepted {
+            if let Some(contact) = next
+                .contacts
+                .iter_mut()
+                .find(|c| c.fingerprint == certificate.fingerprint)
+            {
+                // Keep the newest certificate we ever accepted for this contact, so an
+                // older (but still valid) one cannot be replayed later.
+                if contact.peer_certificate_issued_at.unwrap_or(0) <= certificate.issued_at {
+                    contact.peer_endpoint_id = Some(certificate.endpoint_id);
+                    contact.peer_certificate_issued_at = Some(certificate.issued_at);
+                }
+            }
+        }
+        for event in inbound {
+            let (fingerprint, object) = match event {
+                PeerInbound::Object {
+                    fingerprint,
+                    object,
+                    ..
+                } => (fingerprint, object),
+                // A notice only says "something changed"; the next sync pulls the content
+                // over the verified torrent/DHT paths, so nothing is ingested here.
+                PeerInbound::Notice { .. } => continue,
+            };
+            let Ok(signed) = serde_json::from_value::<SignedMessage>(object) else {
+                continue;
+            };
+            let Some(contact) = next
+                .contacts
+                .iter()
+                .find(|c| c.fingerprint == signed.message.sender_fingerprint)
+                .cloned()
+            else {
+                continue;
+            };
+            // The transport proved the sender holds the profile key, but the message still
+            // has to satisfy the same signature and recipient checks as any other path.
+            if fingerprint != contact.fingerprint
+                || !sync::accepts_message(&signed, &contact, &local_fp)
+            {
+                continue;
+            }
+            let thread = thread_mut(&mut next, &contact.fingerprint);
+            if thread.messages.iter().any(|m| m.id == signed.message.id) {
+                continue;
+            }
+            let mut item =
+                ChatItem::from_signed(signed, true, contact.known_encryption_public_key.clone());
+            item.pushed_via_iroh = true;
+            thread.messages.push(item);
+            received += 1;
+        }
+        self.commit(next)?;
         Ok(received)
     }
 
@@ -387,24 +575,19 @@ impl Session {
                 display_name: p.profile.display_name.clone(),
                 tcp_addr: self.transport.advertised_addr(),
             });
-            if let Some(gossip) = &self.gossip {
-                let bootstrap = self
-                    .state
-                    .contacts
-                    .iter()
-                    .filter_map(|c| c.known_public_key.clone())
-                    .collect();
-                gossip.start(self.gossip_presence(p), bootstrap);
-            }
+            // Contacts and their pinned devices both move, so every start refreshes the
+            // policies (which may not reach us) and the dial targets (which may).
+            self.refresh_peer_contacts();
         }
     }
 
-    fn gossip_presence(&self, profile: &SignedProfile) -> GossipPresence {
-        GossipPresence {
-            fingerprint: profile.profile.fingerprint.clone(),
-            username: profile.profile.username.clone(),
-            display_name: profile.profile.display_name.clone(),
-            tcp_addr: self.transport.advertised_addr(),
+    /// Push the current contacts into the running endpoint and restart dialing.
+    fn refresh_peer_contacts(&self) {
+        let policies = self.peer_policies();
+        let targets = self.peer_targets();
+        if let Some(peer) = &self.peer {
+            peer.set_contacts(policies);
+            peer.start(targets);
         }
     }
 
@@ -425,14 +608,6 @@ impl Session {
                 .iter()
                 .filter_map(|p| p.tcp_addr.as_ref()?.parse::<std::net::SocketAddr>().ok()),
         );
-        if let Some(gossip) = &self.gossip {
-            peers.extend(
-                gossip
-                    .get_discovered()
-                    .iter()
-                    .filter_map(|p| p.tcp_addr.as_ref()?.parse::<std::net::SocketAddr>().ok()),
-            );
-        }
         self.transport.set_peers(peers);
         let transport = self.transport.clone();
         let posts = self.state.posts.clone();
@@ -445,8 +620,8 @@ impl Session {
             .filter(|m| !m.incoming && m.delivery == DeliveryState::Queued)
             .filter_map(|m| m.envelope.clone())
             .collect();
-        let gossip = self.gossip.clone();
-        Some(move || sync::exchange(transport, profile, posts, contacts, pending, gossip))
+        let peer = self.peer.clone();
+        Some(move || sync::exchange(transport, profile, posts, contacts, pending, peer))
     }
 
     pub fn apply_sync(&mut self, result: sync::SyncResult) -> Result<(), String> {
@@ -499,18 +674,8 @@ impl Session {
             }).collect();
             json!({"fingerprint": t.contact_fingerprint, "unread": t.unread_count, "messages": messages})
         }).collect();
-        let mut nearby_peers = self.discovery.get_discovered();
-        if let Some(gossip) = &self.gossip {
-            for peer in gossip.get_discovered() {
-                if !nearby_peers
-                    .iter()
-                    .any(|p| p.fingerprint == peer.fingerprint)
-                {
-                    nearby_peers.push(peer);
-                }
-            }
-        }
-        let nearby: Vec<Value> = nearby_peers.iter().map(|p| json!({
+        let nearby = self.discovery.get_discovered();
+        let nearby: Vec<Value> = nearby.iter().map(|p| json!({
             "fingerprint": p.fingerprint, "alias": p.display_name.as_ref().unwrap_or(&p.username), "address": p.tcp_addr
         })).collect();
         json!({"profile": self.state.profile.as_ref().map(|p| &p.profile),
@@ -523,7 +688,24 @@ impl Session {
             "peers": self.transport.peer_snapshot().len(),
             "dht": self.dht.as_ref().map(|node| node.status()),
             "torrent": self.torrent.as_ref().map(|node| node.status()),
-            "gossip": self.gossip.as_ref().map(|node| node.status())})
+            "peer": self.peer_status()})
+    }
+
+    /// The peer subsystem as the snapshot's `peer` key.
+    ///
+    /// A node that never opened still reports why, so a frontend can distinguish
+    /// "no profile yet" from a real failure instead of showing a silent blank.
+    fn peer_status(&self) -> Value {
+        match self.peer.as_ref() {
+            Some(node) => json!(node.status()),
+            None => json!(PeerStatus {
+                active: false,
+                node_id: self.device.as_ref().map(|d| d.endpoint_id_string()),
+                peer_count: 0,
+                discovery: peer::discovery_label(PeerOptions::from_env().discovery).to_string(),
+                last_error: self.peer_error.clone(),
+            }),
+        }
     }
 
     pub fn invitation(&self) -> Result<String, String> {
@@ -660,8 +842,8 @@ impl Session {
                     self.start_discovery();
                 } else {
                     self.discovery.stop();
-                    if let Some(gossip) = &self.gossip {
-                        gossip.stop();
+                    if let Some(peer) = &self.peer {
+                        peer.stop();
                     }
                 }
                 return Ok(self.snapshot());
@@ -680,6 +862,12 @@ impl Session {
             if let Some(post) = self.state.posts.first() {
                 let _ = self.publish_post_torrent(post);
             }
+        }
+        if operation == "contact" {
+            // A new contact, or a new address for one we already know, changes both the
+            // policies we enforce and the devices we dial.
+            self.start_distributed();
+            self.refresh_peer_contacts();
         }
         if operation == "message" {
             self.start_distributed();
