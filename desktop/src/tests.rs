@@ -141,6 +141,18 @@ fn populated_snapshot() -> (DaemonState, Profile, Profile) {
                 "failed": "disk is full",
                 "spooled": 2
             },
+            "storage": {
+                "platform": "desktop",
+                "hosting": true,
+                "quotaBytes": 1073741824,
+                "usedBytes": 4096,
+                "freeBytes": 8_589_934_592u64,
+                "held": 2,
+                "stored": 1,
+                "issued": 3,
+                "receipts": 2,
+                "note": "stored 1 replica(s)"
+            },
             "relay": {
                 "plan": "referral (1): https://relay.example.com/",
                 "source": "referral",
@@ -257,6 +269,17 @@ fn a_snapshot_becomes_the_view_models_the_window_renders() {
     assert!(network.relay.health[0].connected);
     assert_eq!(network.relay.health[0].score, 101);
     assert!(network.relay.plan.contains("relay.example.com"));
+    // Replication and storage state is named, not guessed (M9.5).
+    assert!(network.storage.hosting);
+    assert_eq!(network.storage.platform, "desktop");
+    assert_eq!(network.storage.quota_bytes, 1024 * 1024 * 1024);
+    assert_eq!(network.storage.used_bytes, 4096);
+    assert_eq!(network.storage.held, 2);
+    assert_eq!(network.storage.stored, 1);
+    assert_eq!(network.storage.issued, 3);
+    assert_eq!(network.storage.receipts, 2);
+    assert_eq!(network.storage.free_bytes, Some(8_589_934_592));
+    assert_eq!(network.storage.note.as_deref(), Some("stored 1 replica(s)"));
 }
 
 #[test]

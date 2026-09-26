@@ -17,6 +17,12 @@ use crate::{
         relays_disabled_from_env, staging_relays_from_env, ReferredRelay, RelayGrant, RelayHealth,
         RelayInputs, RelayPlan, RelayReferral, MAX_REFERRALS, RELAY_REFERRAL_TTL_SECS,
     },
+    replica::{
+        admit, at_capacity, eviction_plan, free_bytes, lease_from_object, lease_object,
+        receipt_from_object, receipt_object, HeldLease, IssuedLease, LeasePayload, Platform,
+        ReplicaCandidate, ReplicaKind, ReplicaLease, StorageReceipt, StorageSettings,
+        MAX_HELD_LEASES, MAX_ISSUED_LEASES, MAX_RECEIPTS,
+    },
     repository::{CanonicalState as State, InboundSpool, IndexedStore},
     transport::*,
     *,
@@ -49,6 +55,15 @@ pub struct Session {
     relay_health: RelayHealth,
     /// The plan the running endpoint is reconciled against, for the snapshot (M8.2).
     relay_plan: RelayPlan,
+    /// The platform whose storage default applies (M9.1).
+    platform: Platform,
+    /// Why the last storage decision was refused, shown next to the storage panel (M9.5).
+    storage_note: Option<String>,
+    /// Signed storage records to hand over on the next sync round (M9.2).
+    ///
+    /// Filled by the sync step, which is where the state may be committed, and consumed by the
+    /// push worker, which may not.
+    outgoing_storage: Vec<(String, Value)>,
     discovery: LanDiscovery,
     paused: bool,
     pub listener_error: Option<String>,
@@ -86,6 +101,9 @@ impl Session {
             publish_error: None,
             relay_health: RelayHealth::default(),
             relay_plan: RelayPlan::default(),
+            platform: Platform::from_env(),
+            storage_note: None,
+            outgoing_storage: Vec::new(),
             discovery: LanDiscovery::new(),
             paused: false,
             listener_error: None,
@@ -363,6 +381,13 @@ impl Session {
         self.publish_pending_outbound()?;
         // Relay health is observed and the plan applied before anything is dialed (M8.4).
         self.refresh_relay_selection();
+        // Replication (M9): fetch what leases asked for, drop what no longer fits, then ask
+        // contacts for copies of our own objects. Ordered this way so a host frees space
+        // before it takes on more, and offers copies only of what it still holds.
+        self.store_held_replicas()?;
+        self.enforce_storage_limits()?;
+        self.issue_replica_leases()?;
+        self.outgoing_storage = self.pending_storage_records()?;
         // Every arrival path funnels through the same deduplicating intake (M7.4). The spool
         // is drained first because it is the durable record of what the peer handler already
         // acknowledged; the in-memory inbox then only adds objects whose persist was refused,
@@ -455,7 +480,7 @@ impl Session {
             let Ok(object) = serde_json::from_str::<Value>(&entry.object_json) else {
                 continue;
             };
-            if referral_from_object(&object).is_some() {
+            if is_peer_record(&object) {
                 referral_objects.push((entry.fingerprint.clone(), object));
                 continue;
             }
@@ -492,7 +517,7 @@ impl Session {
             self.commit(next)?;
         }
         self.repository.clear_spooled(&ingested)?;
-        received += self.ingest_referrals(referral_objects)?;
+        received += self.ingest_peer_records(referral_objects)?;
         Ok(received)
     }
 
@@ -544,10 +569,10 @@ impl Session {
                 // over the verified torrent/DHT paths, so nothing is ingested here.
                 PeerInbound::Notice { .. } => continue,
             };
-            // A relay referral is a signed record rather than a message; it is verified
-            // against the sender's own key after this commit, because accepting one commits
-            // state of its own (M8.3).
-            if referral_from_object(&object).is_some() {
+            // A referral, a lease, or a receipt is a signed record rather than a message; each
+            // is verified against the sender's own key after this commit, because accepting one
+            // commits state of its own (M8.3/M9.2).
+            if is_peer_record(&object) {
                 referral_objects.push((fingerprint, object));
                 continue;
             }
@@ -580,22 +605,33 @@ impl Session {
             received += 1;
         }
         self.commit(next)?;
-        received += self.ingest_referrals(referral_objects)?;
+        received += self.ingest_peer_records(referral_objects)?;
         Ok(received)
     }
 
-    /// Fold referral objects a peer sent into state (M8.3).
+    /// Fold the signed records a peer sent that are not chat messages (M8.3/M9.2).
     ///
-    /// Runs after the surrounding intake committed, because accepting a referral commits state
-    /// of its own: two commits racing on one snapshot would drop one of them.
-    fn ingest_referrals(&mut self, referrals: Vec<(String, Value)>) -> Result<usize, String> {
+    /// Three record types share this path: relay referrals, replica leases, and storage
+    /// receipts. Each is verified against the sender's own key inside its own handler, and each
+    /// commits its own state, which is why this runs after the surrounding intake committed.
+    fn ingest_peer_records(&mut self, records: Vec<(String, Value)>) -> Result<usize, String> {
         let mut stored = 0;
-        for (fingerprint, object) in referrals {
-            if self.accept_referral(&fingerprint, &object)? {
+        let mut plan_changed = false;
+        for (fingerprint, object) in records {
+            if referral_from_object(&object).is_some() {
+                if self.accept_referral(&fingerprint, &object)? {
+                    stored += 1;
+                    plan_changed = true;
+                }
+            } else if lease_from_object(&object).is_some() {
+                if self.accept_replica_lease(&fingerprint, &object)? {
+                    stored += 1;
+                }
+            } else if self.record_receipt(&fingerprint, &object)? {
                 stored += 1;
             }
         }
-        if stored > 0 {
+        if plan_changed {
             // A new referral can change the relay plan, and a plan change is applied to the
             // running endpoint in place (M8.4).
             self.refresh_relay_selection();
@@ -787,6 +823,508 @@ impl Session {
         Ok(true)
     }
 
+    /// The storage settings this device runs with (M9.1).
+    ///
+    /// Platform default, then the user's saved overrides, then the deployment's environment.
+    /// A per-contact rule is applied by [`Self::storage_for_contact`].
+    fn storage_settings(&self) -> StorageSettings {
+        StorageSettings::resolve(self.platform, &self.state.storage_policy, None)
+    }
+
+    /// The storage settings for one contact, which a per-contact rule may only narrow (M9.1).
+    fn storage_for_contact(&self, contact: &Contact) -> StorageSettings {
+        StorageSettings::resolve(
+            self.platform,
+            &self.state.storage_policy,
+            contact.storage_policy.as_ref(),
+        )
+    }
+
+    /// Free space on the replica volume, when the platform can report it.
+    fn replica_free_bytes(&self) -> Option<u64> {
+        free_bytes(self.repository.root())
+    }
+
+    /// Whether this device is a storage host at all.
+    fn hosts_replicas(&self) -> bool {
+        self.storage_settings().replicate
+    }
+
+    /// Fetch and store what the leases we accepted asked for (M9.3).
+    ///
+    /// A replica is only complete once its bytes are on disk, so a lease without bytes is
+    /// retried every sync until it either lands or its lease runs out. The host re-checks the
+    /// real size after fetching: an owner that under-declared its object cannot use a small
+    /// lease to push a large one onto us.
+    fn store_held_replicas(&mut self) -> Result<usize, String> {
+        if !self.hosts_replicas() {
+            return Ok(0);
+        }
+        let pending: Vec<HeldLease> = self
+            .state
+            .held_leases
+            .iter()
+            .filter(|lease| lease.stored_at.is_none() && lease.is_active(replica_now()))
+            .cloned()
+            .collect();
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let settings = self.storage_settings();
+        let mut free = self.replica_free_bytes();
+        let mut stored = 0;
+        for lease in pending {
+            if let Some(error) = at_capacity(
+                &settings,
+                self.repository.replica_usage().unwrap_or(0),
+                free,
+            ) {
+                self.storage_note = Some(format!("stopped fetching replicas: {error}"));
+                break;
+            }
+            let Some(bytes) = self.fetch_replica(&lease) else {
+                continue;
+            };
+            // The declaration is the owner's word; this is the check on it.
+            let declared = lease.bytes.max(1);
+            if bytes.len() as u64 > declared.saturating_mul(2).max(64 * 1024) {
+                self.storage_note = Some(format!(
+                    "refused a replica of {} bytes declared as {}",
+                    bytes.len(),
+                    lease.bytes
+                ));
+                continue;
+            }
+            self.repository.save_replica(
+                &lease.lease_id,
+                &lease.owner,
+                &lease.object_id,
+                lease.kind.label(),
+                &bytes,
+                lease.expires_at,
+            )?;
+            let mut next = self.state.clone();
+            if let Some(held) = next
+                .held_leases
+                .iter_mut()
+                .find(|held| held.lease_id == lease.lease_id)
+            {
+                held.stored_at = Some(replica_now());
+                held.bytes = bytes.len() as u64;
+            }
+            self.commit(next)?;
+            stored += 1;
+            if let Some(current) = free {
+                free = Some(current.saturating_sub(bytes.len() as u64));
+            }
+        }
+        if stored > 0 {
+            self.storage_note = Some(format!("stored {stored} replica(s)"));
+        }
+        Ok(stored)
+    }
+
+    /// The bytes of one replica, from the torrent swarm behind the DHT pointer it names.
+    ///
+    /// The pointer is resolved the same way our own sync resolves it, so a host does not need
+    /// the owner to be online — only that the owner published the pointer before asking.
+    fn fetch_replica(&self, lease: &HeldLease) -> Option<Vec<u8>> {
+        let torrent = self.transport.torrent()?;
+        let contact = self
+            .state
+            .contacts
+            .iter()
+            .find(|contact| contact.fingerprint == lease.owner)?;
+        let public_key = contact.known_public_key.clone()?;
+        let namespace = match lease.kind {
+            ReplicaKind::Profile => "snartnet/profile",
+            ReplicaKind::Feed => "snartnet/feed",
+            ReplicaKind::Mailbox => "snartnet/mailbox",
+        };
+        let dht = self.transport.dht()?;
+        let parts: Vec<String> = match lease.kind {
+            ReplicaKind::Profile | ReplicaKind::Feed => vec![lease.owner.clone()],
+            // A mailbox pointer is keyed by both parties, and the host of a replica for a
+            // message it received is one of them.
+            ReplicaKind::Mailbox => vec![lease.owner.clone(), self.own_fingerprint()],
+        };
+        let keys: Vec<&str> = parts.iter().map(String::as_str).collect();
+        let pointer = dht.get_for(&public_key, namespace, &keys).ok().flatten()?;
+        let pointer: Value = serde_json::from_slice(&pointer).ok()?;
+        let magnet = pointer.get("magnet")?.as_str()?.to_owned();
+        let object_id = pointer.get("object_id")?.as_str()?.to_owned();
+        torrent.fetch(&magnet, &object_id).ok()
+    }
+
+    /// Drop what no longer fits: expired leases, then the oldest live ones (M9.4).
+    ///
+    /// Runs on every sync round, because capacity is a property of the moment: a disk that
+    /// filled up between two rounds is exactly the case this protects against.
+    fn enforce_storage_limits(&mut self) -> Result<usize, String> {
+        let settings = self.storage_settings();
+        let records = self.repository.replica_records()?;
+        let used: u64 = records.iter().map(|record| record.bytes).sum();
+        let held: Vec<HeldLease> = records
+            .iter()
+            .map(|record| record.to_held_lease())
+            .collect();
+        let plan = eviction_plan(
+            &held,
+            &settings,
+            used,
+            self.replica_free_bytes(),
+            replica_now(),
+        );
+        if plan.is_empty() {
+            return Ok(0);
+        }
+        let removed = self.repository.remove_replicas(&plan)?;
+        let mut next = self.state.clone();
+        next.held_leases
+            .retain(|lease| !plan.contains(&lease.lease_id));
+        self.commit(next)?;
+        self.storage_note = Some(format!("evicted {removed} replica(s)"));
+        Ok(removed)
+    }
+
+    /// Ask contacts to hold copies of our own published objects (M9.3).
+    ///
+    /// Only objects whose bytes and locator this device knows are offered: the profile, the
+    /// feed snapshot, and the messages we sent (as opaque mailbox objects). An object stops
+    /// being offered once `copies` receipts are active for it, and a contact that was already
+    /// asked for that object is not asked again — a lease is a request, and repeating it would
+    /// turn a polite ask into pressure.
+    fn issue_replica_leases(&mut self) -> Result<usize, String> {
+        let copies = self.storage_settings().copies;
+        let Some(keypair) = self.state.keypair.clone() else {
+            return Ok(0);
+        };
+        let now = replica_now();
+        let candidates = self.replica_candidates();
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let mut next = self.state.clone();
+        let mut issued = 0;
+        for candidate in candidates {
+            let active = next
+                .receipts
+                .iter()
+                .filter(|receipt| {
+                    receipt.object_id == candidate.object_id && receipt.is_active(now)
+                })
+                .count();
+            if active as u32 >= u32::from(copies) || next.issued_leases.len() >= MAX_ISSUED_LEASES {
+                continue;
+            }
+            let Some(contact) = self
+                .state
+                .contacts
+                .iter()
+                .find(|contact| {
+                    contact.verification == VerificationState::Verified
+                        && contact.known_encryption_public_key.is_some()
+                        && self.storage_for_contact(contact).replicate
+                        && !next.issued_leases.iter().any(|issued| {
+                            issued.contact == contact.fingerprint
+                                && issued.object_id == candidate.object_id
+                        })
+                })
+                .cloned()
+            else {
+                continue;
+            };
+            let payload = LeasePayload {
+                object_id: candidate.object_id.clone(),
+                kind: candidate.kind,
+                magnet: candidate.magnet.clone(),
+                bytes: candidate.bytes,
+            };
+            let lease = match ReplicaLease::issue(
+                &keypair,
+                &contact.fingerprint,
+                contact
+                    .known_encryption_public_key
+                    .as_deref()
+                    .unwrap_or_default(),
+                &payload,
+                now,
+                self.storage_settings().lease_secs,
+            ) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    self.storage_note = Some(format!("could not issue a lease: {error}"));
+                    continue;
+                }
+            };
+            next.issued_leases.insert(
+                0,
+                IssuedLease {
+                    lease,
+                    object_id: candidate.object_id,
+                    kind: candidate.kind,
+                    magnet: candidate.magnet,
+                    bytes: candidate.bytes,
+                    contact: contact.fingerprint.clone(),
+                    sent_at: 0,
+                },
+            );
+            next.issued_leases.truncate(MAX_ISSUED_LEASES);
+            issued += 1;
+        }
+        if issued > 0 {
+            self.commit(next)?;
+        }
+        Ok(issued)
+    }
+
+    /// The objects of ours that a replica could cover, with their locators.
+    fn replica_candidates(&self) -> Vec<ReplicaCandidate> {
+        let mut candidates = Vec::new();
+        if let Some(profile) = &self.state.profile {
+            candidates.push(ReplicaCandidate {
+                object_id: format!("profile-{}", profile.profile.fingerprint),
+                kind: ReplicaKind::Profile,
+                magnet: profile.profile.magnet_uri.clone(),
+                bytes: serde_json::to_vec(profile)
+                    .map(|bytes| bytes.len() as u64)
+                    .unwrap_or(0),
+            });
+        }
+        if !self.state.posts.is_empty() {
+            let fingerprint = self.own_fingerprint();
+            candidates.push(ReplicaCandidate {
+                object_id: format!("feed-{fingerprint}"),
+                kind: ReplicaKind::Feed,
+                magnet: None,
+                bytes: serde_json::to_vec(&self.state.posts)
+                    .map(|bytes| bytes.len() as u64)
+                    .unwrap_or(0),
+            });
+        }
+        // A message is replicated as the mailbox object the DHT pointer names, which stays
+        // opaque to the host that holds it (M9.3).
+        for item in self
+            .state
+            .threads
+            .iter()
+            .flat_map(|thread| &thread.messages)
+            .filter(|item| !item.incoming)
+        {
+            let Some(envelope) = &item.envelope else {
+                continue;
+            };
+            candidates.push(ReplicaCandidate {
+                object_id: item.id.clone(),
+                kind: ReplicaKind::Mailbox,
+                magnet: None,
+                bytes: serde_json::to_vec(envelope)
+                    .map(|bytes| bytes.len() as u64)
+                    .unwrap_or(0),
+            });
+        }
+        candidates
+    }
+
+    /// Records to hand the peer channel this round: leases we issued, receipts we owe (M9.2).
+    ///
+    /// Each record is sent once. A lease is stamped when it goes out and a receipt when it was
+    /// handed over, so a sync tick cannot repeat either of them.
+    fn pending_storage_records(&mut self) -> Result<Vec<(String, Value)>, String> {
+        let now = replica_now();
+        let mut outgoing: Vec<(String, Value)> = Vec::new();
+        let mut next = self.state.clone();
+        let mut changed = false;
+        for issued in next.issued_leases.iter_mut() {
+            if issued.sent_at > 0 {
+                continue;
+            }
+            if issued.lease.is_active(now) {
+                outgoing.push((issued.contact.clone(), lease_object(&issued.lease)));
+            }
+            // An expired request is not worth sending; the next round issues a fresh one.
+            issued.sent_at = now;
+            changed = true;
+        }
+        let keypair = self.state.keypair.clone();
+        for held in next.held_leases.iter_mut() {
+            let (Some(stored_at), None) = (held.stored_at, held.receipt_sent_at) else {
+                continue;
+            };
+            let Some(keypair) = keypair.as_ref() else {
+                break;
+            };
+            let payload = LeasePayload {
+                object_id: held.object_id.clone(),
+                kind: held.kind,
+                magnet: held.magnet.clone(),
+                bytes: held.bytes,
+            };
+            let receipt = StorageReceipt::issue(
+                keypair,
+                &held.lease_id,
+                &held.owner,
+                held.expires_at,
+                &payload,
+                held.bytes,
+                stored_at,
+            )?;
+            outgoing.push((held.owner.clone(), receipt_object(&receipt)));
+            held.receipt_sent_at = Some(now);
+            changed = true;
+        }
+        if changed {
+            self.commit(next)?;
+        }
+        Ok(outgoing)
+    }
+
+    /// This profile's fingerprint, or an empty string before a profile exists.
+    fn own_fingerprint(&self) -> String {
+        self.state
+            .profile
+            .as_ref()
+            .map(|profile| profile.profile.fingerprint.clone())
+            .unwrap_or_default()
+    }
+
+    /// Accept a replica lease a contact sent (M9.2).
+    ///
+    /// The order matters: the envelope is verified against the sender's own profile key, the
+    /// payload is only decrypted once that succeeded, and the local policy decides *after*
+    /// seeing what is actually asked for. A refusal is recorded as a note rather than an error,
+    /// because a contact asking for something we do not host is normal, not a failure.
+    fn accept_replica_lease(&mut self, sender: &str, object: &Value) -> Result<bool, String> {
+        let Some(lease) = lease_from_object(object) else {
+            return Ok(false);
+        };
+        if lease.owner != sender {
+            return Ok(false);
+        }
+        let Some(contact) = self
+            .state
+            .contacts
+            .iter()
+            .find(|contact| contact.fingerprint == sender)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        let settings = self.storage_for_contact(&contact);
+        let (Some(owner_key), Some(owner_enc_key), Some(keypair)) = (
+            contact.known_public_key.as_deref(),
+            contact.known_encryption_public_key.as_deref(),
+            self.state.keypair.clone(),
+        ) else {
+            return Ok(false);
+        };
+        if let Err(error) = lease.verify(owner_key, &self.own_fingerprint(), replica_now()) {
+            self.storage_note = Some(format!("refused a replica lease: {error}"));
+            return Ok(false);
+        }
+        let payload = match lease.open_payload(&keypair, owner_enc_key) {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.storage_note = Some(format!("refused an unreadable replica lease: {error}"));
+                return Ok(false);
+            }
+        };
+        let used = self.repository.replica_usage().unwrap_or(0);
+        if let Err(error) = admit(&settings, &payload, used, self.replica_free_bytes()) {
+            self.storage_note = Some(format!("refused a replica: {error}"));
+            return Ok(false);
+        }
+        let mut next = self.state.clone();
+        // One lease per object per owner: a renewal replaces the copy it extends.
+        next.held_leases
+            .retain(|held| !(held.owner == lease.owner && held.object_id == payload.object_id));
+        next.held_leases.insert(
+            0,
+            HeldLease {
+                lease_id: lease.lease_id.clone(),
+                owner: lease.owner.clone(),
+                object_id: payload.object_id.clone(),
+                kind: payload.kind,
+                magnet: payload.magnet.clone(),
+                bytes: payload.bytes,
+                received_at: replica_now(),
+                expires_at: lease.expires_at,
+                stored_at: None,
+                receipt_sent_at: None,
+            },
+        );
+        next.held_leases.truncate(MAX_HELD_LEASES);
+        self.commit(next)?;
+        self.storage_note = Some(format!(
+            "accepted a {} replica from a contact",
+            payload.kind.label()
+        ));
+        Ok(true)
+    }
+
+    /// Record a storage receipt a contact returned for one of our objects (M9.2).
+    ///
+    /// A receipt is only accepted from the contact it names and only for a lease this device
+    /// actually issued, which is what makes it evidence rather than a claim. An accepted
+    /// receipt moves the object's visible state to `replica-stored` (M7.5).
+    fn record_receipt(&mut self, sender: &str, object: &Value) -> Result<bool, String> {
+        let Some(receipt) = receipt_from_object(object) else {
+            return Ok(false);
+        };
+        if receipt.host != sender {
+            return Ok(false);
+        }
+        let Some(contact) = self
+            .state
+            .contacts
+            .iter()
+            .find(|contact| contact.fingerprint == sender)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        let Some(host_key) = contact.known_public_key.as_deref() else {
+            return Ok(false);
+        };
+        let issued = self
+            .state
+            .issued_leases
+            .iter()
+            .find(|issued| issued.lease.lease_id == receipt.lease_id)
+            .cloned();
+        let Some(issued) = issued else {
+            self.storage_note = Some(format!(
+                "ignored a receipt for unknown lease {}",
+                receipt.lease_id
+            ));
+            return Ok(false);
+        };
+        if receipt.owner != self.own_fingerprint() || receipt.object_id != issued.object_id {
+            return Ok(false);
+        }
+        if let Err(error) = receipt.verify(host_key, replica_now()) {
+            self.storage_note = Some(format!("refused a storage receipt: {error}"));
+            return Ok(false);
+        }
+        let mut next = self.state.clone();
+        next.receipts
+            .retain(|held| held.lease_id != receipt.lease_id || held.host != receipt.host);
+        next.receipts.insert(0, receipt);
+        next.receipts.truncate(MAX_RECEIPTS);
+        for item in next
+            .threads
+            .iter_mut()
+            .flat_map(|thread| &mut thread.messages)
+        {
+            if !item.incoming && item.id == issued.object_id {
+                item.delivery = item.delivery.strongest(DeliveryState::Stored);
+            }
+        }
+        self.commit(next)?;
+        self.storage_note = Some("a contact confirmed it holds a replica".into());
+        Ok(true)
+    }
+
     /// Take device hints from LAN announcements for contacts we already know (M7.2).
     ///
     /// Without this, a contact that met us only on the LAN has no pinned device and is never
@@ -886,12 +1424,14 @@ impl Session {
             .filter_map(|m| m.envelope.clone())
             .collect();
         let peer = self.peer.clone();
-        let referrals = self.referral_offers();
-        Some(move || {
-            sync::exchange(
-                transport, profile, posts, contacts, pending, peer, referrals,
-            )
-        })
+        // Everything the peer channel carries this round: relay referrals to offer, and replica
+        // leases or receipts to hand over (M8.3/M9.2). The storage list was built by the sync
+        // step, because this function may not commit state.
+        let outbox = sync::PeerOutbox {
+            referrals: self.referral_offers(),
+            storage: self.outgoing_storage.clone(),
+        };
+        Some(move || sync::exchange(transport, profile, posts, contacts, pending, peer, outbox))
     }
 
     pub fn apply_sync(&mut self, result: sync::SyncResult) -> Result<(), String> {
@@ -995,6 +1535,22 @@ impl Session {
                         "lastError": score.last_error,
                     }))
                     .collect::<Vec<Value>>(),
+            }),
+            // Replication and storage (M9): what this device hosts, how much it uses, how many
+            // of its own objects contacts confirmed, and why the last decision went the way it
+            // did.
+            "storage": json!({
+                "platform": self.platform.label(),
+                "settings": self.storage_settings(),
+                "hosting": self.hosts_replicas(),
+                "quotaBytes": self.storage_settings().quota_bytes,
+                "usedBytes": self.repository.replica_usage().unwrap_or(0),
+                "freeBytes": self.replica_free_bytes(),
+                "held": self.state.held_leases.len(),
+                "stored": self.state.held_leases.iter().filter(|lease| lease.stored_at.is_some()).count(),
+                "issued": self.state.issued_leases.len(),
+                "receipts": self.state.receipts.iter().filter(|receipt| receipt.is_active(replica_now())).count(),
+                "note": self.storage_note,
             }),
             "peer": self.peer_status()})
     }
@@ -1157,6 +1713,38 @@ impl Session {
                 return Ok(self.snapshot());
             }
             "cleanup" => return self.cleanup(),
+            "storage" => {
+                // The user's overrides (M9.1). Fields that are absent keep their value, so a
+                // frontend can change one setting without restating the others.
+                let policy = &mut next.storage_policy;
+                for (field, target) in [
+                    ("replicate", 0),
+                    ("quotaMiB", 1),
+                    ("leaseDays", 2),
+                    ("copies", 3),
+                    ("minFreeMiB", 4),
+                ] {
+                    let Some(value) = request.get(field) else {
+                        continue;
+                    };
+                    if value.is_null() {
+                        continue;
+                    }
+                    match target {
+                        0 => policy.replicate = value.as_bool(),
+                        1 => policy.quota_bytes = value.as_u64().map(|mib| mib * 1024 * 1024),
+                        2 => policy.lease_secs = value.as_u64().map(|days| days * 24 * 60 * 60),
+                        3 => policy.copies = value.as_u64().map(|copies| copies as u8),
+                        _ => policy.min_free_bytes = value.as_u64().map(|mib| mib * 1024 * 1024),
+                    }
+                }
+            }
+            // The SDK spells this `cleanupStorage`, matching the tag rename it applies.
+            "cleanupStorage" => {
+                // An explicit eviction, for a user who wants the space back now.
+                self.enforce_storage_limits()?;
+                return Ok(self.snapshot());
+            }
             _ => return Err("Unknown command".into()),
         }
         self.commit(next)?;
@@ -1269,6 +1857,22 @@ fn validate_address(s: &str) -> Result<(), String> {
     }
     Ok(())
 }
+/// Whether an object carries one of the signed records exchanged on the peer channel.
+///
+/// Referrals, replica leases, and storage receipts share the object frame rather than adding
+/// frame kinds, so a peer that predates one of them ignores it instead of failing.
+fn is_peer_record(object: &Value) -> bool {
+    object.get(crate::peer::RELAY_REFERRAL_KEY).is_some()
+        || object.get(crate::replica::REPLICA_LEASE_KEY).is_some()
+        || object.get(crate::replica::REPLICA_RECEIPT_KEY).is_some()
+}
+
+/// The clock for replica records. Kept separate so a test can reason about windows without
+/// moving the relay clock, and so the lease code reads as what it is (a lease window).
+fn replica_now() -> u64 {
+    crate::replica::now_secs()
+}
+
 fn thread_mut<'a>(state: &'a mut State, fp: &str) -> &'a mut ChatThread {
     if !state.threads.iter().any(|t| t.contact_fingerprint == fp) {
         state.threads.push(ChatThread {
@@ -1627,6 +2231,195 @@ mod tests {
             .active_urls()
             .iter()
             .all(|url| !url.contains("old.example.com")));
+    }
+
+    /// A replica lease a contact accepts becomes an acknowledged receipt (M9.2/M9.3).
+    ///
+    /// The loop runs through the same intake the peer channel uses: the lease is spooled before
+    /// acknowledgement, the host stores the bytes and answers with a signed receipt, and the
+    /// receipt is what makes a copy real to the owner.
+    #[test]
+    fn a_replica_lease_and_its_receipt_round_trip_through_the_spool() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let mut a = client(a_dir.path(), "alice");
+        let mut b = client(b_dir.path(), "bob");
+        pair(&mut a, &mut b);
+        let alice = a.state.profile.clone().unwrap();
+        let bob = b.state.profile.clone().unwrap();
+        // Alice asks Bob for a copy of her own profile, which is the object she publishes first.
+        a.sync_distributed().unwrap();
+        let lease = a
+            .outgoing_storage
+            .iter()
+            .find(|(contact, _)| contact == &bob.profile.fingerprint)
+            .map(|(_, object)| lease_from_object(object).expect("a lease record"))
+            .expect("Alice asked Bob for a replica of her profile");
+        assert_eq!(lease.owner, alice.profile.fingerprint);
+        assert_eq!(lease.host, bob.profile.fingerprint);
+
+        // Bob receives it the way the peer channel delivers it.
+        b.repository
+            .spool_inbound(
+                &alice.profile.fingerprint,
+                "alice-device",
+                &lease_object(&lease),
+            )
+            .unwrap();
+        assert_eq!(b.sync_distributed().unwrap(), 1);
+        assert_eq!(b.state.held_leases.len(), 1);
+        let accepted = b.state.held_leases[0].clone();
+        assert_eq!(
+            accepted.object_id,
+            format!("profile-{}", alice.profile.fingerprint)
+        );
+        assert!(
+            accepted.stored_at.is_none(),
+            "the bytes are not fetched yet"
+        );
+        // The bytes normally come from the swarm; a host without one cannot fetch, so this test
+        // stores them the way a completed fetch would.
+        b.repository
+            .save_replica(
+                &accepted.lease_id,
+                &accepted.owner,
+                &accepted.object_id,
+                accepted.kind.label(),
+                br#"{"profile":"alice"}"#,
+                accepted.expires_at,
+            )
+            .unwrap();
+        b.state.held_leases[0].stored_at = Some(replica_now());
+        b.state.held_leases[0].bytes = 19;
+
+        // The receipt is owed exactly once, and it names the lease it answers.
+        let receipts = b.pending_storage_records().unwrap();
+        assert_eq!(receipts.len(), 1);
+        let receipt = receipt_from_object(&receipts[0].1).expect("a receipt record");
+        assert_eq!(receipt.lease_id, accepted.lease_id);
+        assert_eq!(receipt.owner, alice.profile.fingerprint);
+        assert!(b.pending_storage_records().unwrap().is_empty());
+        let _ = alice;
+
+        // Alice records it, so her storage panel reports a real copy.
+        a.repository
+            .spool_inbound(
+                &bob.profile.fingerprint,
+                "bob-device",
+                &receipt_object(&receipt),
+            )
+            .unwrap();
+        assert_eq!(a.sync_distributed().unwrap(), 1);
+        assert_eq!(a.state.receipts.len(), 1);
+        assert_eq!(a.snapshot()["storage"]["receipts"], 1);
+
+        // A tampered receipt proves nothing, and neither does one for a lease never issued.
+        let mut forged = receipt.clone();
+        forged.bytes = receipt.bytes + 1;
+        a.repository
+            .spool_inbound(
+                &bob.profile.fingerprint,
+                "bob-device",
+                &receipt_object(&forged),
+            )
+            .unwrap();
+        assert_eq!(a.sync_distributed().unwrap(), 0);
+        assert_eq!(a.state.receipts.len(), 1);
+
+        // Eviction is enforced on the host: a replica whose lease lapsed is gone after a sync.
+        b.repository
+            .save_replica(
+                accepted.lease_id.as_str(),
+                &accepted.owner,
+                &accepted.object_id,
+                accepted.kind.label(),
+                b"stale",
+                1,
+            )
+            .unwrap();
+        assert!(b.repository.replica_usage().unwrap() > 0);
+        b.sync_distributed().unwrap();
+        assert!(b.repository.replica_records().unwrap().is_empty());
+    }
+
+    /// A host that does not volunteer space refuses a lease and says why (M9.1/M9.5).
+    #[test]
+    fn a_host_that_does_not_host_refuses_a_lease_with_a_reason() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let mut a = client(a_dir.path(), "alice");
+        let mut b = client(b_dir.path(), "bob");
+        pair(&mut a, &mut b);
+        let alice = a.state.profile.clone().unwrap();
+        let bob = b.state.profile.clone().unwrap();
+        // Bob is a phone: no hosting at all, which the platform default decides.
+        b.platform = Platform::Mobile;
+        b.state.storage_policy.replicate = Some(false);
+        a.sync_distributed().unwrap();
+        let lease = a
+            .outgoing_storage
+            .iter()
+            .find(|(contact, _)| contact == &bob.profile.fingerprint)
+            .map(|(_, object)| lease_from_object(object).expect("a lease record"))
+            .expect("Alice still asks; refusing is Bob's decision");
+        b.repository
+            .spool_inbound(
+                &alice.profile.fingerprint,
+                "alice-device",
+                &lease_object(&lease),
+            )
+            .unwrap();
+        assert_eq!(b.sync_distributed().unwrap(), 0);
+        assert!(b.state.held_leases.is_empty());
+        let note = b.snapshot()["storage"]["note"].clone();
+        assert!(
+            note.as_str()
+                .is_some_and(|note| note.contains("does not host replicas")),
+            "{note}"
+        );
+        assert_eq!(b.snapshot()["storage"]["hosting"], false);
+        assert_eq!(b.snapshot()["storage"]["platform"], "mobile");
+
+        // A per-contact rule can only narrow: the user refuses this one contact while hosting
+        // for everyone else (M9.1).
+        b.platform = Platform::Desktop;
+        b.state.storage_policy.replicate = Some(true);
+        b.state.contacts[0].storage_policy = Some(crate::replica::StoragePolicy {
+            replicate: Some(false),
+            ..crate::replica::StoragePolicy::default()
+        });
+        b.repository
+            .spool_inbound(
+                &alice.profile.fingerprint,
+                "alice-device",
+                &lease_object(&lease),
+            )
+            .unwrap();
+        assert_eq!(b.sync_distributed().unwrap(), 0);
+        assert!(b.state.held_leases.is_empty());
+        assert!(b.snapshot()["storage"]["hosting"] == true);
+
+        // Lifting the rule accepts it, and a renewal of the same lease replaces the copy
+        // instead of adding a second one (M9.3).
+        b.state.contacts[0].storage_policy = None;
+        b.repository
+            .spool_inbound(
+                &alice.profile.fingerprint,
+                "alice-device",
+                &lease_object(&lease),
+            )
+            .unwrap();
+        assert_eq!(b.sync_distributed().unwrap(), 1);
+        assert_eq!(b.state.held_leases.len(), 1);
+        b.repository
+            .spool_inbound(
+                &alice.profile.fingerprint,
+                "alice-device",
+                &lease_object(&lease),
+            )
+            .unwrap();
+        assert_eq!(b.sync_distributed().unwrap(), 1);
+        assert_eq!(b.state.held_leases.len(), 1);
     }
 
     #[test]

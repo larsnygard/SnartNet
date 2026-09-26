@@ -97,6 +97,25 @@ pub enum Command {
     Discovery {
         enabled: bool,
     },
+    /// Set storage and replication preferences (M9.1). An absent field keeps its value.
+    Storage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replicate: Option<bool>,
+        #[serde(rename = "quotaMiB", default, skip_serializing_if = "Option::is_none")]
+        quota_mib: Option<u64>,
+        #[serde(rename = "leaseDays", default, skip_serializing_if = "Option::is_none")]
+        lease_days: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copies: Option<u8>,
+        #[serde(
+            rename = "minFreeMiB",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        min_free_mib: Option<u64>,
+    },
+    /// Drop replicas that expired or no longer fit (M9.4).
+    CleanupStorage,
     Cleanup,
     Invite,
 }

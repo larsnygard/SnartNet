@@ -178,6 +178,38 @@ pub(crate) struct RelayView {
     pub health: Vec<RelayHealthView>,
 }
 
+/// What this device replicates and stores, from the snapshot's `storage` key (M9).
+///
+/// The daemon reports these keys in camelCase, so the field names are mapped rather than
+/// silently left at their default zero value.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StorageView {
+    /// Whether this device holds copies for contacts at all.
+    #[serde(default)]
+    pub hosting: bool,
+    /// Which platform default applies: `desktop` or `mobile`.
+    #[serde(default)]
+    pub platform: String,
+    #[serde(default)]
+    pub quota_bytes: u64,
+    #[serde(default)]
+    pub used_bytes: u64,
+    #[serde(default)]
+    pub free_bytes: Option<u64>,
+    #[serde(default)]
+    pub held: usize,
+    #[serde(default)]
+    pub stored: usize,
+    #[serde(default)]
+    pub issued: usize,
+    #[serde(default)]
+    pub receipts: usize,
+    /// Why the last storage decision went the way it did.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 /// One relay's local health, as the daemon scored it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct RelayHealthView {

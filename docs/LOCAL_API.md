@@ -46,8 +46,8 @@ addresses are accepted; redirects and HTTP proxies are disabled.
 | GET `/v1/events` | none | SSE `state` events with apiVersion, revision, kind |
 | POST `/v1/stop` | empty object | stopping: true (acknowledgment, not exit confirmation) |
 
-Commands are profile, contact, post, message, read, discovery, cleanup, and
-invite. Required fields and accepted variants are defined in `sdk/src/types.rs`.
+Commands are profile, contact, post, message, read, discovery, storage,
+cleanupStorage, cleanup, and invite. Required fields and accepted variants are defined in `sdk/src/types.rs`.
 Unknown command fields are rejected. The public state has typed top-level
 collections; existing signed records and network status retain their JSON
 representation. This avoids coupling frontends to backend storage/network crates.
@@ -61,6 +61,13 @@ failure, and `viaBittorrent`/`viaIroh` recording the paths that accepted it (M7)
 The top-level `delivery` key summarises the durable path: `durable` (can this host
 publish at all), `failed` (why the last publication failed), and `spooled`
 (inbound objects stored before acknowledgement and not yet ingested).
+
+The `storage` key reports replication (M9): `platform`, the resolved `settings`, whether
+this device `hosting` replicas for contacts, `quotaBytes`, `usedBytes`, `freeBytes`,
+counts of `held`/`stored` replicas and `issued` leases, live `receipts` for its own
+objects, and a `note` explaining the last storage decision. `storage` sends the user's
+overrides (`replicate`, `quotaMiB`, `leaseDays`, `copies`, `minFreeMiB`; absent fields
+keep their value) and `cleanupStorage` evicts expired or over-quota replicas on demand.
 
 API major version 1 is checked in runtime metadata and health before writes.
 Versioned responses and events are checked too. Additive response fields are

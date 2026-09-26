@@ -124,6 +124,7 @@ pub async fn add_contact_async(fingerprint: String, alias: String) -> Result<Con
         peer_addrs: Vec::new(),
         peer_certificate_issued_at: None,
         last_sync_error: None,
+        storage_policy: None,
     })
 }
 
@@ -199,6 +200,7 @@ pub async fn import_invite_async(code: String) -> Result<Contact, String> {
         peer_addrs: Vec::new(),
         peer_certificate_issued_at: None,
         last_sync_error,
+        storage_policy: None,
     })
 }
 
@@ -236,5 +238,6 @@ pub async fn import_magnet_async(uri: String) -> Result<Contact, String> {
         peer_addrs: Vec::new(),
         peer_certificate_issued_at: None,
         last_sync_error: None,
+        storage_policy: None,
     })
 }

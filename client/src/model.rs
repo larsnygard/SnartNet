@@ -86,6 +86,9 @@ pub struct Contact {
     pub peer_certificate_issued_at: Option<u64>,
     #[serde(default)]
     pub last_sync_error: Option<String>,
+    /// This contact's storage rule, which may only narrow what we host (M9.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_policy: Option<crate::replica::StoragePolicy>,
 }
 
 impl Default for Contact {
@@ -109,6 +112,7 @@ impl Default for Contact {
             peer_addrs: Vec::new(),
             peer_certificate_issued_at: None,
             last_sync_error: None,
+            storage_policy: None,
         }
     }
 }

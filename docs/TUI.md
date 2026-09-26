@@ -54,6 +54,8 @@ beside `snartnet-tui`. During development, start the daemon yourself with
 | `m` | Cycle the sync mode: always on, balanced, paused |
 | `d` | Toggle LAN discovery |
 | `c` | Clean up local file caches |
+| `h` | Toggle replica hosting for contacts (M9) |
+| `C` | Drop expired or over-quota replicas (M9) |
 | `u` | Build a fresh invitation link |
 | `D` / `S` | Start or stop the daemon (with confirmation for stop) |
 | `q`, `Ctrl+C` | Quit this view; the daemon keeps running |

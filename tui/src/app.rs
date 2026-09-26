@@ -230,6 +230,8 @@ pub(crate) enum Message {
     CycleMode,
     ToggleDiscovery,
     Cleanup,
+    ToggleStorageHosting,
+    CleanupStorage,
     Invite,
     StartDaemon,
     StopDaemon,
@@ -659,6 +661,24 @@ impl App {
                 Some(Action::Command(Command::Discovery { enabled }))
             }
             Message::Cleanup => Some(Action::Command(Command::Cleanup)),
+            Message::ToggleStorageHosting => {
+                // One key for the setting that matters most on a phone: whether this device
+                // holds copies for contacts at all (M9.1).
+                let replicate = !self.state.network.storage.hosting;
+                self.status = if replicate {
+                    "Hosting replicas for contacts…".to_string()
+                } else {
+                    "Stopping replica hosting…".to_string()
+                };
+                Some(Action::Command(Command::Storage {
+                    replicate: Some(replicate),
+                    quota_mib: None,
+                    lease_days: None,
+                    copies: None,
+                    min_free_mib: None,
+                }))
+            }
+            Message::CleanupStorage => Some(Action::Command(Command::CleanupStorage)),
             Message::Invite => Some(Action::Invite),
             Message::StartDaemon => Some(Action::StartDaemon),
             Message::StopDaemon => {
@@ -783,6 +803,16 @@ fn success_line(command: &Command) -> String {
         Command::Read { .. } => "Conversation marked read.",
         Command::Discovery { enabled: true } => "Discovery turned on.",
         Command::Discovery { enabled: false } => "Discovery turned off.",
+        Command::Storage {
+            replicate: Some(true),
+            ..
+        } => "Replica hosting turned on.",
+        Command::Storage {
+            replicate: Some(false),
+            ..
+        } => "Replica hosting turned off.",
+        Command::Storage { .. } => "Storage settings saved.",
+        Command::CleanupStorage => "Expired and over-quota replicas dropped.",
         Command::Cleanup => "Local file caches cleaned up.",
         Command::Invite => "Invitation link ready.",
     }
@@ -797,6 +827,8 @@ fn failure_prefix(command: &Command) -> &'static str {
         Command::Message { .. } => "Could not send the message:",
         Command::Read { .. } => "Could not mark the conversation read:",
         Command::Discovery { .. } => "Could not change discovery:",
+        Command::Storage { .. } => "Could not save storage settings:",
+        Command::CleanupStorage => "Could not drop replicas:",
         Command::Cleanup => "Could not clean up local files:",
         Command::Invite => "Could not build the invitation link:",
     }

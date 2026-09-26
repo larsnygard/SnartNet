@@ -8,10 +8,10 @@ roadmap.
 ## Status
 
 - **Status:** Active
-- **Current milestone:** M9 — Contact replication and storage policy
+- **Current milestone:** M10 — Android and power-aware operation
 - **Last updated:** 2026-09-26
-- **Last completed:** M8.1–M8.5 — transparent relay selection with signed referrals
-  (M7 durable delivery and M6 device identity before it; M4.3 tray: Linux only)
+- **Last completed:** M9.1–M9.5 — contact replication with encrypted leases and signed
+  receipts (M8 relays and M7 durable delivery before it; M4.3 tray: Linux only)
 - **Known blockers:** None
 
 ## Working agreement
@@ -111,11 +111,11 @@ with the tray disabled.*
 
 ## M9 — Contact replication and storage policy
 
-- [ ] **M9.1** Implement policy precedence and desktop/mobile defaults.
-- [ ] **M9.2** Add encrypted replica leases and signed storage receipts.
-- [ ] **M9.3** Replicate approved profiles, feeds, and opaque mailbox objects.
-- [ ] **M9.4** Add expiry, storage caps, eviction, and low-disk protection.
-- [ ] **M9.5** Add Storage & availability settings and policy tests.
+- [x] **M9.1** Implement policy precedence and desktop/mobile defaults.
+- [x] **M9.2** Add encrypted replica leases and signed storage receipts.
+- [x] **M9.3** Replicate approved profiles, feeds, and opaque mailbox objects.
+- [x] **M9.4** Add expiry, storage caps, eviction, and low-disk protection.
+- [x] **M9.5** Add Storage & availability settings and policy tests.
 
 ## M10 — Android and power-aware operation
 
@@ -464,5 +464,55 @@ with the tray disabled.*
   -- -D warnings`, and `cargo test --workspace` pass (86 client, 42 core, 3 daemon,
   17 desktop, 10 integration, 9 terminal tests).
 - Next: M9.1 — implement policy precedence and desktop/mobile defaults.
+- Blockers: none.
+
+### 2026-09-26 — M9
+
+- Completed: M9.1–M9.5. A device can now hold copies of a contact's objects on its own
+  terms, with the request sealed to it and the promise signed by it, and space is bounded
+  locally instead of by trust.
+- Delivered: `client/src/replica.rs` and ADR 0007. `StorageSettings::resolve` applies the
+  platform default (desktop volunteers 1 GiB and 30-day leases; a phone volunteers
+  nothing, keeps 64 MiB, and uses 7-day leases), then the user's saved overrides, then
+  `SNARTNET_STORAGE_*`, then a per-contact rule that may only narrow; `clamp` keeps a
+  zero quota or lease from becoming a trap, and `Platform::from_env` reads
+  `SNARTNET_PLATFORM` so a desktop standing in for a phone behaves like the phone (M10).
+- Delivered: M9.2. `ReplicaLease` is a profile-key-signed envelope naming owner, host,
+  lease id, and window, whose payload is encrypted to the host; the signature covers a
+  hash of the sealed payload, so replacing it invalidates the lease. `StorageReceipt` is
+  the host's own signed promise, accepted by the owner only for a lease it issued and only
+  from the contact that lease named, which is what makes `replica-stored` (M7.5) evidence
+  rather than a claim. Only the operator's own relay-style secrets mirror that rule: a
+  relay token is never re-shared, and a lease never contains an object in the clear.
+- Delivered: M9.3. The host resolves the DHT pointer its lease kind implies
+  (`snartnet/profile`, `snartnet/feed`, `snartnet/mailbox`), fetches from the torrent
+  swarm, re-checks the fetched size against the declared one (so a small lease cannot
+  smuggle a large object), writes the bytes under `root/replicas/` with a row in the
+  `replicas` table, and answers with a receipt. The owner offers its profile, its feed
+  snapshot, and its outbound messages, one lease per contact per object until `copies`
+  live receipts exist. Both directions ride the peer channel as `replica_lease` and
+  `replica_receipt` objects through the durable spool.
+- Delivered: M9.4. `admit` and `at_capacity` refuse the not-hosting case, the per-replica
+  cap, the quota, and the free-space headroom; `eviction_plan` orders expired leases
+  before the oldest live ones and counts the space its own plan frees, so a healthy host
+  evicts nothing. `free_bytes` reads `df` and returns `None` where the platform cannot
+  answer, in which case the quota alone governs instead of every replica failing.
+- Delivered: M9.5. The `storage` command sets overrides field by field, `cleanupStorage`
+  evicts on demand, and the snapshot exposes a `storage` block (platform, settings,
+  hosting, quota, used, free, held, stored, issued, receipts, note). Both frontends render
+  it; the terminal binds `h` to toggle hosting and `C` to drop expired or over-quota
+  replicas, and the SDK gained typed `Storage`/`CleanupStorage` commands.
+- Delivered: eight new tests. Six `replica.rs` tests cover policy precedence and
+  clamping, lease verification (wrong host, foreign key, expired, future, tampered
+  payload, unreadable by a third party), receipt verification (expired, edited, foreign
+  key), admission (not hosting, oversized, quota, low disk, unknown free space), and
+  eviction ordering; two `session.rs` tests cover the full lease → store → receipt round
+  trip through the spool (including a tampered receipt and an expired lease) and a host
+  that refuses with a reason because the platform or a per-contact rule says so. The
+  frontend fixtures assert the storage block reaches both view models.
+- Validation: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+  -- -D warnings`, and `cargo test --workspace` pass (94 client, 42 core, 3 daemon,
+  17 desktop, 10 integration, 9 terminal tests).
+- Next: M10.1 — route Android through the shared backend service.
 - Blockers: none.
 

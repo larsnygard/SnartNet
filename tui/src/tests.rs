@@ -132,6 +132,17 @@ fn populated_state() -> (DaemonState, Profile, Profile) {
             },
             "peer": {"active": true, "node_id": "node-1", "peer_count": 4, "discovery": "dns-pkarr", "last_error": null},
             "delivery": {"durable": false, "failed": "disk is full", "spooled": 1},
+            "storage": {
+                "platform": "mobile",
+                "hosting": false,
+                "quotaBytes": 67108864,
+                "usedBytes": 0,
+                "held": 0,
+                "stored": 0,
+                "issued": 0,
+                "receipts": 0,
+                "note": "this host does not host replicas"
+            },
             "relay": {
                 "plan": "n0 production relays",
                 "source": "n0",
@@ -207,6 +218,16 @@ fn a_snapshot_becomes_the_view_models_the_terminal_renders() {
     assert_eq!(network.relay.plan, "n0 production relays");
     assert!(!network.relay.disabled);
     assert!(network.relay.health.is_empty());
+    // The storage block tells the operator what this device does with its disk (M9.5).
+    assert!(!network.storage.hosting);
+    assert_eq!(network.storage.platform, "mobile");
+    assert_eq!(network.storage.quota_bytes, 64 * 1024 * 1024);
+    assert_eq!(network.storage.held, 0);
+    assert!(network
+        .storage
+        .note
+        .as_deref()
+        .is_some_and(|note| note.contains("does not host")),);
     assert_eq!(state.nearby[0].alias, "carol@laptop");
     assert_eq!(state.nearby[0].address.as_deref(), Some("10.0.0.9:47470"));
 }

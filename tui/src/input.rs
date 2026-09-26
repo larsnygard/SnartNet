@@ -56,6 +56,10 @@ pub(crate) fn translate(key: KeyEvent, app: &App) -> Option<Message> {
             'm' => Some(Message::CycleMode),
             'd' => Some(Message::ToggleDiscovery),
             'c' => Some(Message::Cleanup),
+            // Storage keys: `h` toggles whether this device hosts replicas for contacts, `C`
+            // drops what expired or no longer fits (M9.5).
+            'h' => Some(Message::ToggleStorageHosting),
+            'C' => Some(Message::CleanupStorage),
             'u' => Some(Message::Invite),
             'D' => Some(Message::StartDaemon),
             'S' => Some(Message::StopDaemon),

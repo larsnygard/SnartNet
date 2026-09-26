@@ -511,6 +511,38 @@ fn network(frame: &mut Frame, app: &App, area: Rect) {
         );
         lines.push(kv(&relay.url, detail));
     }
+    // Replication and storage (M9): what this device hosts, what it holds, and what contacts
+    // confirmed for its own objects.
+    lines.push(kv(
+        "Replica hosting",
+        format!(
+            "{} ({}, quota {} MiB, used {} KiB)",
+            if status.storage.hosting { "on" } else { "off" },
+            if status.storage.platform.is_empty() {
+                "platform unknown"
+            } else {
+                status.storage.platform.as_str()
+            },
+            status.storage.quota_bytes / (1024 * 1024),
+            status.storage.used_bytes / 1024
+        ),
+    ));
+    lines.push(kv(
+        "Replicas held / issued",
+        format!(
+            "{} of {} stored · {} asked for · {} receipt(s)",
+            status.storage.stored,
+            status.storage.held,
+            status.storage.issued,
+            status.storage.receipts
+        ),
+    ));
+    if let Some(note) = &status.storage.note {
+        lines.push(Line::from(vec![
+            Span::styled("Storage: ", Style::default().fg(DIMMED)),
+            Span::styled(note.clone(), Style::default().fg(DIMMED)),
+        ]));
+    }
     for (name, summary) in &status.subsystems {
         lines.push(kv(name, summary.clone()));
     }

@@ -118,6 +118,40 @@ pub(crate) struct RelayView {
     pub health: Vec<RelayHealthView>,
 }
 
+/// What this device replicates and stores, from the snapshot's `storage` key (M9).
+///
+/// The daemon reports these keys in camelCase, so the field names are mapped rather than
+/// silently left at their default zero value.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StorageView {
+    /// Whether this device holds copies for contacts at all.
+    #[serde(default)]
+    pub hosting: bool,
+    /// Which platform default applies: `desktop` or `mobile`.
+    #[serde(default)]
+    pub platform: String,
+    /// Bytes this device may dedicate to replicas.
+    #[serde(default)]
+    pub quota_bytes: u64,
+    /// Bytes currently held.
+    #[serde(default)]
+    pub used_bytes: u64,
+    /// The leases accepted, and how many of them have their bytes.
+    #[serde(default)]
+    pub held: usize,
+    #[serde(default)]
+    pub stored: usize,
+    /// Leases this device issued, and live receipts for its own objects.
+    #[serde(default)]
+    pub issued: usize,
+    #[serde(default)]
+    pub receipts: usize,
+    /// Why the last storage decision went the way it did.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 /// One relay's local health, as the daemon scored it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct RelayHealthView {
@@ -240,6 +274,8 @@ pub(crate) struct NetworkView {
     pub delivery: DeliveryStatus,
     /// Relay selection and local relay health (M8).
     pub relay: RelayView,
+    /// Replication and storage policy state (M9).
+    pub storage: StorageView,
     /// DHT, torrent, and authenticated peer status objects, already summarised for display.
     pub subsystems: Vec<(&'static str, String)>,
 }
@@ -288,6 +324,10 @@ impl DaemonState {
                 .unwrap_or_default(),
             relay: extra
                 .get("relay")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default(),
+            storage: extra
+                .get("storage")
                 .and_then(|value| serde_json::from_value(value.clone()).ok())
                 .unwrap_or_default(),
             subsystems: ["dht", "torrent", "peer"]

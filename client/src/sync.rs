@@ -25,6 +25,20 @@ impl DeliveryPaths {
     }
 }
 
+/// The signed records a session wants handed to specific contacts over the peer channel.
+///
+/// Referrals, replica leases, and storage receipts all travel as objects on the authenticated
+/// channel (M8.3/M9.2); grouping them keeps one caller contract instead of one parameter per
+/// record type.
+#[derive(Debug, Clone, Default)]
+pub struct PeerOutbox {
+    /// Relay referrals to offer. The endpoint throttles repeats per contact.
+    pub referrals: Vec<(String, RelayReferral)>,
+    /// Replica leases and storage receipts. Each is already marked as sent by the session, so
+    /// a tick cannot repeat one.
+    pub storage: Vec<(String, serde_json::Value)>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SyncResult {
     pub contacts: Vec<Contact>,
@@ -58,7 +72,7 @@ pub fn exchange(
     mut contacts: Vec<Contact>,
     pending: Vec<SignedMessage>,
     peer: Option<Arc<PeerNode>>,
-    referrals: Vec<(String, RelayReferral)>,
+    outbox: PeerOutbox,
 ) -> SyncResult {
     // Announce our signed key before sending envelopes. This also enables replies when only
     // one side has a reachable TCP endpoint. Durable publication is the session's job
@@ -134,7 +148,7 @@ pub fn exchange(
     // record, so it needs the channel's identity proof but nothing beyond it, and the
     // endpoint itself decides whether the referral is new enough to send again.
     if let Some(peer) = &peer {
-        for (fingerprint, referral) in &referrals {
+        for (fingerprint, referral) in &outbox.referrals {
             let Some(contact) = contacts
                 .iter()
                 .find(|contact| contact.fingerprint == *fingerprint)
@@ -143,6 +157,18 @@ pub fn exchange(
             };
             if let Some(target) = peer_target_for(contact) {
                 peer.send_referral(&target, referral, unix_secs());
+            }
+        }
+        // Replica leases and storage receipts are delivered the same way (M9.2).
+        for (fingerprint, record) in &outbox.storage {
+            let Some(contact) = contacts
+                .iter()
+                .find(|contact| contact.fingerprint == *fingerprint)
+            else {
+                continue;
+            };
+            if let Some(target) = peer_target_for(contact) {
+                peer.send_object(&target, record);
             }
         }
     }

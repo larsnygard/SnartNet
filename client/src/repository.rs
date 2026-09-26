@@ -7,6 +7,7 @@
 
 use crate::device::DeviceCertificate;
 use crate::model::{ChatItem, ChatThread, Contact};
+use crate::transport::sanitize_component;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,19 @@ pub struct CanonicalState {
     /// so the mirror file and a snapshot carry nothing an attacker could use.
     #[serde(default)]
     pub relay_referrals: Vec<crate::relay::RelayReferral>,
+    /// The user's storage overrides, above the platform default and below the deployment's
+    /// environment (M9.1).
+    #[serde(default)]
+    pub storage_policy: crate::replica::StoragePolicy,
+    /// Leases this device accepted from contacts, newest first (M9.2).
+    #[serde(default)]
+    pub held_leases: Vec<crate::replica::HeldLease>,
+    /// Leases this device asked contacts for, so a receipt can be matched to an object (M9.2).
+    #[serde(default)]
+    pub issued_leases: Vec<crate::replica::IssuedLease>,
+    /// Receipts contacts returned for our objects, newest first (M9.2).
+    #[serde(default)]
+    pub receipts: Vec<crate::replica::StorageReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +92,45 @@ pub struct IndexedObject {
 pub struct IndexedStore {
     root: PathBuf,
     db_path: PathBuf,
+}
+
+/// One replica indexed in the local store (M9.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicaRecord {
+    pub lease_id: String,
+    pub owner: String,
+    pub object_id: String,
+    pub kind: String,
+    pub bytes: u64,
+    pub stored_at: i64,
+    pub expires_at: i64,
+}
+
+impl ReplicaRecord {
+    /// Whether this replica's lease is still inside its window.
+    pub fn is_active(&self, now: i64) -> bool {
+        self.expires_at > now
+    }
+
+    /// The lease as the session tracks it, so eviction and state stay one list.
+    pub fn to_held_lease(&self) -> crate::replica::HeldLease {
+        crate::replica::HeldLease {
+            lease_id: self.lease_id.clone(),
+            owner: self.owner.clone(),
+            object_id: self.object_id.clone(),
+            kind: match self.kind.as_str() {
+                "feed" => crate::replica::ReplicaKind::Feed,
+                "mailbox" => crate::replica::ReplicaKind::Mailbox,
+                _ => crate::replica::ReplicaKind::Profile,
+            },
+            magnet: None,
+            bytes: self.bytes,
+            received_at: self.stored_at.max(0) as u64,
+            expires_at: self.expires_at.max(0) as u64,
+            stored_at: Some(self.stored_at.max(0) as u64),
+            receipt_sent_at: None,
+        }
+    }
 }
 
 /// The signed id of one object frame, used to deduplicate delivery paths (M7.4).
@@ -172,6 +225,11 @@ impl crate::peer::InboundPersist for InboundSpool {
 }
 
 impl IndexedStore {
+    /// The data directory this store owns, where replicas and legacy mirror files live.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn open(root: &Path) -> Result<Self, String> {
         fs::create_dir_all(root).map_err(|e| format!("create backend root: {e}"))?;
         let store = Self {
@@ -219,6 +277,14 @@ impl IndexedStore {
         let relay_referrals =
             read_json::<Vec<crate::relay::RelayReferral>>(&conn, "relay_referrals")?
                 .unwrap_or_default();
+        let storage_policy = read_json::<crate::replica::StoragePolicy>(&conn, "storage_policy")?
+            .unwrap_or_default();
+        let held_leases =
+            read_json::<Vec<crate::replica::HeldLease>>(&conn, "held_leases")?.unwrap_or_default();
+        let issued_leases = read_json::<Vec<crate::replica::IssuedLease>>(&conn, "issued_leases")?
+            .unwrap_or_default();
+        let receipts = read_json::<Vec<crate::replica::StorageReceipt>>(&conn, "receipts")?
+            .unwrap_or_default();
 
         let posts = read_rows::<SignedPost>(&conn, "post")?;
         let contacts = read_table::<Contact>(&conn, "contacts", "fingerprint")?;
@@ -231,6 +297,10 @@ impl IndexedStore {
             threads,
             address,
             relay_referrals,
+            storage_policy,
+            held_leases,
+            issued_leases,
+            receipts,
         })
     }
 
@@ -434,6 +504,116 @@ impl IndexedStore {
         .map_err(|e| format!("count spooled objects: {e}"))
     }
 
+    /// Where one replica's bytes live.
+    fn replica_path(&self, lease_id: &str) -> PathBuf {
+        self.root
+            .join("replicas")
+            .join(format!("{}.bin", sanitize_component(lease_id)))
+    }
+
+    /// Write one replica to disk and index it (M9.3).
+    ///
+    /// The bytes go to a file rather than into SQLite: a replica can be megabytes and is
+    /// written once and read rarely, which is what a file is for. The row is what makes it
+    /// evictable, since expiry and usage have to be queryable without touching the files.
+    pub fn save_replica(
+        &self,
+        lease_id: &str,
+        owner: &str,
+        object_id: &str,
+        kind: &str,
+        bytes: &[u8],
+        expires_at: u64,
+    ) -> Result<(), String> {
+        let dir = self.root.join("replicas");
+        fs::create_dir_all(&dir).map_err(|e| format!("create replica area: {e}"))?;
+        fs::write(self.replica_path(lease_id), bytes)
+            .map_err(|e| format!("write replica {lease_id}: {e}"))?;
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT INTO replicas (lease_id, owner, object_id, kind, bytes, stored_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(lease_id) DO UPDATE SET
+                 owner = excluded.owner,
+                 object_id = excluded.object_id,
+                 kind = excluded.kind,
+                 bytes = excluded.bytes,
+                 stored_at = excluded.stored_at,
+                 expires_at = excluded.expires_at",
+            params![
+                lease_id,
+                owner,
+                object_id,
+                kind,
+                bytes.len() as i64,
+                Utc::now().timestamp(),
+                expires_at as i64
+            ],
+        )
+        .map_err(|e| format!("index replica {lease_id}: {e}"))?;
+        Ok(())
+    }
+
+    /// One replica's bytes, when this host still holds them.
+    pub fn load_replica(&self, lease_id: &str) -> Option<Vec<u8>> {
+        fs::read(self.replica_path(lease_id)).ok()
+    }
+
+    /// Every indexed replica, oldest first so eviction can walk it in order.
+    pub fn replica_records(&self) -> Result<Vec<ReplicaRecord>, String> {
+        let conn = self.connect()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT lease_id, owner, object_id, kind, bytes, stored_at, expires_at
+                 FROM replicas ORDER BY stored_at, lease_id",
+            )
+            .map_err(|e| format!("prepare replica query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ReplicaRecord {
+                    lease_id: row.get(0)?,
+                    owner: row.get(1)?,
+                    object_id: row.get(2)?,
+                    kind: row.get(3)?,
+                    bytes: row.get::<_, i64>(4)?.max(0) as u64,
+                    stored_at: row.get(5)?,
+                    expires_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| format!("query replicas: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("read replicas: {e}"))
+    }
+
+    /// Bytes this host currently dedicates to replicas.
+    pub fn replica_usage(&self) -> Result<u64, String> {
+        let conn = self.connect()?;
+        conn.query_row("SELECT COALESCE(SUM(bytes), 0) FROM replicas", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|bytes| bytes.max(0) as u64)
+        .map_err(|e| format!("sum replica bytes: {e}"))
+    }
+
+    /// Drop replicas by lease id, returning how many were removed (M9.4).
+    ///
+    /// The file is removed first: an index row without its bytes is a lie, while a file
+    /// without a row is only wasted space that the next write of that lease reuses.
+    pub fn remove_replicas(&self, lease_ids: &[String]) -> Result<usize, String> {
+        let conn = self.connect()?;
+        let mut removed = 0;
+        for lease_id in lease_ids {
+            let _ = fs::remove_file(self.replica_path(lease_id));
+            removed += conn
+                .execute(
+                    "DELETE FROM replicas WHERE lease_id = ?1",
+                    params![lease_id],
+                )
+                .map_err(|e| format!("drop replica {lease_id}: {e}"))?;
+        }
+        Ok(removed)
+    }
+
     fn connect(&self) -> Result<Connection, String> {
         let conn =
             Connection::open(&self.db_path).map_err(|e| format!("open indexed state: {e}"))?;
@@ -469,7 +649,18 @@ impl IndexedStore {
                  object_json TEXT NOT NULL,
                  received_at INTEGER NOT NULL
              );
-             CREATE INDEX IF NOT EXISTS inbound_spool_arrival ON inbound_spool(received_at, id);",
+             CREATE INDEX IF NOT EXISTS inbound_spool_arrival ON inbound_spool(received_at, id);
+             CREATE TABLE IF NOT EXISTS replicas (
+                 lease_id TEXT PRIMARY KEY,
+                 owner TEXT NOT NULL,
+                 object_id TEXT NOT NULL,
+                 kind TEXT NOT NULL,
+                 bytes INTEGER NOT NULL,
+                 stored_at INTEGER NOT NULL,
+                 expires_at INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS replicas_owner_object ON replicas(owner, object_id);
+             CREATE INDEX IF NOT EXISTS replicas_expiry ON replicas(expires_at, stored_at);",
         )
         .map_err(|e| format!("create indexed-state schema: {e}"))?;
         let version = conn
@@ -518,6 +709,10 @@ impl IndexedStore {
         write_json(&tx, "profile", &state.profile)?;
         write_json(&tx, "address", &state.address)?;
         write_json(&tx, "relay_referrals", &state.relay_referrals)?;
+        write_json(&tx, "storage_policy", &state.storage_policy)?;
+        write_json(&tx, "held_leases", &state.held_leases)?;
+        write_json(&tx, "issued_leases", &state.issued_leases)?;
+        write_json(&tx, "receipts", &state.receipts)?;
         tx.execute("DELETE FROM contacts", [])
             .map_err(|e| format!("replace contacts: {e}"))?;
         for contact in &state.contacts {
@@ -592,9 +787,13 @@ impl IndexedStore {
                 .get_json("advertise_addr")
                 .map_err(|e| e.to_string())?
                 .unwrap_or_default(),
-            // The legacy record predates relay referrals (M8.3), so an imported state starts
-            // with none and learns them from contacts over the peer channel.
+            // The legacy record predates relay referrals (M8.3) and storage policy (M9), so an
+            // imported state starts with none and learns them from contacts and the platform.
             relay_referrals: Vec::new(),
+            storage_policy: crate::replica::StoragePolicy::default(),
+            held_leases: Vec::new(),
+            issued_leases: Vec::new(),
+            receipts: Vec::new(),
         };
         merge_legacy(snapshot, split)
     }

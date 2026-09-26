@@ -982,6 +982,32 @@ impl App {
                 }
             ));
         }
+        // Replication and storage (M9): what this device hosts, how much it holds, and what
+        // contacts confirmed for its own objects.
+        notes.push(format!(
+            "Replica hosting: {} ({} · quota {} MiB · used {} KiB)",
+            if network.storage.hosting { "on" } else { "off" },
+            if network.storage.platform.is_empty() {
+                "platform unknown"
+            } else {
+                network.storage.platform.as_str()
+            },
+            network.storage.quota_bytes / (1024 * 1024),
+            network.storage.used_bytes / 1024
+        ));
+        notes.push(format!(
+            "Replicas: {} of {} stored · {} lease(s) issued · {} receipt(s)",
+            network.storage.stored,
+            network.storage.held,
+            network.storage.issued,
+            network.storage.receipts
+        ));
+        if let Some(free) = network.storage.free_bytes {
+            notes.push(format!("Free space: {} MiB", free / (1024 * 1024)));
+        }
+        if let Some(note) = &network.storage.note {
+            notes.push(format!("Storage: {note}"));
+        }
         notes
     }
 }

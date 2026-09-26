@@ -5,7 +5,8 @@
 //! error) instead of holding a keypair of its own.
 
 use super::model::{
-    Contact, DeliveryState, DeliveryStatus, DhtStatus, PeerStatus, RelayView, TorrentStatus,
+    Contact, DeliveryState, DeliveryStatus, DhtStatus, PeerStatus, RelayView, StorageView,
+    TorrentStatus,
 };
 use serde_json::Value;
 use snartnet_core::{Profile, SignedPost};
@@ -67,6 +68,8 @@ pub(crate) struct NetworkView {
     pub delivery: DeliveryStatus,
     /// Relay selection and local relay health (M8).
     pub relay: RelayView,
+    /// Replication and storage policy state (M9).
+    pub storage: StorageView,
     /// Scheduler mode the daemon is actually running, not what was requested.
     pub sync_mode: SyncMode,
     pub paused: bool,
@@ -107,6 +110,7 @@ impl DaemonState {
             peer: status(extra, "peer")?,
             delivery: delivery_status(extra),
             relay: relay_view(extra),
+            storage: storage_view(extra),
             sync_mode: sync_mode(extra)?,
             paused: extra
                 .get("paused")
@@ -206,6 +210,14 @@ fn delivery_status(extra: &serde_json::Map<String, Value>) -> DeliveryStatus {
 
 /// The relay selection summary. Like the delivery block it is always present, so a window can
 /// tell "n0 production relays" apart from a daemon that reported nothing at all.
+fn storage_view(extra: &serde_json::Map<String, Value>) -> StorageView {
+    extra
+        .get("storage")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// The relay selection summary.
 fn relay_view(extra: &serde_json::Map<String, Value>) -> RelayView {
     extra
         .get("relay")
