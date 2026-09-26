@@ -8,11 +8,10 @@ roadmap.
 ## Status
 
 - **Status:** Active
-- **Current milestone:** M8 — Transparent relay selection
+- **Current milestone:** M9 — Contact replication and storage policy
 - **Last updated:** 2026-09-26
-- **Last completed:** M7.1–M7.6 — durable BitTorrent publication plus realtime Iroh
-  delivery (M6.1–M6.6 device identity and peer protocol before it; M4.3 tray:
-  Linux only)
+- **Last completed:** M8.1–M8.5 — transparent relay selection with signed referrals
+  (M7 durable delivery and M6 device identity before it; M4.3 tray: Linux only)
 - **Known blockers:** None
 
 ## Working agreement
@@ -104,11 +103,11 @@ with the tray disabled.*
 
 ## M8 — Transparent relay selection
 
-- [ ] **M8.1** Use production Iroh relay configuration by default.
-- [ ] **M8.2** Add configured, trusted-referral, community, and n0 fallback sources.
-- [ ] **M8.3** Define signed, expiring relay referrals and encrypted grants.
-- [ ] **M8.4** Score local relay health and update the active map safely.
-- [ ] **M8.5** Test direct paths, relays, failover, bad referrals, and outages.
+- [x] **M8.1** Use production Iroh relay configuration by default.
+- [x] **M8.2** Add configured, trusted-referral, community, and n0 fallback sources.
+- [x] **M8.3** Define signed, expiring relay referrals and encrypted grants.
+- [x] **M8.4** Score local relay health and update the active map safely.
+- [x] **M8.5** Test direct paths, relays, failover, bad referrals, and outages.
 
 ## M9 — Contact replication and storage policy
 
@@ -418,5 +417,52 @@ with the tray disabled.*
   -- -D warnings`, and `cargo test --workspace` pass (73 client, 42 core, 3 daemon,
   17 desktop, 10 integration, 9 terminal tests).
 - Next: M8.1 — use production Iroh relay configuration by default.
+- Blockers: none.
+
+### 2026-09-26 — M8
+
+- Completed: M8.1–M8.5. Relay selection is now local policy with four sources rather
+  than one constant, referrals are signed and expiring records, and local health moves a
+  failing relay out of the way without touching the device identity.
+- Delivered: `client/src/relay.rs` and ADR 0006. `RelayPlan::build` resolves the sources
+  most trusted first (configured, verified referral, community, n0), normalizes and
+  bounds the list to `MAX_ACTIVE_RELAYS`, and reports `n0` for an empty plan: relaying is
+  the fallback that keeps a symmetric-NAT device reachable, so nothing but an explicit
+  `SNARTNET_IROH_RELAY=off` may switch it off. Production relays are the default again;
+  `staging` is now an explicit opt-in.
+- Delivered: M8.3. `RelayReferral` is a profile-key-signed, expiring record whose
+  canonical body covers a hash of its grant, so a swapped grant or a changed URL
+  invalidates it. `RelayGrant` seals a relay's bearer token to one recipient's X25519
+  key with the chat construction under its own algorithm label. Only the operator's own
+  configured relay is referred, and only its own `SNARTNET_RELAY_TOKEN` is sealed; a
+  token received in someone else's referral is never re-shared. A referral travels as an
+  object on the authenticated peer channel (`relay_referral`), throttled per contact by
+  `REFERRAL_REFRESH_SECS`.
+- Delivered: M8.4. `RelayHealth` scores each relay from the endpoint's own home-relay
+  status; `DEMOTE_AFTER_FAILURES` consecutive failures demote a relay behind an untried
+  one and eventually out of the map, and a success clears the count so it can win its
+  place back. `PeerNode::apply_relay_map` reconciles the live map through iroh's
+  `insert_relay`/`remove_relay`, touching only the relays this client added, so a plan
+  change keeps the device key — and therefore every contact's certificate pin — intact.
+  When every planned relay is failing, iroh's production relays are added back as a
+  floor.
+- Delivered: the session verifies a referral against the sender's own profile key before
+  storing the signed record (the grant stays ciphertext in state), opens the grant when a
+  plan needs the token, and rebuilds the plan from configured, referred, and community
+  sources; the snapshot exposes a `relay` block (plan, source, disabled, planned, active,
+  and per-relay health) and both frontends render it, including a warning when relaying
+  is switched off.
+- Delivered: thirteen new tests. Nine `relay.rs` tests cover URL/list validation, source
+  precedence, referral verification (forged, expired, future, tampered URL, swapped
+  grant, wrong version), grant addressing and refusal for a third party, newest-expiry
+  selection, health ordering/demotion/recovery, and the n0 floor; three `peer.rs` tests
+  cover a dead relay that does not block a direct delivery, a live map reconciliation
+  that keeps the endpoint id, and referral throttling; one `session.rs` test covers a
+  referral that arrives spooled before acknowledgement, is verified, has its grant
+  opened for the plan, and is refused when forged or expired.
+- Validation: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+  -- -D warnings`, and `cargo test --workspace` pass (86 client, 42 core, 3 daemon,
+  17 desktop, 10 integration, 9 terminal tests).
+- Next: M9.1 — implement policy precedence and desktop/mobile defaults.
 - Blockers: none.
 

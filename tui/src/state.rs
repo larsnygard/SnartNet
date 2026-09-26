@@ -98,6 +98,40 @@ pub(crate) struct DeliveryStatus {
     pub spooled: u64,
 }
 
+/// How relays were chosen and how they behave, from the snapshot's `relay` key (M8).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct RelayView {
+    /// One line naming the source and the relays in the plan.
+    #[serde(default)]
+    pub plan: String,
+    /// Which source decided the plan (`configured`, `referral`, `community`, or `n0`).
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Whether relaying is switched off entirely.
+    #[serde(default)]
+    pub disabled: bool,
+    /// The relay URLs this client applied to its endpoint.
+    #[serde(default)]
+    pub active: Vec<String>,
+    /// Local observations, best first (M8.4).
+    #[serde(default)]
+    pub health: Vec<RelayHealthView>,
+}
+
+/// One relay's local health, as the daemon scored it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct RelayHealthView {
+    pub url: String,
+    #[serde(default)]
+    pub connected: bool,
+    #[serde(default)]
+    pub score: i64,
+    #[serde(default)]
+    pub failures: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct Contact {
     pub fingerprint: String,
@@ -204,6 +238,8 @@ pub(crate) struct NetworkView {
     /// Durable publication state: whether this host can publish, why it last failed, and how
     /// much inbound is spooled before acknowledgement (M7.3/M7.5).
     pub delivery: DeliveryStatus,
+    /// Relay selection and local relay health (M8).
+    pub relay: RelayView,
     /// DHT, torrent, and authenticated peer status objects, already summarised for display.
     pub subsystems: Vec<(&'static str, String)>,
 }
@@ -248,6 +284,10 @@ impl DaemonState {
             listener_error: string(extra, "listenerError"),
             delivery: extra
                 .get("delivery")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default(),
+            relay: extra
+                .get("relay")
                 .and_then(|value| serde_json::from_value(value.clone()).ok())
                 .unwrap_or_default(),
             subsystems: ["dht", "torrent", "peer"]

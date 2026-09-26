@@ -7,6 +7,7 @@
 //! through one deduplicating intake (M7.4).
 use super::*;
 use crate::peer::{PeerInbound, PeerNode, PeerTarget};
+use crate::relay::RelayReferral;
 use std::sync::Arc;
 
 /// Which direct paths carried one outbound message.
@@ -57,6 +58,7 @@ pub fn exchange(
     mut contacts: Vec<Contact>,
     pending: Vec<SignedMessage>,
     peer: Option<Arc<PeerNode>>,
+    referrals: Vec<(String, RelayReferral)>,
 ) -> SyncResult {
     // Announce our signed key before sending envelopes. This also enables replies when only
     // one side has a reachable TCP endpoint. Durable publication is the session's job
@@ -126,6 +128,22 @@ pub fn exchange(
         };
         if paths.any() {
             result.delivered.push((message.message.id, paths));
+        }
+    }
+    // Relay referrals ride the same authenticated channel (M8.3): a referral is a signed
+    // record, so it needs the channel's identity proof but nothing beyond it, and the
+    // endpoint itself decides whether the referral is new enough to send again.
+    if let Some(peer) = &peer {
+        for (fingerprint, referral) in &referrals {
+            let Some(contact) = contacts
+                .iter()
+                .find(|contact| contact.fingerprint == *fingerprint)
+            else {
+                continue;
+            };
+            if let Some(target) = peer_target_for(contact) {
+                peer.send_referral(&target, referral, unix_secs());
+            }
         }
     }
     if let Some(inbox) = transport.load_inbox(&profile.profile.fingerprint) {

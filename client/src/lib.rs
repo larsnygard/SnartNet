@@ -8,6 +8,7 @@ pub mod model;
 pub mod peer;
 pub mod ports;
 pub mod protocol;
+pub mod relay;
 pub mod repository;
 pub mod session;
 pub mod sync;

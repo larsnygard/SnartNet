@@ -8,7 +8,15 @@ use crate::{
     },
     discovery::*,
     model::*,
-    peer::{ContactPolicy, PeerInbound, PeerNode, PeerOptions, PeerStatus, PeerTarget, UpdateKind},
+    peer::{
+        referral_from_object, ContactPolicy, PeerInbound, PeerNode, PeerOptions, PeerStatus,
+        PeerTarget, UpdateKind,
+    },
+    relay::{
+        community_relays_from_env, configured_relay_token, configured_relays_from_env, now_secs,
+        relays_disabled_from_env, staging_relays_from_env, ReferredRelay, RelayGrant, RelayHealth,
+        RelayInputs, RelayPlan, RelayReferral, MAX_REFERRALS, RELAY_REFERRAL_TTL_SECS,
+    },
     repository::{CanonicalState as State, InboundSpool, IndexedStore},
     transport::*,
     *,
@@ -37,6 +45,10 @@ pub struct Session {
     /// Why the last durable publication failed. A frontend shows this next to the delivery
     /// state: "queued" is honest only when the reason is visible (M7.5).
     publish_error: Option<String>,
+    /// Local relay observations, scored from the live endpoint (M8.4).
+    relay_health: RelayHealth,
+    /// The plan the running endpoint is reconciled against, for the snapshot (M8.2).
+    relay_plan: RelayPlan,
     discovery: LanDiscovery,
     paused: bool,
     pub listener_error: Option<String>,
@@ -72,6 +84,8 @@ impl Session {
             device,
             peer_error: None,
             publish_error: None,
+            relay_health: RelayHealth::default(),
+            relay_plan: RelayPlan::default(),
             discovery: LanDiscovery::new(),
             paused: false,
             listener_error: None,
@@ -115,7 +129,12 @@ impl Session {
         };
         match self.device_certificate(&profile, &keypair, &device) {
             Ok(certificate) => {
-                match PeerNode::open_with(&device, certificate, PeerOptions::from_env()) {
+                let plan = self.build_relay_plan();
+                let options = PeerOptions {
+                    discovery: peer::discovery_mode_from_env(),
+                    relay: plan.clone(),
+                };
+                match PeerNode::open_with(&device, certificate, options) {
                     Ok(node) => {
                         let node = Arc::new(node);
                         // Install the durable sink before anything can connect: an object the
@@ -124,6 +143,7 @@ impl Session {
                         node.set_contacts(self.peer_policies());
                         self.peer = Some(node);
                         self.peer_error = None;
+                        self.relay_plan = plan;
                     }
                     Err(error) => self.peer_error = Some(error),
                 }
@@ -341,6 +361,8 @@ impl Session {
         // Publishing comes before pushing (M7.1): a message that has no durable copy yet is
         // published here, and only what this produced as addressable may be pushed.
         self.publish_pending_outbound()?;
+        // Relay health is observed and the plan applied before anything is dialed (M8.4).
+        self.refresh_relay_selection();
         // Every arrival path funnels through the same deduplicating intake (M7.4). The spool
         // is drained first because it is the durable record of what the peer handler already
         // acknowledged; the in-memory inbox then only adds objects whose persist was refused,
@@ -425,6 +447,7 @@ impl Session {
         let mut next = self.state.clone();
         let mut received = 0;
         let mut ingested = Vec::with_capacity(spooled.len());
+        let mut referral_objects = Vec::new();
         for entry in &spooled {
             // An entry is removed from the spool even when it cannot be ingested: bytes that
             // can never become a valid object must not block the spool forever.
@@ -432,6 +455,10 @@ impl Session {
             let Ok(object) = serde_json::from_str::<Value>(&entry.object_json) else {
                 continue;
             };
+            if referral_from_object(&object).is_some() {
+                referral_objects.push((entry.fingerprint.clone(), object));
+                continue;
+            }
             let Ok(signed) = serde_json::from_value::<SignedMessage>(object) else {
                 continue;
             };
@@ -465,6 +492,7 @@ impl Session {
             self.commit(next)?;
         }
         self.repository.clear_spooled(&ingested)?;
+        received += self.ingest_referrals(referral_objects)?;
         Ok(received)
     }
 
@@ -490,6 +518,7 @@ impl Session {
             .unwrap_or_default();
         let mut next = self.state.clone();
         let mut received = 0;
+        let mut referral_objects = Vec::new();
         for certificate in accepted {
             if let Some(contact) = next
                 .contacts
@@ -515,6 +544,13 @@ impl Session {
                 // over the verified torrent/DHT paths, so nothing is ingested here.
                 PeerInbound::Notice { .. } => continue,
             };
+            // A relay referral is a signed record rather than a message; it is verified
+            // against the sender's own key after this commit, because accepting one commits
+            // state of its own (M8.3).
+            if referral_from_object(&object).is_some() {
+                referral_objects.push((fingerprint, object));
+                continue;
+            }
             let Ok(signed) = serde_json::from_value::<SignedMessage>(object) else {
                 continue;
             };
@@ -544,7 +580,27 @@ impl Session {
             received += 1;
         }
         self.commit(next)?;
+        received += self.ingest_referrals(referral_objects)?;
         Ok(received)
+    }
+
+    /// Fold referral objects a peer sent into state (M8.3).
+    ///
+    /// Runs after the surrounding intake committed, because accepting a referral commits state
+    /// of its own: two commits racing on one snapshot would drop one of them.
+    fn ingest_referrals(&mut self, referrals: Vec<(String, Value)>) -> Result<usize, String> {
+        let mut stored = 0;
+        for (fingerprint, object) in referrals {
+            if self.accept_referral(&fingerprint, &object)? {
+                stored += 1;
+            }
+        }
+        if stored > 0 {
+            // A new referral can change the relay plan, and a plan change is applied to the
+            // running endpoint in place (M8.4).
+            self.refresh_relay_selection();
+        }
+        Ok(stored)
     }
 
     fn commit(&mut self, next: State) -> Result<(), String> {
@@ -584,6 +640,151 @@ impl Session {
             // policies (which may not reach us) and the dial targets (which may).
             self.refresh_peer_contacts();
         }
+    }
+
+    /// Build the relay plan from every source the session holds (M8.2).
+    ///
+    /// A referral is usable here only if it came from a contact we verified, verifies again
+    /// against that contact's profile key, has not expired, and — when it carries a grant —
+    /// decrypts with our own key and that contact's encryption key. Anything else is ignored
+    /// rather than failing the plan, because one bad referral must not cost us a relay.
+    fn build_relay_plan(&self) -> RelayPlan {
+        let now = now_secs();
+        let referred: Vec<ReferredRelay> = self
+            .state
+            .relay_referrals
+            .iter()
+            .filter_map(|referral| self.referred_relay(referral, now))
+            .collect();
+        let configured = configured_relays_from_env();
+        let community = community_relays_from_env();
+        RelayPlan::build(
+            RelayInputs {
+                disabled: relays_disabled_from_env(),
+                staging: staging_relays_from_env(),
+                configured: &configured,
+                referrals: &referred,
+                community: &community,
+            },
+            &self.relay_health,
+        )
+    }
+
+    /// One verified referral, with its grant opened, or `None` when it is not usable.
+    fn referred_relay(&self, referral: &RelayReferral, now: u64) -> Option<ReferredRelay> {
+        let contact = self
+            .state
+            .contacts
+            .iter()
+            .find(|contact| contact.fingerprint == referral.referrer)
+            .filter(|contact| contact.verification == VerificationState::Verified)?;
+        let verified = referral
+            .verify(contact.known_public_key.as_deref()?, now)
+            .ok()?;
+        let token = match (&referral.grant, self.state.keypair.as_ref()) {
+            (Some(grant), Some(keypair)) => grant
+                .open(keypair, contact.known_encryption_public_key.as_deref()?)
+                .ok(),
+            _ => None,
+        };
+        Some(ReferredRelay {
+            referrer: verified.referrer,
+            relay: verified.relay,
+            expires_at: verified.expires_at,
+            token,
+        })
+    }
+
+    /// Score the live endpoint's relays and apply the resulting plan (M8.4).
+    ///
+    /// The map is reconciled in place with iroh's own add/remove API, so a relay that keeps
+    /// failing moves behind a working one without touching the device key: every contact's
+    /// certificate pin stays valid, and a plan change is not a reconnection event.
+    fn refresh_relay_selection(&mut self) {
+        let Some(peer) = self.peer.clone() else {
+            return;
+        };
+        for observation in peer.relay_status() {
+            self.relay_health.observe(
+                &observation.url,
+                observation.connected,
+                observation.last_error,
+            );
+        }
+        let plan = self.build_relay_plan();
+        match peer.apply_relay_map(&plan, &self.relay_health) {
+            Ok(_) => {
+                self.relay_plan = plan;
+                if self.peer_error.is_some() {
+                    self.peer_error = None;
+                }
+            }
+            Err(error) => self.peer_error = Some(error),
+        }
+    }
+
+    /// The referral to hand one contact: our configured relay, with its token sealed to them.
+    ///
+    /// Only the operator's own configured relay is referred, and only its own token is
+    /// attached. A token that arrived in someone else's referral is theirs to give, not ours to
+    /// pass on, and re-sealing it would spread one relay secret across a whole contact list.
+    fn referral_for(&self, contact: &Contact) -> Option<RelayReferral> {
+        let keypair = self.state.keypair.as_ref()?;
+        let relay = configured_relays_from_env().into_iter().next()?;
+        let recipient_key = contact.known_encryption_public_key.as_deref()?;
+        let grant = match configured_relay_token() {
+            Some(token) => Some(RelayGrant::seal(keypair, recipient_key, &token).ok()?),
+            None => None,
+        };
+        RelayReferral::issue(keypair, &relay, now_secs(), RELAY_REFERRAL_TTL_SECS, grant).ok()
+    }
+
+    /// Every referral to send this round, one per contact that can read a grant (M8.3).
+    fn referral_offers(&self) -> Vec<(String, RelayReferral)> {
+        self.state
+            .contacts
+            .iter()
+            .filter(|contact| contact.verification == VerificationState::Verified)
+            .filter_map(|contact| Some((contact.fingerprint.clone(), self.referral_for(contact)?)))
+            .collect()
+    }
+
+    /// Accept a referral a contact sent over the peer channel (M8.3).
+    ///
+    /// A referral is only accepted from the contact whose profile key verifies the signature,
+    /// so a peer cannot recommend relays on someone else's behalf. The signed record is what is
+    /// stored; a grant inside it stays ciphertext until a plan needs the token.
+    fn accept_referral(&mut self, sender: &str, object: &Value) -> Result<bool, String> {
+        let Some(referral) = referral_from_object(object) else {
+            return Ok(false);
+        };
+        if referral.referrer != sender {
+            return Ok(false);
+        }
+        let Some(contact) = self
+            .state
+            .contacts
+            .iter()
+            .find(|contact| contact.fingerprint == sender)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        let Some(public_key) = contact.known_public_key.as_deref() else {
+            return Ok(false);
+        };
+        if referral.verify(public_key, now_secs()).is_err() {
+            return Ok(false);
+        }
+        let mut next = self.state.clone();
+        next.relay_referrals
+            .retain(|held| held.relay != referral.relay || held.referrer != referral.referrer);
+        next.relay_referrals.insert(0, referral);
+        // Bounded: the newest referrals describe the infrastructure that is up now, so the
+        // oldest are the ones to drop.
+        next.relay_referrals.truncate(MAX_REFERRALS);
+        self.commit(next)?;
+        Ok(true)
     }
 
     /// Take device hints from LAN announcements for contacts we already know (M7.2).
@@ -685,7 +886,12 @@ impl Session {
             .filter_map(|m| m.envelope.clone())
             .collect();
         let peer = self.peer.clone();
-        Some(move || sync::exchange(transport, profile, posts, contacts, pending, peer))
+        let referrals = self.referral_offers();
+        Some(move || {
+            sync::exchange(
+                transport, profile, posts, contacts, pending, peer, referrals,
+            )
+        })
     }
 
     pub fn apply_sync(&mut self, result: sync::SyncResult) -> Result<(), String> {
@@ -768,6 +974,27 @@ impl Session {
                 "durable": self.transport.has_durable_transport(),
                 "failed": self.publish_error,
                 "spooled": self.repository.spooled_count().unwrap_or(0),
+            }),
+            // Relay selection: which sources decided the map, what is applied right now, and
+            // how each relay has behaved locally (M8.2/M8.4).
+            "relay": json!({
+                "plan": self.relay_plan.summary(),
+                "source": self.relay_plan.source().map(|source| source.label()),
+                "disabled": self.relay_plan.is_disabled(),
+                "planned": self.relay_plan.active_urls(),
+                "active": self.peer.as_ref().map(|peer| peer.applied_relays()).unwrap_or_default(),
+                "health": self
+                    .relay_health
+                    .snapshot()
+                    .into_iter()
+                    .map(|(url, score)| json!({
+                        "url": url,
+                        "connected": score.connected,
+                        "score": score.score(),
+                        "failures": score.failures,
+                        "lastError": score.last_error,
+                    }))
+                    .collect::<Vec<Value>>(),
             }),
             "peer": self.peer_status()})
     }
@@ -1060,6 +1287,8 @@ fn thread_mut<'a>(state: &'a mut State, fp: &str) -> &'a mut ChatThread {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer::referral_object;
+    use crate::relay::RelaySource;
     fn client(root: &Path, name: &str) -> Session {
         let mut s = Session::open(root, "127.0.0.1:0".parse().unwrap()).unwrap();
         s.command(json!({"op":"profile", "username":name})).unwrap();
@@ -1285,6 +1514,119 @@ mod tests {
         assert_eq!(a.repository.spooled_count().unwrap(), 0);
         a.sync_distributed().unwrap();
         assert_eq!(a.state.threads[0].messages.len(), 1);
+    }
+
+    /// A referral from a contact is verified, stored, and becomes the relay plan (M8.3/M8.4).
+    #[test]
+    fn an_accepted_referral_changes_the_relay_plan_but_a_forged_one_does_not() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let mut a = client(a_dir.path(), "alice");
+        let mut b = client(b_dir.path(), "bob");
+        pair(&mut a, &mut b);
+        let alice = a.state.profile.clone().unwrap();
+        let bob = b.state.profile.clone().unwrap();
+        let bob_keypair = b.state.keypair.clone().unwrap();
+        // Bob refers Alice to his relay, with the bearer token sealed to her own key.
+        let grant = RelayGrant::seal(
+            &bob_keypair,
+            alice.profile.encryption_public_key.as_deref().unwrap(),
+            "relay-bearer-token",
+        )
+        .unwrap();
+        let referral = RelayReferral::issue(
+            &bob_keypair,
+            "https://relay.example.com",
+            now_secs(),
+            RELAY_REFERRAL_TTL_SECS,
+            Some(grant),
+        )
+        .unwrap();
+        // It arrives the way the peer channel delivers it: spooled before acknowledgement.
+        a.repository
+            .spool_inbound(
+                &bob.profile.fingerprint,
+                "bob-device",
+                &referral_object(&referral),
+            )
+            .unwrap();
+        assert_eq!(a.sync_distributed().unwrap(), 1);
+        assert_eq!(a.state.relay_referrals.len(), 1);
+
+        // The session verifies it against Bob's own key and opens the grant to his token.
+        let referred = a
+            .referred_relay(&referral, now_secs())
+            .expect("a verified referral with a decryptable grant");
+        assert_eq!(referred.referrer, bob.profile.fingerprint);
+        assert_eq!(referred.relay, "https://relay.example.com/");
+        assert_eq!(referred.token.as_deref(), Some("relay-bearer-token"));
+        let plan = RelayPlan::build(
+            RelayInputs {
+                disabled: false,
+                staging: false,
+                configured: &[],
+                referrals: &[referred],
+                community: &[],
+            },
+            &RelayHealth::default(),
+        );
+        assert_eq!(plan.source(), Some(RelaySource::Referral));
+        // The session's own plan uses the referral when the operator configured no relay of
+        // its own, which would outrank it by design.
+        if configured_relays_from_env().is_empty() {
+            let plan = a.build_relay_plan();
+            assert_eq!(plan.source(), Some(RelaySource::Referral));
+            assert_eq!(
+                plan.relays()[0].token.as_deref(),
+                Some("relay-bearer-token")
+            );
+        }
+
+        // A referral signed by someone else cannot speak for Bob, even naming him.
+        let mut carol = KeyPair::generate().unwrap();
+        carol.ensure_encryption_keys();
+        let mut forged = RelayReferral::issue(
+            &carol,
+            "https://attacker.example.com",
+            now_secs(),
+            RELAY_REFERRAL_TTL_SECS,
+            None,
+        )
+        .unwrap();
+        forged.referrer = bob.profile.fingerprint.clone();
+        a.repository
+            .spool_inbound(
+                &bob.profile.fingerprint,
+                "bob-device",
+                &referral_object(&forged),
+            )
+            .unwrap();
+        assert_eq!(a.sync_distributed().unwrap(), 0);
+        assert_eq!(a.state.relay_referrals.len(), 1);
+
+        // Nor can an expired referral re-enter the plan.
+        let expired = RelayReferral::issue(
+            &bob_keypair,
+            "https://old.example.com",
+            now_secs() - RELAY_REFERRAL_TTL_SECS - 60,
+            RELAY_REFERRAL_TTL_SECS,
+            None,
+        )
+        .unwrap();
+        a.repository
+            .spool_inbound(
+                &bob.profile.fingerprint,
+                "bob-device",
+                &referral_object(&expired),
+            )
+            .unwrap();
+        assert_eq!(a.sync_distributed().unwrap(), 0);
+        assert_eq!(a.state.relay_referrals.len(), 1);
+        assert!(a
+            .build_relay_plan()
+            .active_urls()
+            .iter()
+            .all(|url| !url.contains("old.example.com")));
     }
 
     #[test]

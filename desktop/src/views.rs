@@ -948,6 +948,40 @@ impl App {
                 network.delivery.spooled
             ));
         }
+        // Relay selection is a policy decision, and a relay that keeps failing is the reason a
+        // connection is slow rather than broken (M8.2/M8.4).
+        if !network.relay.plan.is_empty() {
+            notes.push(format!("Relay selection: {}", network.relay.plan));
+        }
+        if network.relay.disabled {
+            // A device with relaying off is only reachable through its direct addresses, which
+            // is worth stating rather than discovering during a failed connection.
+            notes.push("Relaying is switched off; only direct addresses are used".into());
+        }
+        if let Some(source) = &network.relay.source {
+            notes.push(format!("Relay source: {source}"));
+        }
+        notes.push(format!(
+            "Relays applied to the endpoint: {}",
+            network.relay.active.len()
+        ));
+        for relay in &network.relay.health {
+            notes.push(format!(
+                "Relay {}: {} · score {} · {} failure(s){}",
+                relay.url,
+                if relay.connected {
+                    "connected"
+                } else {
+                    "not connected"
+                },
+                relay.score,
+                relay.failures,
+                match &relay.last_error {
+                    Some(error) => format!(" · {error}"),
+                    None => String::new(),
+                }
+            ));
+        }
         notes
     }
 }

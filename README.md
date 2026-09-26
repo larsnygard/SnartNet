@@ -73,7 +73,10 @@ Invitations include the detected local IP and actual listening port. For remote 
 | `SNARTNET_DHT_EXTRA_BOOTSTRAP` | empty | Comma-separated additional signed DHT bootstrap nodes |
 | `SNARTNET_TORRENT_BOOTSTRAP` | library defaults | Comma-separated replacement BitTorrent DHT bootstrap nodes |
 | `SNARTNET_IROH_DISCOVERY` | `dns` | Publish and resolve contact device endpoints through Iroh's n0 DNS/Pkarr services; `off` keeps direct addresses only |
-| `SNARTNET_IROH_RELAY` | `staging` | Iroh relay set for NAT hole punching: `staging`, `prod`, or `off` |
+| `SNARTNET_IROH_RELAY` | n0 production | Relay policy: unset or `prod` uses n0's production relays, `staging` uses their test relays, `off` disables relaying entirely |
+| `SNARTNET_RELAY_URLS` | empty | Comma-separated relay URLs this deployment runs or trusts; they outrank every other source |
+| `SNARTNET_RELAY_TOKEN` | empty | Bearer token for those relays; it is sealed into an encrypted grant when a contact is referred, never published |
+| `SNARTNET_COMMUNITY_RELAYS` | empty | Comma-separated relays of a community this deployment joined; used when no configured relay or referral applies |
 
 `SNARTNET_BIND` is the only port you configure. Its owner derives the rest, and no
 derived port is a fixed second choice: LAN discovery keeps UDP `47471`, the torrent
@@ -146,6 +149,8 @@ SNARTNET_HOME=/tmp/snartnet-review cargo run -p snartnet-desktop
 The desktop implements Ed25519 signed identities and X25519 + ChaCha20-Poly1305 direct messages. Signatures are checked against the contact's public-key fingerprint before trusting profile keys or displaying incoming messages. Sync uses BitTorrent objects with signed DHT descriptors and retains bounded TCP as a fallback. It runs outside the UI thread.
 
 Contacts are also reached over Iroh (ADR 0003). Each device holds its own Iroh key, separate from the profile signing key, and proves which profile it belongs to with a profile-signed device certificate that names the endpoint id, capabilities, and expiry. The certificate is validated against the endpoint id Iroh's TLS handshake already proved before a single application frame is read; a stranger is closed immediately, a replayed older certificate is refused against the pin kept from the newest one accepted, and `hello`/`hello_ack` nonces stop a recorded handshake from being replayed onto a new connection. Since M6 there is no global topic: presence and post/profile notices go only to contacts whose device endpoint is already known, and a queued message that plain TCP/BitTorrent could not relay is delivered as a signed object over the same authenticated channel. Address lookup uses Iroh's n0 DNS/Pkarr services by default (`SNARTNET_IROH_DISCOVERY=off` disables it) with a signed DHT device descriptor as the fallback.
+
+Relay selection is local policy (ADR 0006). Four sources are tried in order — relays you configure (`SNARTNET_RELAY_URLS`), relays a verified contact referred you to with a signed and expiring referral, a community list you opted into (`SNARTNET_COMMUNITY_RELAYS`), and finally Iroh's own production relays — and the first usable one decides which relays the endpoint offers. A referral names a relay; a relay's bearer token travels only as an encrypted grant addressed to your own key, so sharing a private relay does not publish its secret. Each device scores the relays it uses from its own connection status, so a relay that keeps failing moves behind one that works and is eventually dropped, while Iroh's own relays remain the floor. Only `SNARTNET_IROH_RELAY=off` disables relaying; direct connections are preferred in every case.
 
 Private keys are stored locally and are not password-encrypted. Back up the complete `data/` directory securely. Messages use static X25519 keys; forward secrecy, Double Ratchet, group chat, attachments, and key recovery remain future work. The shared low-level service also exposes legacy signed plaintext messages; the desktop chat always encrypts new messages.
 

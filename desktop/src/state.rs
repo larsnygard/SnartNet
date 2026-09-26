@@ -4,7 +4,9 @@
 //! secret keys, so the desktop renders plaintext (or the daemon's decryption
 //! error) instead of holding a keypair of its own.
 
-use super::model::{Contact, DeliveryState, DeliveryStatus, DhtStatus, PeerStatus, TorrentStatus};
+use super::model::{
+    Contact, DeliveryState, DeliveryStatus, DhtStatus, PeerStatus, RelayView, TorrentStatus,
+};
 use serde_json::Value;
 use snartnet_core::{Profile, SignedPost};
 use snartnet_sdk::{Snapshot, SyncMode};
@@ -63,6 +65,8 @@ pub(crate) struct NetworkView {
     /// Durable publication state: whether this host can publish, why it last failed, and how
     /// much inbound is spooled before acknowledgement (M7.3/M7.5).
     pub delivery: DeliveryStatus,
+    /// Relay selection and local relay health (M8).
+    pub relay: RelayView,
     /// Scheduler mode the daemon is actually running, not what was requested.
     pub sync_mode: SyncMode,
     pub paused: bool,
@@ -102,6 +106,7 @@ impl DaemonState {
             torrent: status(extra, "torrent")?,
             peer: status(extra, "peer")?,
             delivery: delivery_status(extra),
+            relay: relay_view(extra),
             sync_mode: sync_mode(extra)?,
             paused: extra
                 .get("paused")
@@ -195,6 +200,15 @@ fn sync_mode(extra: &serde_json::Map<String, Value>) -> Result<SyncMode, String>
 fn delivery_status(extra: &serde_json::Map<String, Value>) -> DeliveryStatus {
     extra
         .get("delivery")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// The relay selection summary. Like the delivery block it is always present, so a window can
+/// tell "n0 production relays" apart from a daemon that reported nothing at all.
+fn relay_view(extra: &serde_json::Map<String, Value>) -> RelayView {
+    extra
+        .get("relay")
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .unwrap_or_default()
 }

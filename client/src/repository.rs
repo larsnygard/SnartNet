@@ -54,6 +54,12 @@ pub struct CanonicalState {
     pub threads: Vec<ChatThread>,
     #[serde(default)]
     pub address: String,
+    /// Relay referrals accepted from contacts, newest first (M8.3).
+    ///
+    /// Only the *signed* referral is stored: the grant inside it is ciphertext for this device,
+    /// so the mirror file and a snapshot carry nothing an attacker could use.
+    #[serde(default)]
+    pub relay_referrals: Vec<crate::relay::RelayReferral>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +216,9 @@ impl IndexedStore {
         let profile = read_json::<Option<SignedProfile>>(&conn, "profile")?.flatten();
         validate_identity(keypair.as_ref(), profile.as_ref())?;
         let address = read_json::<String>(&conn, "address")?.unwrap_or_default();
+        let relay_referrals =
+            read_json::<Vec<crate::relay::RelayReferral>>(&conn, "relay_referrals")?
+                .unwrap_or_default();
 
         let posts = read_rows::<SignedPost>(&conn, "post")?;
         let contacts = read_table::<Contact>(&conn, "contacts", "fingerprint")?;
@@ -221,6 +230,7 @@ impl IndexedStore {
             contacts,
             threads,
             address,
+            relay_referrals,
         })
     }
 
@@ -507,6 +517,7 @@ impl IndexedStore {
         write_json(&tx, "keypair", &state.keypair)?;
         write_json(&tx, "profile", &state.profile)?;
         write_json(&tx, "address", &state.address)?;
+        write_json(&tx, "relay_referrals", &state.relay_referrals)?;
         tx.execute("DELETE FROM contacts", [])
             .map_err(|e| format!("replace contacts: {e}"))?;
         for contact in &state.contacts {
@@ -581,6 +592,9 @@ impl IndexedStore {
                 .get_json("advertise_addr")
                 .map_err(|e| e.to_string())?
                 .unwrap_or_default(),
+            // The legacy record predates relay referrals (M8.3), so an imported state starts
+            // with none and learns them from contacts over the peer channel.
+            relay_referrals: Vec::new(),
         };
         merge_legacy(snapshot, split)
     }

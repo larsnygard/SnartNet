@@ -132,6 +132,14 @@ fn populated_state() -> (DaemonState, Profile, Profile) {
             },
             "peer": {"active": true, "node_id": "node-1", "peer_count": 4, "discovery": "dns-pkarr", "last_error": null},
             "delivery": {"durable": false, "failed": "disk is full", "spooled": 1},
+            "relay": {
+                "plan": "n0 production relays",
+                "source": "n0",
+                "disabled": false,
+                "planned": [],
+                "active": [],
+                "health": []
+            },
             "syncMode": "paused",
             "paused": true,
             "discovery": true,
@@ -194,6 +202,11 @@ fn a_snapshot_becomes_the_view_models_the_terminal_renders() {
     assert!(!network.delivery.durable);
     assert_eq!(network.delivery.failed.as_deref(), Some("disk is full"));
     assert_eq!(network.delivery.spooled, 1);
+    // Relay selection falls back to n0 when nothing else is configured (M8.2).
+    assert_eq!(network.relay.source.as_deref(), Some("n0"));
+    assert_eq!(network.relay.plan, "n0 production relays");
+    assert!(!network.relay.disabled);
+    assert!(network.relay.health.is_empty());
     assert_eq!(state.nearby[0].alias, "carol@laptop");
     assert_eq!(state.nearby[0].address.as_deref(), Some("10.0.0.9:47470"));
 }

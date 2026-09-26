@@ -158,6 +158,40 @@ pub(crate) struct DeliveryStatus {
     pub spooled: u64,
 }
 
+/// How relays were chosen and how they behave, from the snapshot's `relay` key (M8).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct RelayView {
+    /// One line naming the source and the relays in the plan.
+    #[serde(default)]
+    pub plan: String,
+    /// Which source decided the plan (`configured`, `referral`, `community`, or `n0`).
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Whether relaying is switched off entirely.
+    #[serde(default)]
+    pub disabled: bool,
+    /// The relay URLs this client applied to its endpoint.
+    #[serde(default)]
+    pub active: Vec<String>,
+    /// Local observations, best first (M8.4).
+    #[serde(default)]
+    pub health: Vec<RelayHealthView>,
+}
+
+/// One relay's local health, as the daemon scored it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct RelayHealthView {
+    pub url: String,
+    #[serde(default)]
+    pub connected: bool,
+    #[serde(default)]
+    pub score: i64,
+    #[serde(default)]
+    pub failures: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FormState {
     pub username_input: String,

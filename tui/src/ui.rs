@@ -475,6 +475,42 @@ fn network(frame: &mut Frame, app: &App, area: Rect) {
             ),
         ));
     }
+    // Relays are a policy decision: name the source, then how each one behaves locally
+    // (M8.2/M8.4).
+    if !status.relay.plan.is_empty() {
+        lines.push(kv("Relay selection", status.relay.plan.clone()));
+    }
+    if status.relay.disabled {
+        // A device with relaying off is only reachable through its direct addresses.
+        lines.push(Line::from(vec![
+            Span::styled("Relaying is switched off: ", Style::default().fg(WARNING)),
+            Span::styled(
+                "only direct addresses are used",
+                Style::default().fg(WARNING),
+            ),
+        ]));
+    }
+    if let Some(source) = &status.relay.source {
+        lines.push(kv("Relay source", source.clone()));
+    }
+    lines.push(kv("Relays applied", status.relay.active.len().to_string()));
+    for relay in &status.relay.health {
+        let detail = format!(
+            "{} · score {} · {} failure(s){}",
+            if relay.connected {
+                "connected"
+            } else {
+                "not connected"
+            },
+            relay.score,
+            relay.failures,
+            match &relay.last_error {
+                Some(error) => format!(" · {error}"),
+                None => String::new(),
+            }
+        );
+        lines.push(kv(&relay.url, detail));
+    }
     for (name, summary) in &status.subsystems {
         lines.push(kv(name, summary.clone()));
     }

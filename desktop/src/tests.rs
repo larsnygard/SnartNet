@@ -141,6 +141,22 @@ fn populated_snapshot() -> (DaemonState, Profile, Profile) {
                 "failed": "disk is full",
                 "spooled": 2
             },
+            "relay": {
+                "plan": "referral (1): https://relay.example.com/",
+                "source": "referral",
+                "disabled": false,
+                "planned": ["https://relay.example.com/"],
+                "active": ["https://relay.example.com/"],
+                "health": [
+                    {
+                        "url": "https://relay.example.com/",
+                        "connected": true,
+                        "score": 101,
+                        "failures": 0,
+                        "lastError": null
+                    }
+                ]
+            },
             "paused": true,
             "discovery": true,
             "lastSync": "10:02",
@@ -233,6 +249,14 @@ fn a_snapshot_becomes_the_view_models_the_window_renders() {
     assert!(network.delivery.durable);
     assert_eq!(network.delivery.failed.as_deref(), Some("disk is full"));
     assert_eq!(network.delivery.spooled, 2);
+    // Relay selection names its source and scores each relay locally (M8.2/M8.4).
+    assert_eq!(network.relay.source.as_deref(), Some("referral"));
+    assert!(!network.relay.disabled);
+    assert_eq!(network.relay.active, vec!["https://relay.example.com/"]);
+    assert_eq!(network.relay.health.len(), 1);
+    assert!(network.relay.health[0].connected);
+    assert_eq!(network.relay.health[0].score, 101);
+    assert!(network.relay.plan.contains("relay.example.com"));
 }
 
 #[test]

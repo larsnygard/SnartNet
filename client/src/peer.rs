@@ -19,13 +19,14 @@
 use crate::{
     device::{CertificateError, DeviceCertificate, DeviceKey, PinnedCertificate, CAPABILITY_PEER},
     discovery::lan_unix_secs,
+    relay::{parse_relay_url, RelayHealth, RelayPlan, RelayReferral},
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use iroh::{
     address_lookup::{DnsAddressLookup, PkarrPublisher, PkarrResolver},
     endpoint::{presets, Connection, ReadExactError, RecvStream, SendStream, VarInt},
     protocol::{AcceptError, ProtocolHandler, Router},
-    Endpoint, EndpointAddr, EndpointId, PublicKey, RelayMode, TransportAddr,
+    Endpoint, EndpointAddr, EndpointId, PublicKey, RelayUrl, TransportAddr, Watcher,
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -95,9 +96,42 @@ pub const CLOSE_STALE_CERTIFICATE: u32 = 4;
 /// which is what offline tests and air-gapped deployments use.
 pub const ENV_DISCOVERY_MODE: &str = "SNARTNET_IROH_DISCOVERY";
 
-/// Environment variable selecting which iroh relay infrastructure to use. One of
-/// `staging` (default; iroh's test relays), `prod`/`production`, or `off`/`disabled`.
-pub const ENV_RELAY_MODE: &str = "SNARTNET_IROH_RELAY";
+/// Environment variable selecting which iroh relay infrastructure to use (M8).
+///
+/// The relay *policy* lives in [`crate::relay`]: this constant is re-exported so the name a
+/// deployment already uses keeps working, while the resolving happens
+/// [`crate::relay::relays_disabled_from_env`] and [`RelayPlan`].
+pub use crate::relay::ENV_RELAY_MODE;
+
+/// Frame payload key under which a peer channel object carries a relay referral (M8.3).
+pub const RELAY_REFERRAL_KEY: &str = "relay_referral";
+
+/// The relay URLs a plan contributes to the endpoint's map.
+fn plan_relay_urls(plan: &RelayPlan) -> Vec<RelayUrl> {
+    plan.relays()
+        .iter()
+        .filter_map(|relay| parse_relay_url(&relay.url).ok())
+        .collect()
+}
+
+/// Iroh's own production relay URLs, the floor when every planned relay is failing.
+fn default_relay_urls() -> Vec<RelayUrl> {
+    iroh::defaults::prod::default_relay_map().urls::<Vec<_>>()
+}
+
+/// Key under which one relay referral is sent in a [`Frame::Object`].
+///
+/// A referral travels as an object on the authenticated channel rather than as a new frame
+/// kind, so a peer that is older than this feature ignores it instead of failing the
+/// conversation, and forwarding it later needs no protocol change.
+pub fn referral_object(referral: &RelayReferral) -> Value {
+    serde_json::json!({ RELAY_REFERRAL_KEY: referral })
+}
+
+/// Whether an object is a relay referral, and if so which one.
+pub fn referral_from_object(object: &Value) -> Option<RelayReferral> {
+    serde_json::from_value(object.get(RELAY_REFERRAL_KEY)?.clone()).ok()
+}
 
 /// What kind of change a peer notice is reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,16 +159,19 @@ pub enum DiscoveryMode {
 pub struct PeerOptions {
     /// Address discovery strategy.
     pub discovery: DiscoveryMode,
-    /// Relay strategy used to reach peers behind NAT.
-    pub relay: RelayMode,
+    /// Relay selection: configured, referred, community, and n0 fallback (M8.2).
+    pub relay: RelayPlan,
 }
 
 impl PeerOptions {
     /// Options for a real deployment, read from the environment.
+    ///
+    /// A session that holds verified referrals builds a richer plan with
+    /// [`RelayPlan::build`]; this is the plan for a node with no referrals yet.
     pub fn from_env() -> Self {
         Self {
             discovery: discovery_mode_from_env(),
-            relay: relay_mode_from_env(),
+            relay: RelayPlan::from_env(&RelayHealth::default()),
         }
     }
 
@@ -142,7 +179,7 @@ impl PeerOptions {
     pub fn local() -> Self {
         Self {
             discovery: DiscoveryMode::Off,
-            relay: RelayMode::Disabled,
+            relay: RelayPlan::disabled(),
         }
     }
 }
@@ -156,20 +193,6 @@ pub fn discovery_mode_from_env() -> DiscoveryMode {
             _ => DiscoveryMode::DnsPkarr,
         },
         Err(_) => DiscoveryMode::DnsPkarr,
-    }
-}
-
-/// Picks the iroh [`RelayMode`] from [`ENV_RELAY_MODE`]. Direct NAT-to-NAT connections
-/// frequently need a relay to punch through, so this defaults to iroh's staging (test)
-/// relay servers rather than disabling relays.
-pub fn relay_mode_from_env() -> RelayMode {
-    match std::env::var(ENV_RELAY_MODE) {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "prod" | "production" | "default" => RelayMode::Default,
-            "off" | "disabled" | "none" => RelayMode::Disabled,
-            _ => RelayMode::Staging,
-        },
-        Err(_) => RelayMode::Staging,
     }
 }
 
@@ -616,9 +639,38 @@ struct PeerInner {
     /// Durable sink for objects, installed by the session before the endpoint accepts.
     persist: Mutex<Option<Arc<dyn InboundPersist>>>,
     targets: Mutex<Vec<PeerTarget>>,
+    /// Relay URLs this client added to the endpoint's map (M8.4).
+    ///
+    /// Kept so a plan change only ever removes relays *we* added: a relay iroh configured for
+    /// itself, or one another component added, is not ours to take away.
+    applied_relays: Mutex<Vec<RelayUrl>>,
+    /// When each contact last received a relay referral, and which one (M8.3).
+    referrals_sent: Mutex<BTreeMap<String, SentReferral>>,
     active: AtomicBool,
     status: Mutex<PeerStatus>,
 }
+
+/// What the endpoint reports about one home relay (M8.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayObservation {
+    pub url: String,
+    pub connected: bool,
+    pub last_error: Option<String>,
+}
+
+/// The referral a contact last received, so an unchanged one is not re-sent (M8.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SentReferral {
+    relay: String,
+    expires_at: u64,
+    sent_at: u64,
+}
+
+/// How long an unchanged referral stays unsent before it is refreshed.
+///
+/// Long enough that a referral is not re-dialed on every sync tick, short enough that a
+/// contact who came online after a long absence converges within a day.
+pub const REFERRAL_REFRESH_SECS: u64 = 12 * 60 * 60;
 
 impl PeerInner {
     fn new(certificate: DeviceCertificate, options: PeerOptions) -> Self {
@@ -630,6 +682,8 @@ impl PeerInner {
             accepted: Mutex::new(Vec::new()),
             persist: Mutex::new(None),
             targets: Mutex::new(Vec::new()),
+            applied_relays: Mutex::new(Vec::new()),
+            referrals_sent: Mutex::new(BTreeMap::new()),
             active: AtomicBool::new(false),
             status: Mutex::new(PeerStatus {
                 active: false,
@@ -984,9 +1038,10 @@ impl PeerNode {
                 .map_err(|e| format!("peer runtime failed: {e}"))?,
         );
         let discovery = options.discovery;
+        let relay = options.relay.clone();
         let mut builder = Endpoint::builder(presets::Minimal)
             .secret_key(device.secret_key().clone())
-            .relay_mode(options.relay.clone())
+            .relay_mode(relay.relay_mode())
             .alpns(vec![PEER_ALPN.to_vec()]);
         if discovery == DiscoveryMode::DnsPkarr {
             // M6.5: publish our endpoint to iroh's n0 DNS/Pkarr service and resolve contacts
@@ -1015,6 +1070,12 @@ impl PeerNode {
         if let Ok(mut status) = inner.status.lock() {
             status.node_id = Some(endpoint.id().to_string());
         }
+        // Remember the relays the plan contributed, so a later plan change only removes what
+        // this client added (M8.4).
+        let applied = plan_relay_urls(&relay);
+        if let Ok(mut applied_relays) = inner.applied_relays.lock() {
+            *applied_relays = applied;
+        }
         Ok(Self {
             runtime,
             endpoint,
@@ -1031,6 +1092,133 @@ impl PeerNode {
     /// Addresses this endpoint is bound to, for tests and diagnostics.
     pub fn bound_sockets(&self) -> Vec<SocketAddr> {
         self.endpoint.bound_sockets()
+    }
+
+    /// What the endpoint currently reports about each known home relay (M8.4).
+    ///
+    /// Sampling is deliberately pull-based: a sync tick is when the session wants to score,
+    /// and a watcher that is only read when asked cannot spin in the background.
+    pub fn relay_status(&self) -> Vec<RelayObservation> {
+        let mut watcher = self.endpoint.home_relay_status();
+        watcher
+            .get()
+            .into_iter()
+            .map(|status| RelayObservation {
+                url: status.url().to_string(),
+                connected: status.is_connected(),
+                last_error: status.last_error().map(|error| error.to_string()),
+            })
+            .collect()
+    }
+
+    /// The relays this client added to the endpoint's map (M8.4).
+    pub fn applied_relays(&self) -> Vec<String> {
+        self.inner
+            .applied_relays
+            .lock()
+            .map(|relays| relays.iter().map(RelayUrl::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    /// Reconcile the live relay map with a plan (M8.4).
+    ///
+    /// This is the *safe* update path: iroh can add and remove relays on a running endpoint,
+    /// so a plan change (a new referral, or a relay that keeps failing) takes effect without
+    /// touching the device key, which means every contact's certificate pin stays valid.
+    ///
+    /// Two rules keep an outage from making us unreachable. Only relays in
+    /// [`PeerInner::applied_relays`] are removed, so relays iroh or another component
+    /// configured stay; and when every relay in the plan is demoted, iroh's own production
+    /// relays are added back as a floor. A disabled plan changes nothing here — iroh binds
+    /// that mode at startup — and is reported as such instead.
+    pub fn apply_relay_map(
+        &self,
+        plan: &RelayPlan,
+        health: &RelayHealth,
+    ) -> Result<Vec<String>, String> {
+        if plan.is_disabled() || self.endpoint.is_closed() {
+            return Ok(self.applied_relays());
+        }
+        let mut desired: Vec<RelayUrl> = plan
+            .relays()
+            .iter()
+            .filter_map(|relay| parse_relay_url(&relay.url).ok())
+            .collect();
+        if plan.all_demoted(health) {
+            // Everything the plan knows is failing: iroh's default relays become the floor, so
+            // a broken referral or a dead community relay degrades instead of disconnecting.
+            desired.extend(default_relay_urls());
+        }
+        desired.sort();
+        desired.dedup();
+
+        let previous = self
+            .inner
+            .applied_relays
+            .lock()
+            .map(|relays| relays.clone())
+            .unwrap_or_default();
+        self.runtime.block_on(async {
+            for url in previous.iter().filter(|url| !desired.contains(url)) {
+                self.endpoint.remove_relay(url).await;
+            }
+            for relay in plan.relays() {
+                let Ok(url) = parse_relay_url(&relay.url) else {
+                    continue;
+                };
+                if previous.contains(&url) {
+                    continue;
+                }
+                let mut config = iroh::RelayConfig::from(url.clone());
+                if let Some(token) = &relay.token {
+                    config = config.with_auth_token(token.clone());
+                }
+                self.endpoint
+                    .insert_relay(url, std::sync::Arc::new(config))
+                    .await;
+            }
+        });
+        let applied: Vec<String> = desired.iter().map(RelayUrl::to_string).collect();
+        if let Ok(mut relays) = self.inner.applied_relays.lock() {
+            *relays = desired;
+        }
+        Ok(applied)
+    }
+
+    /// Send one relay referral to a contact, unless the same one was sent recently (M8.3).
+    ///
+    /// Returns whether a frame was delivered. The throttle exists because a referral is only
+    /// useful when it changed: re-dialing every contact on every sync tick to repeat an
+    /// unchanged recommendation would cost a connection per tick for no information.
+    pub fn send_referral(&self, target: &PeerTarget, referral: &RelayReferral, now: u64) -> bool {
+        let unchanged = self
+            .inner
+            .referrals_sent
+            .lock()
+            .ok()
+            .and_then(|sent| sent.get(&target.fingerprint).cloned())
+            .is_some_and(|sent| {
+                sent.relay == referral.relay
+                    && sent.expires_at == referral.expires_at
+                    && now.saturating_sub(sent.sent_at) < REFERRAL_REFRESH_SECS
+            });
+        if unchanged {
+            return false;
+        }
+        let delivered = self.send_object(target, &referral_object(referral));
+        if delivered {
+            if let Ok(mut sent) = self.inner.referrals_sent.lock() {
+                sent.insert(
+                    target.fingerprint.clone(),
+                    SentReferral {
+                        relay: referral.relay.clone(),
+                        expires_at: referral.expires_at,
+                        sent_at: now,
+                    },
+                );
+            }
+        }
+        delivered
     }
 
     /// Replace the set of contacts allowed to talk to us.
@@ -1278,6 +1466,7 @@ impl PeerHandle {
 mod tests {
     use super::*;
     use crate::device::{CAPABILITY_CHAT, DEFAULT_CAPABILITIES, DEVICE_CERT_TTL_SECS};
+    use crate::relay::{RelayInputs, DEMOTE_AFTER_FAILURES};
     use serde_json::json;
     use snartnet_core::{KeyInfo, KeyPair, Profile, SignedProfile};
     use std::net::{IpAddr, Ipv4Addr};
@@ -1345,9 +1534,39 @@ mod tests {
         }
 
         fn node(&self) -> PeerNode {
-            PeerNode::open_with(&self.key, self.certificate.clone(), PeerOptions::local())
+            self.node_with(PeerOptions::local())
+        }
+
+        fn node_with(&self, options: PeerOptions) -> PeerNode {
+            PeerNode::open_with(&self.key, self.certificate.clone(), options)
                 .expect("a local endpoint binds")
         }
+    }
+
+    /// A plan built from a plain URL list, the way a configured or community list is planned.
+    fn plan_for(urls: &[String]) -> RelayPlan {
+        RelayPlan::build(
+            RelayInputs {
+                disabled: false,
+                staging: false,
+                configured: urls,
+                referrals: &[],
+                community: &[],
+            },
+            &RelayHealth::default(),
+        )
+    }
+
+    /// Normalized relay URLs, matching the keys a plan and a health score use.
+    fn relay_urls(values: &[&str]) -> Vec<String> {
+        values
+            .iter()
+            .map(|value| {
+                parse_relay_url(value)
+                    .expect("a usable test relay URL")
+                    .to_string()
+            })
+            .collect()
     }
 
     /// Socket addresses a peer on this machine can actually dial.
@@ -1861,6 +2080,139 @@ mod tests {
         );
     }
 
+    /// A relay that cannot be reached must not stop a direct delivery (M8.5).
+    ///
+    /// This is the outage case that matters: a dead relay leaves the endpoint with its direct
+    /// addresses, and the contact is still reachable over them.
+    #[test]
+    fn an_unreachable_relay_does_not_block_a_direct_delivery() {
+        let alice = Identity::live("alice");
+        let bob = Identity::live("bob");
+        let dead = relay_urls(&["http://127.0.0.1:1"]);
+        let alice_node = alice.node_with(PeerOptions {
+            discovery: DiscoveryMode::Off,
+            relay: plan_for(&dead),
+        });
+        let bob_node = bob.node();
+        alice_node.set_contacts(vec![bob.policy()]);
+        bob_node.set_contacts(vec![alice.policy()]);
+        // The dead relay really is in the endpoint's map, so the delivery below proves the
+        // path that worked rather than a relay that was never configured.
+        assert_eq!(alice_node.applied_relays(), dead);
+        assert!(alice_node
+            .relay_status()
+            .iter()
+            .all(|status| !status.url.is_empty()));
+
+        let object = json!({"kind": "post", "content": "hello bob"});
+        let target = target_for(&bob, &bob_node);
+        let delivery = alice_node.runtime.block_on(handle(&alice_node).deliver(
+            &target,
+            vec![Frame::Object {
+                object: object.clone(),
+            }],
+        ));
+        assert_eq!(
+            delivery.expect("a dead relay must not fail the direct path"),
+            1
+        );
+        assert_eq!(
+            bob_node.drain_inbox(),
+            vec![PeerInbound::Object {
+                fingerprint: alice.fingerprint(),
+                endpoint_id: alice_node.node_id(),
+                object,
+            }]
+        );
+    }
+
+    /// A plan change is applied to a running endpoint without changing the device identity
+    /// (M8.4): every contact's certificate pin stays valid across it.
+    #[test]
+    fn a_relay_plan_is_reconciled_on_a_running_endpoint() {
+        let alice = Identity::live("alice");
+        let one = relay_urls(&["https://one.example.com"]);
+        let node = alice.node_with(PeerOptions {
+            discovery: DiscoveryMode::Off,
+            relay: plan_for(&one),
+        });
+        let identity = node.node_id();
+        assert_eq!(node.applied_relays(), one);
+        let health = RelayHealth::default();
+
+        // A new plan adds its relay and keeps the one that is still wanted.
+        let both = relay_urls(&["https://one.example.com", "https://two.example.com"]);
+        let applied = node
+            .apply_relay_map(&plan_for(&both), &health)
+            .expect("a running endpoint accepts a map change");
+        assert_eq!(applied.len(), 2);
+        assert!(applied.iter().any(|url| url.contains("two.example.com")));
+
+        // Dropping a relay removes exactly that one, and the endpoint id is unchanged.
+        let two = relay_urls(&["https://two.example.com"]);
+        let applied = node.apply_relay_map(&plan_for(&two), &health).unwrap();
+        assert_eq!(applied, two);
+        assert_eq!(node.node_id(), identity, "the device key never changes");
+
+        // A disabled plan changes nothing here: iroh binds that mode when the endpoint opens.
+        assert_eq!(
+            node.apply_relay_map(&RelayPlan::disabled(), &health)
+                .unwrap(),
+            two
+        );
+
+        // When every planned relay is failing, iroh's own relays are added as the floor, so an
+        // outage of a referred relay degrades instead of disconnecting.
+        let mut failing = RelayHealth::default();
+        for _ in 0..DEMOTE_AFTER_FAILURES {
+            failing.observe("https://two.example.com", false, Some("refused".into()));
+        }
+        let applied = node.apply_relay_map(&plan_for(&two), &failing).unwrap();
+        assert!(
+            applied.len() > two.len(),
+            "the n0 floor joins a plan whose relays all fail: {applied:?}"
+        );
+        assert!(applied.contains(&two[0]));
+    }
+
+    /// An unchanged referral is sent once, and a changed one goes out immediately (M8.3).
+    #[test]
+    fn a_referral_is_re_sent_only_when_it_changed() {
+        let alice = Identity::live("alice");
+        let bob = Identity::live("bob");
+        let alice_node = alice.node();
+        let bob_node = bob.node();
+        alice_node.set_contacts(vec![bob.policy()]);
+        bob_node.set_contacts(vec![alice.policy()]);
+        let keypair = &alice.keypair;
+        let now = lan_unix_secs();
+        let referral =
+            RelayReferral::issue(keypair, "https://relay.example.com", now, 3_600, None).unwrap();
+        let target = target_for(&bob, &bob_node);
+        assert!(alice_node.send_referral(&target, &referral, now));
+        // The same recommendation is not re-dialed on the next tick.
+        assert!(!alice_node.send_referral(&target, &referral, now + 30));
+        assert_eq!(
+            bob_node.drain_inbox(),
+            vec![PeerInbound::Object {
+                fingerprint: alice.fingerprint(),
+                endpoint_id: alice_node.node_id(),
+                object: referral_object(&referral),
+            }]
+        );
+        // A referral that changed goes out right away, throttle or not.
+        let moved =
+            RelayReferral::issue(keypair, "https://other.example.com", now + 31, 3_600, None)
+                .unwrap();
+        assert!(alice_node.send_referral(&target, &moved, now + 31));
+        let delivered = bob_node.drain_inbox();
+        assert_eq!(delivered.len(), 1);
+        let PeerInbound::Object { object, .. } = &delivered[0] else {
+            panic!("a referral travels as an object");
+        };
+        assert_eq!(referral_from_object(object).unwrap().relay, moved.relay);
+    }
+
     #[test]
     fn two_contacts_authenticate_and_exchange_an_object() {
         let alice = Identity::live("alice");
@@ -2013,7 +2365,7 @@ mod tests {
             let (endpoint, router) = runtime.block_on(async {
                 let endpoint = Endpoint::builder(presets::Minimal)
                     .secret_key(identity.key.secret_key().clone())
-                    .relay_mode(RelayMode::Disabled)
+                    .relay_mode(PeerOptions::local().relay.relay_mode())
                     .alpns(vec![PEER_ALPN.to_vec()])
                     .bind()
                     .await
