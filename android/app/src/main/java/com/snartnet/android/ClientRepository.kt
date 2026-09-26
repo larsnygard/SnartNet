@@ -30,10 +30,15 @@ object ClientRepository {
     private val pending = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private var initialized = false
     @Volatile private var visible = false
+    private var context: Context? = null
+    private val powerManager: android.os.PowerManager?
+        get() = context?.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
 
     fun start(context: Context) {
         if (initialized) return
         initialized = true
+        this.context = context.applicationContext
+        registerPowerObservers(context.applicationContext)
         val root = File(context.filesDir, "client").absolutePath
         commands.execute {
             try {
@@ -48,8 +53,56 @@ object ClientRepository {
         }
         network.scheduleWithFixedDelay({ if (visible) sync() }, 2, 4, TimeUnit.SECONDS)
     }
-    fun observe(observer: () -> Unit) { observers.add(observer); visible = true; observer() }
-    fun remove(observer: () -> Unit) { observers.remove(observer); visible = observers.isNotEmpty() }
+    fun observe(observer: () -> Unit) { observers.add(observer); visible = true; reportLifecycle(); observer() }
+    fun remove(observer: () -> Unit) {
+        observers.remove(observer)
+        visible = observers.isNotEmpty()
+        reportLifecycle()
+    }
+
+    /**
+     * Tell the backend service what the app and the device are doing (M10.2). The service owns
+     * the sync cadence, so this is how a phone that is hidden and saving battery stops working
+     * instead of waking the radio every minute.
+     */
+    private fun reportLifecycle() {
+        val powerSave = powerManager?.isPowerSaveMode ?: false
+        val charging = batteryCharging()
+        commands.execute {
+            try {
+                decode(NativeBridge.nativeSetLifecycle(visible, powerSave, charging))
+            } catch (e: Throwable) {
+                // A lifecycle report is not worth a user-visible error: the next one retries.
+            }
+        }
+    }
+
+    /** A power-save or charging change invalidates what the service was last told. */
+    fun lifecycleChanged() = reportLifecycle()
+
+    /**
+     * Whether the device is charging. Read from the sticky battery broadcast so it works back to
+     * API 24, and defaulted to "not charging" when the platform says nothing.
+     */
+    private fun batteryCharging(): Boolean {
+        val status = context
+            ?.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+            ?.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
+            ?: -1
+        return status == android.os.BatteryManager.BATTERY_STATUS_CHARGING ||
+            status == android.os.BatteryManager.BATTERY_STATUS_FULL
+    }
+
+    private fun registerPowerObservers(source: Context) {
+        val filter = android.content.IntentFilter().apply {
+            addAction(android.os.PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+            addAction(android.content.Intent.ACTION_POWER_CONNECTED)
+            addAction(android.content.Intent.ACTION_POWER_DISCONNECTED)
+        }
+        source.registerReceiver(object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: android.content.Intent?) = lifecycleChanged()
+        }, filter)
+    }
     private fun changed() { observers.toList().forEach { it() } }
     private fun decode(raw: String): JSONObject {
         val result = JSONObject(raw)

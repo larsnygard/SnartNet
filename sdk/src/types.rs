@@ -94,6 +94,11 @@ pub enum Command {
     Read {
         recipient: String,
     },
+    /// Pause or resume the daemon's scheduler (M10.2: a backgrounded phone that is saving
+    /// battery pauses instead of waking the radio).
+    Pause {
+        paused: bool,
+    },
     Discovery {
         enabled: bool,
     },

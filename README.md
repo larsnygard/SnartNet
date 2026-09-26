@@ -126,7 +126,7 @@ The active delivery work is tracked in the [implementation plan](docs/IMPLEMENTA
 | `sdk/` | Shared local API contract and Rust frontend client |
 | `daemon/` | Persistent backend and authenticated loopback API |
 | `client/src/device.rs`, `peer.rs` | Per-device Iroh identity, device certificates, and the authenticated `snartnet/peer/1` contact protocol |
-| `android/`, `android-bridge/`, `client/` | Android client, JNI adapter, and shared native client session; see [Android setup](android/README.md) |
+| `android/`, `android-bridge/`, `client/` | Android client, its JNI adapter to the shared backend service, and the shared native client; see [Android setup](android/README.md) |
 | `legacy/PWA/` | Archived web reference with its own npm manifest |
 | `RFC`, `specs/`, `docs/ROADMAP.md` | Protocol proposals and future work, not a list of shipped features |
 

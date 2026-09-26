@@ -8,10 +8,10 @@ roadmap.
 ## Status
 
 - **Status:** Active
-- **Current milestone:** M10 — Android and power-aware operation
+- **Current milestone:** M11 — Hardening and release readiness
 - **Last updated:** 2026-09-26
-- **Last completed:** M9.1–M9.5 — contact replication with encrypted leases and signed
-  receipts (M8 relays and M7 durable delivery before it; M4.3 tray: Linux only)
+- **Last completed:** M10.1–M10.3 — Android on the shared backend service with
+  power-aware sync (M9 replication and M8 relays before it; M4.3 tray: Linux only)
 - **Known blockers:** None
 
 ## Working agreement
@@ -119,9 +119,9 @@ with the tray disabled.*
 
 ## M10 — Android and power-aware operation
 
-- [ ] **M10.1** Route Android through the shared backend service.
-- [ ] **M10.2** Integrate Android foreground/background and battery-saver state.
-- [ ] **M10.3** Enforce mobile storage defaults and test lifecycle recovery.
+- [x] **M10.1** Route Android through the shared backend service.
+- [x] **M10.2** Integrate Android foreground/background and battery-saver state.
+- [x] **M10.3** Enforce mobile storage defaults and test lifecycle recovery.
 
 ## M11 — Hardening and release readiness
 
@@ -514,5 +514,46 @@ with the tray disabled.*
   -- -D warnings`, and `cargo test --workspace` pass (94 client, 42 core, 3 daemon,
   17 desktop, 10 integration, 9 terminal tests).
 - Next: M10.1 — route Android through the shared backend service.
+- Blockers: none.
+
+### 2026-09-26 — M10
+
+- Completed: M10.1–M10.3. Android is now a frontend of the shared backend service like
+  every other frontend, and what it does in the background is decided by its lifecycle and
+  the device's power state rather than by the activity.
+- Delivered: M10.1. `android-bridge` no longer holds a `Session`. `nativeInit` sets
+  `SNARTNET_PLATFORM=mobile`, imports a legacy identity if one exists, starts
+  `snartnet-daemon` inside the app process on an OS-assigned loopback port, waits until
+  `GET /v1/health` answers (bounded at 20s, because a metadata file can appear before the
+  listener is bound), and returns the flattened snapshot the Kotlin UI already consumed.
+  `nativeCommand` forwards to the typed command API, `nativeSync` runs one round, and the
+  QR commands stay in the bridge because they are image work rather than state changes.
+  There is therefore one writer of local state however many activities exist.
+- Delivered: M10.2. `nativeSetLifecycle(visible, powerSave, charging)` maps the app and
+  the device to a daemon sync mode: on screen is `Balanced`, hidden while saving battery
+  and not charging is `Paused` (no radio work at all), hidden otherwise stays `Balanced`,
+  and `AlwaysOn` is never chosen on a phone. Only a change is sent. `ClientRepository`
+  reports it from `observe`/`remove` and from power-save and charging broadcasts, and
+  `SnartNetService` is a `dataSync` foreground service started when the app leaves the
+  screen, so the process outlives the activity and the mode — not the lifecycle — decides
+  what work happens.
+- Delivered: M10.3. The mobile platform value selects the mobile storage defaults (no
+  replica hosting, 64 MiB quota, 7-day leases) and the Network screen reports them; a
+  process that is killed anyway loses nothing committed, because the service imports its
+  store (outbox and inbound spool included) on the next start.
+- Delivered: the bridge crate builds as `cdylib` and `rlib` so it can be tested, and gains
+  a unit test pinning the lifecycle policy: on screen synchronizes, hidden-and-saving does
+  not, charging restored, and `AlwaysOn` is never selected. Lifecycle recovery at the
+  service level is already covered by the daemon contract test (paused refuses sync,
+  resumed syncs without a restart).
+- Delivered: the manifest declares the foreground-service permissions and the service, and
+  `android/README.md` documents the bridge surface, the policy, the mobile defaults, the
+  recovery story, and the in-process limitation plainly.
+- Validation: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+  -- -D warnings`, and `cargo test --workspace` pass (94 client, 42 core, 3 daemon,
+  17 desktop, 10 integration, 9 terminal, 1 bridge test). The Kotlin app cannot be
+  compiled in this environment; the Android build script and Gradle configuration are
+  unchanged apart from the new service, permissions, and lifecycle calls.
+- Next: M11.1 — add resource limits, backoff, and bounded queues.
 - Blockers: none.
 

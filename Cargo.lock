@@ -8175,6 +8175,8 @@ dependencies = [
  "serde_json",
  "snartnet-client",
  "snartnet-core",
+ "snartnet-daemon",
+ "snartnet-sdk",
 ]
 
 [[package]]

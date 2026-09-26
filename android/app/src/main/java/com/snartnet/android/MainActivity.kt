@@ -93,8 +93,21 @@ class MainActivity : AppCompatActivity() {
         if (savedInstanceState == null) acceptIntent(intent)
         repo.start(applicationContext)
     }
-    override fun onStart() { super.onStart(); repo.observe(observer) }
-    override fun onStop() { repo.remove(observer); super.onStop() }
+    override fun onStart() {
+        super.onStart()
+        repo.observe(observer)
+        // On screen: the process is alive because the user is looking at it, so the service is
+        // not needed yet.
+        SnartNetService.stop(this)
+    }
+
+    override fun onStop() {
+        repo.remove(observer)
+        // Hidden: keep the backend service (and the queued work it owns) alive, and let the
+        // lifecycle report decide whether it may use the network at all (M10.2).
+        SnartNetService.start(this)
+        super.onStop()
+    }
     override fun onDestroy() { io.shutdown(); super.onDestroy() }
     override fun onSaveInstanceState(out: Bundle) {
         out.putString("exportFormat", exportFormat); out.putBoolean("exporting", exporting)

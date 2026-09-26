@@ -107,7 +107,10 @@ use the current desktop workflows or the SDK. `--data-dir` / `SNARTNET_DATA_DIR`
 select the data directory; otherwise `SNARTNET_HOME/data` or `~/.snartnet/data`
 is used. Foreground run is the diagnostic path for startup failures.
 
-Desktop and Android still use their existing backend paths until M4/M10. Do not
-run the legacy desktop and daemon against the same data directory during this
-transition. Runtime token and metadata permissions are 0600 on Unix; Windows
-inherits directory ACLs, whose hardening is part of the release platform audit.
+Desktop (M4) and Android (M10) are both frontends of this service: the desktop
+starts a separate daemon process with `ensure_running`, and Android starts the
+same daemon inside the app process and forwards to it over the loopback API, so
+one writer owns local state either way. Do not run the legacy desktop and daemon
+against the same data directory. Runtime token and metadata permissions are 0600
+on Unix; Windows inherits directory ACLs, whose hardening is part of the release
+platform audit.

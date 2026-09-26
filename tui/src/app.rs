@@ -801,6 +801,8 @@ fn success_line(command: &Command) -> String {
         Command::Post { .. } => "Post published to your feed.",
         Command::Message { .. } => "Message queued by the daemon.",
         Command::Read { .. } => "Conversation marked read.",
+        Command::Pause { paused: true } => "Sync paused.",
+        Command::Pause { paused: false } => "Sync resumed.",
         Command::Discovery { enabled: true } => "Discovery turned on.",
         Command::Discovery { enabled: false } => "Discovery turned off.",
         Command::Storage {
@@ -826,6 +828,7 @@ fn failure_prefix(command: &Command) -> &'static str {
         Command::Post { .. } => "Could not publish the post:",
         Command::Message { .. } => "Could not send the message:",
         Command::Read { .. } => "Could not mark the conversation read:",
+        Command::Pause { .. } => "Could not change sync:",
         Command::Discovery { .. } => "Could not change discovery:",
         Command::Storage { .. } => "Could not save storage settings:",
         Command::CleanupStorage => "Could not drop replicas:",
